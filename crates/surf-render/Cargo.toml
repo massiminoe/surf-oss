@@ -1,0 +1,13 @@
+[package]
+name = "surf-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal wgpu renderer for osx-surf"
+
+[dependencies]
+surf-core = { workspace = true }
+surf-map = { workspace = true }
+bytemuck = { workspace = true }
+glyphon = { workspace = true }
+wgpu = { workspace = true }

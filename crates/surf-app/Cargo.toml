@@ -1,0 +1,27 @@
+[package]
+name = "surf-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "winit app loop for osx-surf"
+default-run = "osx-surf"
+
+[lib]
+name = "surf_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "osx-surf"
+path = "src/main.rs"
+
+[dependencies]
+surf-core = { workspace = true }
+surf-map = { workspace = true }
+surf-render = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }

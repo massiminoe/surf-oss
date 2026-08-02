@@ -1,0 +1,38 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_summit",
+  "trackType": "linear",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": true,
+      "start": {
+        "mins": [1104.0, -1312.0, 11423.876953125],
+        "maxs": [1892.0, 1320.0, 11780.0]
+      },
+      "end": {
+        "mins": [-15361.0, -2561.0, -6144.0],
+        "maxs": [-13327.0, 2561.0, -4094.0]
+      },
+      "checkpoints": [
+        {
+          "mins": [11007.0, -13569.0, 7168.0],
+          "maxs": [11073.0, -12287.0, 8386.0]
+        },
+        {
+          "mins": [11007.0, 12287.0, 7168.0],
+          "maxs": [11073.0, 13569.0, 8386.0]
+        },
+        {
+          "mins": [-1537.0, -2049.0, 576.0],
+          "maxs": [-1407.0, 2049.0, 2178.0]
+        },
+        {
+          "mins": [12927.0, -4033.0, -3072.0],
+          "maxs": [14977.0, 4033.0, -2814.0]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/surf-core",
+    "crates/surf-map",
+    "crates/surf-render",
+    "crates/surf-app",
+]
+default-members = [
+    "crates/surf-core",
+    "crates/surf-map",
+    "crates/surf-render",
+    "crates/surf-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Max"]
+
+[workspace.dependencies]
+surf-core = { path = "crates/surf-core" }
+surf-map = { path = "crates/surf-map" }
+surf-render = { path = "crates/surf-render" }
+bytemuck = { version = "1.21", features = ["derive"] }
+glyphon = "0.8"
+pollster = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+vbsp = "0.9.1"
+vtf = "0.4.1"
+wgpu = "24.0"
+winit = "0.30"

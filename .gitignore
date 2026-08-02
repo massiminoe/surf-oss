@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Agent / LLM working notes — keep local, out of history for now
+/CLAUDE.md
+/AGENTS.md
+/docs/
