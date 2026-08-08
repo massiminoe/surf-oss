@@ -5,13 +5,43 @@ use crate::skybox::SkyboxRenderer;
 use surf_map::{LightmapAtlas, MaterialAtlas, SkyboxAtlas};
 use wgpu::util::DeviceExt;
 
+/// Per-frame readability knobs (CPU → fragment uniform).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ViewParams {
+    pub exposure: f32,
+    pub shadow_lift: f32,
+    /// 0 = off, 1 = on
+    pub slope_tint: f32,
+    /// 0 = off, 1 = on
+    pub edge_highlight: f32,
+}
+
+impl Default for ViewParams {
+    fn default() -> Self {
+        Self {
+            exposure: 1.0,
+            shadow_lift: 0.0,
+            slope_tint: 0.0,
+            edge_highlight: 0.0,
+        }
+    }
+}
+
 const SHADER: &str = r#"
 struct Camera { view_proj: mat4x4<f32> }
+struct ViewParams {
+    exposure: f32,
+    shadow_lift: f32,
+    slope_tint: f32,
+    edge_highlight: f32,
+}
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo: texture_2d_array<f32>;
 @group(1) @binding(1) var albedo_samp: sampler;
 @group(1) @binding(2) var lightmap: texture_2d<f32>;
 @group(1) @binding(3) var lightmap_samp: sampler;
+@group(2) @binding(0) var<uniform> params: ViewParams;
 
 struct VsIn {
     @location(0) position: vec3<f32>,
@@ -26,6 +56,7 @@ struct VsOut {
     @location(1) uv: vec2<f32>,
     @location(2) tex: f32,
     @location(3) lm_uv: vec2<f32>,
+    @location(4) world_pos: vec3<f32>,
 }
 
 @vertex
@@ -36,20 +67,53 @@ fn vs_main(v: VsIn) -> VsOut {
     out.uv = v.uv;
     out.tex = v.tex;
     out.lm_uv = v.lm_uv;
+    out.world_pos = v.position;
     return out;
+}
+
+fn apply_readability(base: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    var color = base * params.exposure;
+
+    // Reconstruct face normal in Y-up render space (Source Z → Y).
+    let dp1 = dpdx(world_pos);
+    let dp2 = dpdy(world_pos);
+    let n = normalize(cross(dp1, dp2));
+    let up = abs(n.y);
+    let steep = clamp(1.0 - up, 0.0, 1.0);
+
+    if params.slope_tint > 0.5 {
+        // Cool tint on ramps/walls; leave floors closer to bake.
+        let tint = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.55, 0.82, 1.05), steep * 0.65);
+        color *= tint;
+        // Slight fill so dark steep faces stay readable with tint on.
+        color += steep * 0.04 * vec3<f32>(0.4, 0.55, 0.7);
+    }
+
+    if params.edge_highlight > 0.5 {
+        let edge = length(fwidth(n));
+        let e = smoothstep(0.08, 0.45, edge);
+        let line = vec3<f32>(0.95, 0.97, 1.0);
+        color = mix(color, mix(color * 0.35, line, 0.55), e * 0.9);
+    }
+
+    return color;
 }
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb;
-    // Stub 1×1 white lightmap → lm ≈ 1; real atlas darkens/lights surfaces.
-    let light = max(lm, vec3<f32>(0.05, 0.05, 0.05));
+    // Lift dark luxels toward white without flattening bright areas as hard.
+    let lifted = mix(lm, vec3<f32>(1.0, 1.0, 1.0), clamp(params.shadow_lift, 0.0, 1.0));
+    let light = max(lifted, vec3<f32>(0.05, 0.05, 0.05));
     let layer = i32(v.tex + 0.5);
+    var base: vec3<f32>;
     if (layer <= 0) {
-        return vec4<f32>(v.color * light, 1.0);
+        base = v.color * light;
+    } else {
+        let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+        base = sample.rgb * light * 2.0;
     }
-    let sample = textureSample(albedo, albedo_samp, v.uv, layer);
-    return vec4<f32>(sample.rgb * light * 2.0, 1.0);
+    return vec4<f32>(apply_readability(base, v.world_pos), 1.0);
 }
 "#;
 
@@ -61,10 +125,14 @@ pub struct Renderer {
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub materials: GpuMaterials,
+    view_params_buffer: wgpu::Buffer,
+    view_params_bind_group: wgpu::BindGroup,
     pub skybox: Option<SkyboxRenderer>,
     pub depth_view: wgpu::TextureView,
     pub mesh: GpuMesh,
     pub hud: HudRenderer,
+    ghost: crate::ghost::GhostRenderer,
+    trail: crate::trail::TrailRenderer,
 }
 
 impl Renderer {
@@ -114,6 +182,33 @@ impl Renderer {
             }],
         });
 
+        let view_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("view_params"),
+            contents: bytemuck::bytes_of(&ViewParams::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let view_params_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("view_params_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let view_params_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("view_params_bg"),
+            layout: &view_params_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: view_params_buffer.as_entire_binding(),
+            }],
+        });
+
         let materials = GpuMaterials::upload(&device, &queue, atlas, lightmaps);
         let skybox = SkyboxRenderer::try_new(
             &device,
@@ -125,7 +220,11 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipe_layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &materials.bind_group_layout],
+            bind_group_layouts: &[
+                &camera_bind_group_layout,
+                &materials.bind_group_layout,
+                &view_params_bgl,
+            ],
             push_constant_ranges: &[],
         });
 
@@ -197,6 +296,8 @@ impl Renderer {
 
         let depth_view = create_depth_view(&device, config.width, config.height);
         let hud = HudRenderer::new(&device, &queue, config.format);
+        let ghost = crate::ghost::GhostRenderer::new(&device, config.format, &camera_bind_group_layout);
+        let trail = crate::trail::TrailRenderer::new(&device, config.format, &camera_bind_group_layout);
 
         Self {
             device,
@@ -206,10 +307,14 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             materials,
+            view_params_buffer,
+            view_params_bind_group,
             skybox,
             depth_view,
             mesh,
             hud,
+            ghost,
+            trail,
         }
     }
 
@@ -227,18 +332,34 @@ impl Renderer {
         surface: &wgpu::Surface<'_>,
         camera: &Camera,
         hud: HudState,
+        ghost: Option<crate::ghost::GhostPose>,
+        trail: Option<&[crate::trail::TrailPoint]>,
+        view: ViewParams,
     ) -> Result<(), wgpu::SurfaceError> {
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::bytes_of(&camera.uniform()),
         );
+        self.queue
+            .write_buffer(&self.view_params_buffer, 0, bytemuck::bytes_of(&view));
         if let Some(sky) = &self.skybox {
             sky.write_camera(&self.queue, &camera.sky_uniform());
         }
+        if let Some(g) = ghost {
+            self.ghost.update(&self.queue, g.origin, g.ducked);
+        }
+        match trail {
+            Some(pts) if !pts.is_empty() => {
+                self.trail.update(&self.device, &self.queue, pts);
+            }
+            _ => {
+                self.trail.update(&self.device, &self.queue, &[]);
+            }
+        }
 
         let frame = surface.get_current_texture()?;
-        let view = frame
+        let view_tex = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -252,7 +373,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &view_tex,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -281,9 +402,16 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.materials.bind_group, &[]);
+            pass.set_bind_group(2, &self.view_params_bind_group, &[]);
             pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
+            if trail.is_some() {
+                self.trail.draw(&mut pass, &self.camera_bind_group);
+            }
+            if ghost.is_some() {
+                self.ghost.draw(&mut pass, &self.camera_bind_group);
+            }
         }
 
         self.hud.prepare(
@@ -298,7 +426,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &view_tex,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,

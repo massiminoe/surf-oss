@@ -1,0 +1,74 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_lux",
+  "trackType": "linear",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -385.0,
+          1919.0,
+          1600.0
+        ],
+        "maxs": [
+          385.0,
+          2433.0,
+          1922.0
+        ]
+      },
+      "end": {
+        "mins": [
+          6335.0,
+          14719.0,
+          -8896.0
+        ],
+        "maxs": [
+          7617.0,
+          15297.0,
+          -7422.0
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            -641.0,
+            -2561.0,
+            -2560.0
+          ],
+          "maxs": [
+            641.0,
+            -2495.0,
+            -1726.0
+          ]
+        },
+        {
+          "mins": [
+            -385.0,
+            -5569.0,
+            -5760.0
+          ],
+          "maxs": [
+            385.0,
+            -5503.0,
+            -5118.0
+          ]
+        },
+        {
+          "mins": [
+            6463.0,
+            -5441.0,
+            -2880.0
+          ],
+          "maxs": [
+            7489.0,
+            -5375.0,
+            -382.0
+          ]
+        }
+      ]
+    }
+  }
+}

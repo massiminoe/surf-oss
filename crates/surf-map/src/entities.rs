@@ -16,6 +16,13 @@ pub struct NamedPoint {
     pub angles: Angle,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NamedEntity {
+    point: NamedPoint,
+    /// Prefer `info_teleport_destination` / `info_target` over trigger origins.
+    is_teleport_dest: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TeleportTrigger {
     pub brushes: Vec<Brush>,
@@ -40,7 +47,7 @@ pub fn parse_entities(
     let mut player_spawns = Vec::new();
     // (model, target, start_disabled, origin, filtername)
     let mut teleports_raw: Vec<(usize, String, bool, Vec3, String)> = Vec::new();
-    let mut named: HashMap<String, NamedPoint> = HashMap::new();
+    let mut named: HashMap<String, NamedEntity> = HashMap::new();
     let mut render_models = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
 
@@ -53,7 +60,24 @@ pub fn parse_entities(
         let angles = parse_angles(&ent);
 
         if let Some(name) = ent.prop("targetname") {
-            named.insert(name.to_string(), NamedPoint { origin, angles });
+            let is_teleport_dest = matches!(
+                class,
+                "info_teleport_destination" | "info_target" | "info_landmark"
+            );
+            let point = NamedPoint { origin, angles };
+            // Prefer a real teleport destination when several ents share a name.
+            match named.get(name) {
+                Some(prev) if prev.is_teleport_dest && !is_teleport_dest => {}
+                _ => {
+                    named.insert(
+                        name.to_string(),
+                        NamedEntity {
+                            point,
+                            is_teleport_dest,
+                        },
+                    );
+                }
+            }
         }
 
         match class {
@@ -149,8 +173,8 @@ pub fn parse_entities(
         teleports.push(TeleportTrigger {
             brushes,
             bounds: bounds.unwrap_or(world_bounds),
-            dest_origin: dest.origin,
-            dest_angles: dest.angles,
+            dest_origin: dest.point.origin,
+            dest_angles: dest.point.angles,
         });
     }
 
@@ -164,53 +188,95 @@ pub fn parse_entities(
 /// Surf maps put T/CT in a cosmetic lobby; stage start is usually an
 /// `info_teleport_destination` (e.g. `td_mapstart`) that fail-teleports target.
 fn pick_gameplay_spawn(
-    named: &HashMap<String, NamedPoint>,
+    named: &HashMap<String, NamedEntity>,
     teleport_target_counts: &HashMap<String, usize>,
     player_spawns: &[(&str, NamedPoint)],
 ) -> Option<NamedPoint> {
-    // 1) Well-known stage-start names (case-insensitive).
+    // 1) Well-known stage-start names (case-insensitive exact).
     const PREFERRED: &[&str] = &[
         "td_mapstart",
         "mapstart",
+        "map_start",
+        "map_dest",
         "main_start",
+        "main",
         "stage1",
         "stage_1",
         "s1_start",
         "s1start",
         "td_start",
+        "tele_start",
+        "start_tele_dest",
+        "mapstart_tele_dest",
         "start",
     ];
     for want in PREFERRED {
-        if let Some((_, pt)) = named
+        let mut hits: Vec<&NamedEntity> = named
             .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(want))
-        {
-            return Some(*pt);
-        }
-    }
-    // Names containing "mapstart" / "stage1".
-    for (name, pt) in named {
-        let lower = name.to_ascii_lowercase();
-        if lower.contains("mapstart") || lower.contains("stage1") || lower.contains("s1_start")
-        {
-            return Some(*pt);
+            .filter(|(n, _)| n.eq_ignore_ascii_case(want) && !is_bonus_or_later_stage(n))
+            .map(|(_, ent)| ent)
+            .collect();
+        hits.sort_by_key(|e| !e.is_teleport_dest);
+        if let Some(ent) = hits.first() {
+            return Some(ent.point);
         }
     }
 
-    // 2) Destination most targeted by trigger_teleport (fail teleporters → stage start).
-    if let Some((name, _)) = teleport_target_counts
+    // 2) Best-scored name among non-bonus ents (stable: name order).
+    let mut scored: Vec<(i32, &str, &NamedEntity)> = named
         .iter()
-        .max_by_key(|(_, c)| *c)
-    {
-        if let Some(pt) = named.get(name) {
-            // Ignore obscure single-use targets when counts are tiny and we have player spawns.
-            if teleport_target_counts[name] >= 3 || player_spawns.is_empty() {
-                return Some(*pt);
+        .filter(|(n, _)| !is_bonus_or_later_stage(n))
+        .map(|(n, ent)| (score_spawn_name(n, ent.is_teleport_dest), n.as_str(), ent))
+        .filter(|(score, _, _)| *score > 0)
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    if let Some((_, _, ent)) = scored.first() {
+        return Some(ent.point);
+    }
+
+    // 3) Destination most targeted by trigger_teleport, preferring start-like names
+    // over fail/reset pads (lovetunnel's `reset` is a common trap).
+    let mut targets: Vec<(i32, usize, &str)> = teleport_target_counts
+        .iter()
+        .filter(|(n, _)| !is_bonus_or_later_stage(n))
+        .filter_map(|(n, &count)| {
+            let ent = named.get(n)?;
+            let score = score_spawn_name(n, ent.is_teleport_dest);
+            Some((score, count, n.as_str()))
+        })
+        .collect();
+    targets.sort_by(|a, b| {
+        // Primary: teleport fan-in; secondary: start-like name score.
+        b.1.cmp(&a.1)
+            .then_with(|| b.0.cmp(&a.0))
+            .then_with(|| a.2.cmp(b.2))
+    });
+    for (score, count, name) in &targets {
+        if *count >= 3 || (player_spawns.is_empty() && *count >= 1) {
+            // Reject pure fail/reset pads when a better-named target exists with
+            // similar fan-in (within 2).
+            if *score < 0 {
+                let alt = targets.iter().find(|(s, c, _)| *s >= 40 && *c + 2 >= *count);
+                if let Some((_, _, alt_name)) = alt {
+                    if let Some(ent) = named.get(*alt_name) {
+                        return Some(ent.point);
+                    }
+                }
+                continue;
+            }
+            if let Some(ent) = named.get(*name) {
+                return Some(ent.point);
             }
         }
     }
+    // Last teleport-dest resort: highest-scored targeted name regardless of count.
+    if let Some((_, _, name)) = targets.iter().find(|(s, _, _)| *s >= 40) {
+        if let Some(ent) = named.get(*name) {
+            return Some(ent.point);
+        }
+    }
 
-    // 3) Fall back to player spawn entities: start → T → CT → any.
+    // 4) Fall back to player spawn entities: start → T → CT → any.
     for class in [
         "info_player_start",
         "info_player_terrorist",
@@ -222,6 +288,74 @@ fn pick_gameplay_spawn(
         }
     }
     player_spawns.first().map(|(_, pt)| *pt)
+}
+
+fn is_bonus_or_later_stage(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("bonus") {
+        return true;
+    }
+    // stage2+ / s2_start… — keep stage1 / s1_start.
+    for n in 2..=9 {
+        if lower.contains(&format!("stage{n}"))
+            || lower.contains(&format!("stage_{n}"))
+            || lower.contains(&format!("s{n}_start"))
+            || lower.contains(&format!("s{n}start"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Score a candidate spawn name. Higher is better; ≤0 means "not a start".
+///
+/// Important: `bonus1_start`.contains(`s1_start`) is true — never use raw
+/// `contains("s1_start")` without rejecting bonus names first.
+fn score_spawn_name(name: &str, is_teleport_dest: bool) -> i32 {
+    let lower = name.to_ascii_lowercase();
+    if is_bonus_or_later_stage(&lower) {
+        return -1000;
+    }
+
+    let mut score = 0i32;
+    if lower == "td_mapstart" || lower == "mapstart" || lower == "map_start" {
+        score += 100;
+    } else if lower.contains("mapstart") || lower.contains("map_start") || lower == "map_dest" {
+        score += 90;
+    } else if lower == "main" || lower == "main_start" || lower.contains("main_start") {
+        score += 85;
+    } else if is_s1_start_token(&lower) {
+        score += 80;
+    } else if lower.contains("stage1") || lower.contains("stage_1") {
+        score += 70;
+    } else if lower.contains("start_tele")
+        || lower.contains("tele_start")
+        || lower.ends_with("_start")
+        || lower == "start"
+    {
+        score += 55;
+    } else if lower.contains("start") {
+        score += 35;
+    }
+
+    if lower.contains("fail") || lower.contains("reset") || lower.contains("wipe") {
+        score -= 60;
+    }
+    if is_teleport_dest {
+        score += 10;
+    }
+    score
+}
+
+fn is_s1_start_token(lower: &str) -> bool {
+    lower == "s1_start"
+        || lower == "s1start"
+        || lower.starts_with("s1_start_")
+        || lower.starts_with("s1start_")
+        || lower.ends_with("_s1_start")
+        || lower.ends_with("_s1start")
+        || lower.contains("_s1_start_")
 }
 
 fn merge_aabb(a: Aabb, b: Aabb) -> Aabb {

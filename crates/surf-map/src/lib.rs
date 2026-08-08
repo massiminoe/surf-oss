@@ -11,6 +11,7 @@ mod leaves;
 mod lightmap;
 mod materials;
 mod mesh;
+mod models;
 mod pak;
 mod stock;
 mod vmt;
@@ -104,13 +105,10 @@ impl LoadedMap {
         let brushes = collision::build_player_brushes(&bsp, &world_brush_indices, world_bounds);
 
         let pak = pak::PakFs::from_bsp(&bsp);
-        let skyname = worldspawn_skyname(&bsp);
-        let skybox = skyname
-            .as_deref()
-            .map(|s| materials::SkyboxAtlas::from_pak(&pak, s))
-            .unwrap_or_else(materials::SkyboxAtlas::none);
-
         let stock = stock::StockFs::from_env();
+        let skyname = worldspawn_skyname(&bsp);
+        let skybox = load_skybox(&pak, &stock, skyname.as_deref());
+
         let mut materials = materials::MaterialBank::new(pak, stock);
         let mut lightmaps = lightmap::LightmapBaker::from_bsp_bytes(data);
         let disps = disp::extract_displacements(&bsp, &mut materials, &mut lightmaps);
@@ -119,6 +117,7 @@ impl LoadedMap {
         let ents = entities::parse_entities(&bsp, &leaf_ranges, world_bounds)?;
         let mut mesh = mesh::build_mesh(&bsp, &ents.render_models, &mut materials, &mut lightmaps);
         mesh.tris.extend(disps.render);
+        models::append_static_props(&bsp, &mut materials, &mut mesh);
         let materials = materials.into_atlas();
         let lightmaps = lightmaps.finish();
         // lm_uv was pixel-space while the atlas height grew; normalize now.
@@ -174,4 +173,24 @@ fn worldspawn_skyname(bsp: &vbsp::Bsp) -> Option<String> {
         }
     }
     None
+}
+
+/// Pak + stock for the map's skyname; if missing (joke/empty names, CS:GO-only
+/// skies), fall back to a stock CS:S day sky so the void isn't clear-color.
+fn load_skybox(pak: &pak::PakFs, stock: &stock::StockFs, skyname: Option<&str>) -> SkyboxAtlas {
+    const STOCK_FALLBACK: &str = "sky_day01_01";
+    if let Some(name) = skyname {
+        let atlas = materials::SkyboxAtlas::from_pak_and_stock(pak, stock, name);
+        if !atlas.is_empty() {
+            return atlas;
+        }
+        if name != STOCK_FALLBACK {
+            let fb = materials::SkyboxAtlas::from_pak_and_stock(pak, stock, STOCK_FALLBACK);
+            if !fb.is_empty() {
+                return fb;
+            }
+        }
+        return atlas;
+    }
+    materials::SkyboxAtlas::from_pak_and_stock(pak, stock, STOCK_FALLBACK)
 }

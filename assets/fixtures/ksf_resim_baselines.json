@@ -1,0 +1,44 @@
+{
+  "maps": [
+    {
+      "map": "surf_summit",
+      "minOnRampFrac": 0.20,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxP95OriginErr": 28000.0,
+      "bestPreset": "ksf_css_66t"
+    },
+    {
+      "map": "surf_boreas",
+      "minOnRampFrac": 0.12,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxP95OriginErr": 32000.0,
+      "bestPreset": "aa100_accel5"
+    },
+    {
+      "map": "surf_tendies",
+      "minOnRampFrac": 0.15,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxP95OriginErr": 23000.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_hourglass",
+      "minOnRampFrac": 0.25,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxP95OriginErr": 22000.0,
+      "bestPreset": "ksf_css_stock"
+    },
+    {
+      "map": "surf_andromeda",
+      "minOnRampFrac": 0.20,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxP95OriginErr": 13000.0,
+      "bestPreset": "ksf_css_stock"
+    }
+  ]
+}

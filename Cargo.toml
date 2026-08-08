@@ -4,12 +4,14 @@ members = [
     "crates/surf-core",
     "crates/surf-map",
     "crates/surf-render",
+    "crates/surf-audio",
     "crates/surf-app",
 ]
 default-members = [
     "crates/surf-core",
     "crates/surf-map",
     "crates/surf-render",
+    "crates/surf-audio",
     "crates/surf-app",
 ]
 
@@ -23,7 +25,9 @@ authors = ["Max"]
 surf-core = { path = "crates/surf-core" }
 surf-map = { path = "crates/surf-map" }
 surf-render = { path = "crates/surf-render" }
+surf-audio = { path = "crates/surf-audio" }
 bytemuck = { version = "1.21", features = ["derive"] }
+cpal = "0.18"
 glyphon = "0.8"
 pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }

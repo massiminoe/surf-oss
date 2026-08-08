@@ -14,10 +14,19 @@ path = "src/lib.rs"
 name = "osx-surf"
 path = "src/main.rs"
 
+[[bin]]
+name = "ksf-import"
+path = "src/bin/ksf_import.rs"
+
+[[example]]
+name = "ksf_resim_audit"
+path = "examples/ksf_resim_audit.rs"
+
 [dependencies]
 surf-core = { workspace = true }
 surf-map = { workspace = true }
 surf-render = { workspace = true }
+surf-audio = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 rusqlite = { workspace = true }

@@ -11,6 +11,10 @@ pub const WALKABLE_NORMAL_Z: f32 = 0.7;
 pub const MAX_CLIP_PLANES: usize = 5;
 pub const AIR_SPEED_CAP: f32 = 30.0;
 pub const COORD_RESOLUTION: f32 = 1.0 / 32.0;
+/// CS duck wishspeed crop (Momentum `DUCK_SPEED_MULTIPLIER`).
+pub const DUCK_SPEED_MULTIPLIER: f32 = 0.34;
+/// Max 1-unit nudges when ducking embeds the hull (SDK `FixPlayerCrouchStuck`).
+pub const CROUCH_STUCK_NUDGES: i32 = 36;
 
 /// CS:S standing / duck hulls (Momentum-faithful). Origin at feet.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +93,17 @@ impl Default for MoveVars {
     }
 }
 
+impl BugFixes {
+    /// All Momentum-style fixes off (stock CS:S quirks for soft KSF compare).
+    pub const fn stock() -> Self {
+        Self {
+            fix_deadstrafe: false,
+            fix_ramp: false,
+            fix_slope: false,
+        }
+    }
+}
+
 impl MoveVars {
     pub fn momentum_surf() -> Self {
         Self {
@@ -109,6 +124,24 @@ impl MoveVars {
             autobhop: true,
             bhop_clamp: false,
             fixes: BugFixes::default(),
+        }
+    }
+
+    /// KSF-era CS:S 66t skill surf (research 01 §10): aa 100, accel 10, fixes on.
+    /// Harness / import stamp only — product default stays [`Self::momentum_surf`].
+    pub fn ksf_css_66t() -> Self {
+        Self {
+            accelerate: 10.0,
+            airaccelerate: 100.0,
+            ..Self::momentum_surf()
+        }
+    }
+
+    /// Same knobs as [`Self::ksf_css_66t`] but stock CS:S bug quirks (fixes off).
+    pub fn ksf_css_stock() -> Self {
+        Self {
+            fixes: BugFixes::stock(),
+            ..Self::ksf_css_66t()
         }
     }
 }
@@ -180,7 +213,10 @@ pub fn check_velocity(v: &mut Vec3, origin: &mut Vec3, maxvelocity: f32) {
         if c.is_nan() {
             *c = 0.0;
         }
-        *c = c.clamp(-maxvelocity, maxvelocity);
+        // maxvelocity <= 0 means uncapped (per-map override, e.g. summit).
+        if maxvelocity > 0.0 {
+            *c = c.clamp(-maxvelocity, maxvelocity);
+        }
     }
     for c in [&mut origin.x, &mut origin.y, &mut origin.z] {
         if c.is_nan() {
@@ -324,5 +360,30 @@ mod tests {
             friction(&mut v, true, 1.0, &vars);
         }
         assert!(v.length() < 1.0, "speed left {}", v.length());
+    }
+
+    #[test]
+    fn check_velocity_clamps_and_uncapped() {
+        let mut v = Vec3::new(4000.0, -4000.0, 100.0);
+        let mut o = Vec3::ZERO;
+        check_velocity(&mut v, &mut o, 3500.0);
+        assert!((v.x - 3500.0).abs() < 1e-5);
+        assert!((v.y + 3500.0).abs() < 1e-5);
+
+        v = Vec3::new(4000.0, -4000.0, 100.0);
+        check_velocity(&mut v, &mut o, 0.0);
+        assert!((v.x - 4000.0).abs() < 1e-5);
+        assert!((v.y + 4000.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn ksf_presets_knobs() {
+        let ksf = MoveVars::ksf_css_66t();
+        assert!((ksf.airaccelerate - 100.0).abs() < 1e-5);
+        assert!((ksf.accelerate - 10.0).abs() < 1e-5);
+        assert!(ksf.fixes.fix_ramp);
+        let stock = MoveVars::ksf_css_stock();
+        assert!(!stock.fixes.fix_ramp);
+        assert!((stock.airaccelerate - 100.0).abs() < 1e-5);
     }
 }

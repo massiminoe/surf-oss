@@ -3,10 +3,11 @@
   "mapName": "surf_summit",
   "trackType": "linear",
   "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "maxVelocity": 0,
   "tracks": {
     "main": {
       "limitStartGroundSpeed": 350.0,
-      "startOnJump": true,
+      "startOnJump": false,
       "start": {
         "mins": [1104.0, -1312.0, 11423.876953125],
         "maxs": [1892.0, 1320.0, 11780.0]

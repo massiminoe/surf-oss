@@ -17,5 +17,5 @@ pub use mesh_collide::CollisionTri;
 pub use hud_metrics::air_strafe_sync;
 pub use math::{Angle, Vec3};
 pub use movement::{BugFixes, Hull, MoveVars, PlayerState, UserCmd};
-pub use tick::tick;
+pub use tick::{is_on_surf_ramp, tick};
 pub use trace::{TraceHit, TraceResult};

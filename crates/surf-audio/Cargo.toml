@@ -1,0 +1,9 @@
+[package]
+name = "surf-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "procedural audio for osx-surf (CORE.A maglev)"
+
+[dependencies]
+cpal = { workspace = true }

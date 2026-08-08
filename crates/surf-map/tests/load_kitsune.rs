@@ -49,6 +49,31 @@ fn summit_prefers_td_mapstart_over_lobby() {
 }
 
 #[test]
+fn aesthetic_maps_spawn_in_start_zone_not_bonus() {
+    // Regression: `bonus1_start`.contains(`s1_start`) used to steal gameplay spawn.
+    let cases = [
+        ("surf_nyx", 14120.0, -8248.0, 2216.0),
+        ("surf_fornax", -13920.0, -3776.0, 15232.0),
+        ("surf_frost", -4032.0, -11904.0, 576.0),
+        ("surf_lovetunnel", -6096.0, -11552.0, 5248.0),
+    ];
+    for (name, x, y, z) in cases {
+        let path = format!(
+            "{}/../../assets/maps/{name}.bsp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let map = LoadedMap::load_path(&path).unwrap_or_else(|e| panic!("load {name}: {e}"));
+        assert!(
+            (map.spawn_origin.x - x).abs() < 1.0
+                && (map.spawn_origin.y - y).abs() < 1.0
+                && (map.spawn_origin.z - z).abs() < 1.0,
+            "{name}: expected gameplay spawn ({x},{y},{z}), got {:?}",
+            map.spawn_origin
+        );
+    }
+}
+
+#[test]
 fn summit_teleports_use_entity_origin() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_summit.bsp");
     let map = LoadedMap::load_path(path).expect("load summit");

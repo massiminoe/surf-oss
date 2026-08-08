@@ -1,0 +1,74 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_botanica",
+  "trackType": "staged",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -9489.0,
+          -13025.0,
+          704.0
+        ],
+        "maxs": [
+          -9071.0,
+          -12767.0,
+          954.0
+        ]
+      },
+      "end": {
+        "mins": [
+          -1105.0,
+          -9937.0,
+          2624.0
+        ],
+        "maxs": [
+          3473.0,
+          -8727.0,
+          3266.0
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            1023.0,
+            -16129.0,
+            704.0
+          ],
+          "maxs": [
+            3137.0,
+            -15551.0,
+            994.0
+          ]
+        },
+        {
+          "mins": [
+            10815.0,
+            -15585.0,
+            704.0
+          ],
+          "maxs": [
+            11777.0,
+            -15199.0,
+            946.0
+          ]
+        },
+        {
+          "mins": [
+            319.0,
+            -15585.0,
+            5392.0
+          ],
+          "maxs": [
+            2049.0,
+            -15263.0,
+            5666.0
+          ]
+        }
+      ]
+    }
+  }
+}

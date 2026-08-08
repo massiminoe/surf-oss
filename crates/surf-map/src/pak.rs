@@ -5,8 +5,12 @@ use std::collections::HashMap;
 use vbsp::Bsp;
 
 /// Normalize Source filesystem paths: lowercase, forward slashes, no leading `/`.
+/// Collapses `//` (common in cubemap-patched VMTs: `materials//TILE_22.vmt`).
 pub fn normalize_path(path: &str) -> String {
     let mut s = path.trim().replace('\\', "/").to_ascii_lowercase();
+    while s.contains("//") {
+        s = s.replace("//", "/");
+    }
     while s.starts_with('/') {
         s.remove(0);
     }
@@ -37,5 +41,22 @@ impl PakFs {
         let key = normalize_path(path);
         let entry = self.index.get(&key)?;
         self.pack.get(entry).ok().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_path;
+
+    #[test]
+    fn collapses_double_slash() {
+        assert_eq!(
+            normalize_path("materials//TILE_22.vmt"),
+            "materials/tile_22.vmt"
+        );
+        assert_eq!(
+            normalize_path("maps/surf_pantheon//tile_22_-1_2_3"),
+            "maps/surf_pantheon/tile_22_-1_2_3"
+        );
     }
 }

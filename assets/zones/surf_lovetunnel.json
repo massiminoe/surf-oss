@@ -1,0 +1,62 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_lovetunnel",
+  "trackType": "linear",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -10145.0,
+          -11809.0,
+          5104.0
+        ],
+        "maxs": [
+          -2047.0,
+          -11295.0,
+          5394.0
+        ]
+      },
+      "end": {
+        "mins": [
+          -11009.0,
+          -9601.0,
+          -6624.0
+        ],
+        "maxs": [
+          -8703.0,
+          -2815.0,
+          -5118.0
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            -12960.0,
+            11776.0,
+            256.0
+          ],
+          "maxs": [
+            -11264.0,
+            14080.0,
+            384.03125
+          ]
+        },
+        {
+          "mins": [
+            14752.0,
+            -11872.0,
+            -3615.900390625
+          ],
+          "maxs": [
+            15760.0,
+            -11744.0,
+            -2400.0
+          ]
+        }
+      ]
+    }
+  }
+}

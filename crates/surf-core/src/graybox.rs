@@ -361,4 +361,23 @@ mod tests {
             hit.normal.z
         );
     }
+
+    #[test]
+    fn on_surf_ramp_detects_graybox_face() {
+        use crate::tick::is_on_surf_ramp;
+        let gb = surf_ramp_arena();
+        let hull = Hull::css_stand();
+        let y = 100.0;
+        let z_face = y * 3.0_f32.sqrt();
+        // Same placement family as `player_on_ramp_stays_airborne`.
+        let on = Vec3::new(512.0, y, z_face + 4.0);
+        assert!(
+            is_on_surf_ramp(&gb.world, on, &hull),
+            "expected ramp contact at {:?}",
+            on
+        );
+        let air = Vec3::new(512.0, y, z_face + 120.0);
+        assert!(!is_on_surf_ramp(&gb.world, air, &hull));
+    }
 }
+

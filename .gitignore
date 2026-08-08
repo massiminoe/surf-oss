@@ -9,3 +9,16 @@
 /CLAUDE.md
 /AGENTS.md
 /docs/
+.playwright-mcp/
+
+# Local Python tooling
+.venv_ai/
+
+# Third-party replay binaries (local cache only; not for redistribution)
+/assets/replays/external/
+
+# Local Python bytecode
+tools/__pycache__/
+
+# Ad-hoc local screenshots / inspect dumps (keep fixtures elsewhere)
+/*.png

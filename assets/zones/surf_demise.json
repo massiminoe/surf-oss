@@ -1,0 +1,62 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_demise",
+  "trackType": "linear",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -13120.0,
+          -4928.0,
+          14976.0
+        ],
+        "maxs": [
+          -11200.0,
+          -3008.0,
+          15682.0
+        ]
+      },
+      "end": {
+        "mins": [
+          -13376.0,
+          6664.0,
+          -3712.0
+        ],
+        "maxs": [
+          -11210.0,
+          8696.0,
+          -2686.0
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            11264.0,
+            -8672.0,
+            5760.0
+          ],
+          "maxs": [
+            12032.0,
+            240.0,
+            10943.9111328125
+          ]
+        },
+        {
+          "mins": [
+            3568.0,
+            -1280.0,
+            3040.0
+          ],
+          "maxs": [
+            4608.0,
+            4352.0,
+            7046.73193359375
+          ]
+        }
+      ]
+    }
+  }
+}

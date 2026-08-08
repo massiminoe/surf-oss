@@ -1,0 +1,75 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_andromeda",
+  "trackType": "linear",
+  "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -8384.0,
+          -448.0,
+          7392.0
+        ],
+        "maxs": [
+          -7744.0,
+          448.0,
+          7666.0
+        ]
+      },
+      "end": {
+        "mins": [
+          -13264.0,
+          -832.0,
+          -2080.0
+        ],
+        "maxs": [
+          -12322.0,
+          832.0,
+          -1136.0
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            -4608.0,
+            -6496.0,
+            1952.0
+          ],
+          "maxs": [
+            -4544.0,
+            -4736.0,
+            3874.0
+          ]
+        },
+        {
+          "mins": [
+            -4608.0,
+            4736.0,
+            1952.0
+          ],
+          "maxs": [
+            -4544.0,
+            6496.0,
+            3874.0
+          ]
+        },
+        {
+          "mins": [
+            12288.0,
+            -1536.0,
+            1056.0
+          ],
+          "maxs": [
+            12416.0,
+            1536.0,
+            2210.0
+          ]
+        }
+      ]
+    }
+  },
+  "maxVelocity": 5000.0
+}

@@ -4,23 +4,78 @@ use crate::brush::World;
 use crate::math::Vec3;
 use crate::movement::{
     air_accelerate, check_velocity, clamp_input_speed, clip_velocity, friction, wish_move, Hull,
-    MoveVars, PlayerState, UserCmd, GROUND_PROBE, MAX_CLIP_PLANES, NON_JUMP_VELOCITY, STOP_EPSILON,
-    WALKABLE_NORMAL_Z,
+    MoveVars, PlayerState, UserCmd, CROUCH_STUCK_NUDGES, DUCK_SPEED_MULTIPLIER, GROUND_PROBE,
+    MAX_CLIP_PLANES, NON_JUMP_VELOCITY, STOP_EPSILON, WALKABLE_NORMAL_Z,
 };
-use crate::trace::{trace_box, TraceResult};
+use crate::trace::{point_contents_box, trace_box, TraceResult};
+
+/// True when the player hull is sitting on a surfable slope (steep, not walkable).
+///
+/// Replay `grounded` is almost always false on ramps (and KSF flags omit it), so
+/// trail coloring probes the world instead. We sweep the full hull from above
+/// (avoids startsolid in the wedge) and accept hits whose expanded plane is
+/// close to the feet origin.
+pub fn is_on_surf_ramp(world: &World, origin: Vec3, hull: &Hull) -> bool {
+    let rampish = |nz: f32| nz > 0.05 && nz < WALKABLE_NORMAL_Z;
+    let near_plane = |hit: &crate::trace::TraceHit, origin: Vec3| {
+        let d = hit.normal.dot(origin) - hit.dist;
+        // Outside or slightly penetrating the expanded hull plane.
+        d < 10.0 && d > -20.0
+    };
+
+    let start = origin + Vec3::new(0.0, 0.0, 24.0);
+    let end = origin - Vec3::new(0.0, 0.0, 10.0);
+    let tr = trace_box(world, start, end, hull.mins, hull.maxs);
+    if let Some(hit) = tr.hit {
+        if rampish(hit.normal.z) && near_plane(&hit, origin) {
+            return true;
+        }
+    }
+
+    // Lateral probes: surfing contact is often into the face, not straight down.
+    const LATERAL: f32 = 14.0;
+    let lateral = [
+        Vec3::new(0.0, LATERAL, -2.0),
+        Vec3::new(0.0, -LATERAL, -2.0),
+        Vec3::new(LATERAL, 0.0, -2.0),
+        Vec3::new(-LATERAL, 0.0, -2.0),
+    ];
+    let lift = origin + Vec3::new(0.0, 0.0, 8.0);
+    for delta in lateral {
+        let tr = trace_box(world, lift, lift + delta, hull.mins, hull.maxs);
+        if let Some(hit) = tr.hit {
+            if rampish(hit.normal.z) && near_plane(&hit, origin) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CS:S stand vs duck hull height (feet→top). Air duck raises origin by this.
+#[inline]
+fn duck_view_delta() -> f32 {
+    let stand = Hull::css_stand();
+    let duck = Hull::css_duck();
+    (stand.maxs.z - stand.mins.z) - (duck.maxs.z - duck.mins.z)
+}
 
 /// Determinism boundary: one Source-style movement tick.
 pub fn tick(world: &World, state: &PlayerState, cmd: &UserCmd, vars: &MoveVars) -> PlayerState {
     let mut p = state.clone();
     p.viewangles = cmd.viewangles;
 
+    // PlayerMove order: Duck() before FullWalkMove (research 01 §3 / §6).
+    // Instant hull change (no view-spline timers yet); air offset is the crouch-jump.
+    apply_duck(world, &mut p, cmd.duck);
+
     let hull = p.hull();
     // CheckParameters: scale wish move, clamp to maxspeed.
     let mut fmove = cmd.forward_move * vars.forward_speed;
     let mut smove = cmd.side_move * vars.side_speed;
     if p.ducked && p.grounded {
-        fmove *= 0.34;
-        smove *= 0.34;
+        fmove *= DUCK_SPEED_MULTIPLIER;
+        smove *= DUCK_SPEED_MULTIPLIER;
     }
     let (fmove, smove) = clamp_input_speed(fmove, smove, vars.maxspeed);
 
@@ -426,6 +481,64 @@ fn trace_player(world: &World, start: Vec3, end: Vec3, hull: &Hull) -> TraceResu
     trace_box(world, start, end, hull.mins, hull.maxs)
 }
 
+/// Hold-to-duck with Source latch: releasing under a low ceiling keeps you ducked
+/// until `can_unduck` succeeds.
+fn apply_duck(world: &World, p: &mut PlayerState, want_duck: bool) {
+    if want_duck {
+        if !p.ducked {
+            finish_duck(world, p);
+        }
+    } else if p.ducked && can_unduck(world, p) {
+        finish_unduck(p);
+    }
+}
+
+fn unduck_origin(p: &PlayerState) -> Vec3 {
+    if p.grounded {
+        // Hull mins.z are both 0 — feet stay planted.
+        p.origin
+    } else {
+        // Mirror air FinishDuck: drop feet so the head stays put.
+        p.origin - Vec3::new(0.0, 0.0, duck_view_delta())
+    }
+}
+
+fn can_unduck(world: &World, p: &PlayerState) -> bool {
+    let stand = Hull::css_stand();
+    let new_origin = unduck_origin(p);
+    let tr = trace_box(world, p.origin, new_origin, stand.mins, stand.maxs);
+    !tr.startsolid && tr.fraction >= 1.0
+}
+
+fn finish_duck(world: &World, p: &mut PlayerState) {
+    if !p.grounded {
+        p.origin += Vec3::new(0.0, 0.0, duck_view_delta());
+    }
+    p.ducked = true;
+    fix_crouch_stuck(world, p);
+}
+
+fn finish_unduck(p: &mut PlayerState) {
+    p.origin = unduck_origin(p);
+    p.ducked = false;
+}
+
+/// If the ducked hull is startsolid, walk origin up 1u at a time (SDK crouch unstick).
+fn fix_crouch_stuck(world: &World, p: &mut PlayerState) {
+    let hull = Hull::css_duck();
+    if !point_contents_box(world, p.origin, hull.mins, hull.maxs) {
+        return;
+    }
+    let start = p.origin;
+    for _ in 0..CROUCH_STUCK_NUDGES {
+        p.origin.z += 1.0;
+        if !point_contents_box(world, p.origin, hull.mins, hull.maxs) {
+            return;
+        }
+    }
+    p.origin = start;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,5 +660,147 @@ mod tests {
             p.velocity.z
         );
         assert!(p.origin.z > 10.0, "should still be on the ramp face");
+    }
+
+    #[test]
+    fn air_duck_raises_feet_by_hull_delta() {
+        let world = World::empty();
+        let vars = MoveVars::momentum_surf();
+        let start = PlayerState {
+            origin: Vec3::new(0.0, 0.0, 256.0),
+            velocity: Vec3::ZERO,
+            grounded: false,
+            ..PlayerState::default()
+        };
+        let ducked = tick(
+            &world,
+            &start,
+            &UserCmd {
+                duck: true,
+                ..UserCmd::default()
+            },
+            &vars,
+        );
+        let standing = tick(&world, &start, &UserCmd::default(), &vars);
+        assert!(ducked.ducked);
+        let delta = duck_view_delta();
+        assert!((delta - 17.0).abs() < 1e-3, "CS:S delta should be 17, got {delta}");
+        // Same gravity/move; duck alone accounts for +delta on origin.z.
+        assert!(
+            (ducked.origin.z - standing.origin.z - delta).abs() < 1e-3,
+            "air duck should raise feet by {delta}; ducked={} stand={}",
+            ducked.origin.z,
+            standing.origin.z
+        );
+    }
+
+    #[test]
+    fn ground_duck_keeps_feet_and_crops_wishspeed() {
+        let world = flat_world();
+        let vars = MoveVars::momentum_surf();
+        let settled = stand_on_floor(&world, &vars);
+        let z_before = settled.origin.z;
+        let fwd = UserCmd {
+            forward_move: 1.0,
+            ..UserCmd::default()
+        };
+        let standing = tick(&world, &settled, &fwd, &vars);
+        let ducked = tick(
+            &world,
+            &settled,
+            &UserCmd {
+                duck: true,
+                forward_move: 1.0,
+                ..UserCmd::default()
+            },
+            &vars,
+        );
+        assert!(ducked.ducked);
+        assert!(
+            (ducked.origin.z - z_before).abs() < 0.5,
+            "ground duck keeps feet planted"
+        );
+        // Crop is ×0.34 on cl_forwardspeed (450→153) before maxspeed clamp (260).
+        let ratio = ducked.velocity.length_2d() / standing.velocity.length_2d();
+        assert!(
+            (ratio - 153.0 / 260.0).abs() < 0.05,
+            "ducked/standing first-tick speed ratio {ratio} (want ~153/260)"
+        );
+    }
+
+    #[test]
+    fn low_ceiling_latches_duck_after_release() {
+        // Floor at z=0, ceiling at 56 — duck hull (45) fits, stand (62) does not.
+        let world = World::new(vec![
+            Brush::aabb(
+                Vec3::new(-2048.0, -2048.0, -128.0),
+                Vec3::new(2048.0, 2048.0, 0.0),
+            ),
+            Brush::aabb(
+                Vec3::new(-2048.0, -2048.0, 56.0),
+                Vec3::new(2048.0, 2048.0, 96.0),
+            ),
+        ]);
+        let vars = MoveVars::momentum_surf();
+        let duck_cmd = UserCmd {
+            duck: true,
+            ..UserCmd::default()
+        };
+        // Must start ducked — standing hull can't settle under this ceiling.
+        let mut p = PlayerState {
+            origin: Vec3::new(0.0, 0.0, 2.0),
+            ducked: true,
+            ..PlayerState::default()
+        };
+        for _ in 0..30 {
+            p = tick(&world, &p, &duck_cmd, &vars);
+        }
+        assert!(
+            p.grounded && p.ducked,
+            "settle ducked under ceiling; grounded={} origin={:?}",
+            p.grounded,
+            p.origin
+        );
+        // Release duck — standing hull doesn't fit → stay latched.
+        p = tick(&world, &p, &UserCmd::default(), &vars);
+        assert!(p.ducked, "must stay ducked under low ceiling after release");
+    }
+
+    #[test]
+    fn air_unduck_restores_origin_when_clear() {
+        let world = World::empty();
+        let vars = MoveVars::momentum_surf();
+        let start = PlayerState {
+            origin: Vec3::new(0.0, 0.0, 400.0),
+            velocity: Vec3::ZERO,
+            grounded: false,
+            ..PlayerState::default()
+        };
+        let after_duck = tick(
+            &world,
+            &start,
+            &UserCmd {
+                duck: true,
+                ..UserCmd::default()
+            },
+            &vars,
+        );
+        assert!(after_duck.ducked);
+        let unducked = tick(&world, &after_duck, &UserCmd::default(), &vars);
+        let stayed_up = tick(
+            &world,
+            &after_duck,
+            &UserCmd {
+                duck: true,
+                ..UserCmd::default()
+            },
+            &vars,
+        );
+        assert!(!unducked.ducked);
+        let delta = duck_view_delta();
+        assert!(
+            (stayed_up.origin.z - unducked.origin.z - delta).abs() < 1e-3,
+            "releasing duck in clear air should drop feet by {delta}"
+        );
     }
 }

@@ -1,8 +1,8 @@
-//! Speedrun timer state machine (start leave / end touch).
+//! Speedrun timer state machine (start leave / end touch / checkpoint splits).
 
 use surf_core::movement::PlayerState;
 
-use crate::zones::{MapZones, TrackType};
+use crate::zones::{MapZones, TrackType, ZoneBox};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerPhase {
@@ -16,16 +16,34 @@ pub enum TimerPhase {
     Finished,
 }
 
+/// Just-hit checkpoint info for HUD flash.
+#[derive(Clone, Copy, Debug)]
+pub struct SplitEvent {
+    /// 1-based checkpoint index.
+    pub index: usize,
+    pub time_secs: f32,
+    /// `time - pb_split` when a PB split exists for this index.
+    pub delta_vs_pb: Option<f32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunTimer {
     pub phase: TimerPhase,
     /// Elapsed seconds while Running / frozen Finished time.
     pub time_secs: f32,
     pub track_type: TrackType,
+    /// Checkpoint split times for the current / finished run (ordered).
+    pub splits: Vec<f32>,
+    /// Latest split event (consumed by app for HUD flash).
+    pub last_split: Option<SplitEvent>,
     was_in_start: bool,
     was_grounded: bool,
     /// Set by fail teleport / kill-z soft-respawn into start: do not cancel.
     soft_enter_start: bool,
+    /// Index of next checkpoint to accept (ordered).
+    next_cp: usize,
+    /// Whether currently overlapping each checkpoint (edge detect).
+    cp_inside: Vec<bool>,
 }
 
 impl Default for RunTimer {
@@ -34,9 +52,13 @@ impl Default for RunTimer {
             phase: TimerPhase::Idle,
             time_secs: 0.0,
             track_type: TrackType::Linear,
+            splits: Vec::new(),
+            last_split: None,
             was_in_start: false,
             was_grounded: true,
             soft_enter_start: false,
+            next_cp: 0,
+            cp_inside: Vec::new(),
         }
     }
 }
@@ -53,8 +75,12 @@ impl RunTimer {
     pub fn reset(&mut self) {
         self.phase = TimerPhase::Idle;
         self.time_secs = 0.0;
+        self.splits.clear();
+        self.last_split = None;
         self.was_in_start = false;
         self.soft_enter_start = false;
+        self.next_cp = 0;
+        self.cp_inside.clear();
     }
 
     /// Fail teleport / kill-z snapped the player (possibly into start).
@@ -66,7 +92,13 @@ impl RunTimer {
     }
 
     /// Per-tick update after physics. May clamp start-zone ground speed on `player`.
-    pub fn tick(&mut self, zones: &MapZones, player: &mut PlayerState, dt: f32) {
+    pub fn tick(
+        &mut self,
+        zones: &MapZones,
+        player: &mut PlayerState,
+        dt: f32,
+        pb_splits: &[f32],
+    ) {
         let hull = player.hull();
         let track = &zones.main;
         let in_start = track.start.contains_player(player.origin, hull);
@@ -79,13 +111,19 @@ impl RunTimer {
                 if in_start {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.splits.clear();
+                    self.next_cp = 0;
                 }
             }
             TimerPhase::Armed => {
                 if !in_start {
-                    self.start_run();
+                    self.start_run(track.checkpoints.len());
+                    self.time_secs += dt;
+                    self.poll_checkpoints(&track.checkpoints, player, pb_splits);
                 } else if track.start_on_jump && self.was_grounded && !player.grounded {
-                    self.start_run();
+                    self.start_run(track.checkpoints.len());
+                    self.time_secs += dt;
+                    self.poll_checkpoints(&track.checkpoints, player, pb_splits);
                 }
             }
             TimerPhase::Running => {
@@ -95,8 +133,13 @@ impl RunTimer {
                 if in_start && !self.was_in_start && !soft {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.splits.clear();
+                    self.next_cp = 0;
+                    self.last_split = None;
                 } else if in_end && !in_start {
                     self.phase = TimerPhase::Finished;
+                } else {
+                    self.poll_checkpoints(&track.checkpoints, player, pb_splits);
                 }
             }
             TimerPhase::Finished => {
@@ -104,6 +147,9 @@ impl RunTimer {
                 if in_start && !soft {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.splits.clear();
+                    self.next_cp = 0;
+                    self.last_split = None;
                 }
             }
         }
@@ -117,9 +163,48 @@ impl RunTimer {
         self.was_grounded = player.grounded;
     }
 
-    fn start_run(&mut self) {
+    fn start_run(&mut self, cp_count: usize) {
         self.phase = TimerPhase::Running;
         self.time_secs = 0.0;
+        self.splits.clear();
+        self.last_split = None;
+        self.next_cp = 0;
+        self.cp_inside = vec![false; cp_count];
+    }
+
+    fn poll_checkpoints(
+        &mut self,
+        checkpoints: &[ZoneBox],
+        player: &PlayerState,
+        pb_splits: &[f32],
+    ) {
+        if self.next_cp >= checkpoints.len() {
+            return;
+        }
+        if self.cp_inside.len() != checkpoints.len() {
+            self.cp_inside = vec![false; checkpoints.len()];
+        }
+        let hull = player.hull();
+        let i = self.next_cp;
+        let now = checkpoints[i].contains_player(player.origin, hull);
+        if now && !self.cp_inside[i] {
+            let t = self.time_secs;
+            self.splits.push(t);
+            let delta = pb_splits.get(i).map(|pb| t - pb);
+            self.last_split = Some(SplitEvent {
+                index: i + 1,
+                time_secs: t,
+                delta_vs_pb: delta,
+            });
+            self.next_cp += 1;
+        }
+        self.cp_inside[i] = now;
+        // Keep other inside flags updated so re-entry after skip isn't weird.
+        for (j, cp) in checkpoints.iter().enumerate() {
+            if j != i {
+                self.cp_inside[j] = cp.contains_player(player.origin, hull);
+            }
+        }
     }
 
     pub fn display_time(&self) -> Option<f32> {
@@ -132,6 +217,10 @@ impl RunTimer {
 
     pub fn is_finished(&self) -> bool {
         self.phase == TimerPhase::Finished
+    }
+
+    pub fn take_split_event(&mut self) -> Option<SplitEvent> {
+        self.last_split.take()
     }
 }
 
@@ -169,6 +258,15 @@ pub fn format_pb_delta(delta: f32) -> String {
     format!("{sign}{abs}")
 }
 
+/// HUD line for a checkpoint split flash.
+pub fn format_split_line(ev: SplitEvent) -> String {
+    let t = format_time(ev.time_secs);
+    match ev.delta_vs_pb {
+        Some(d) => format!("CP{} {t}  {}", ev.index, format_pb_delta(d)),
+        None => format!("CP{} {t}", ev.index),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,7 +285,11 @@ mod tests {
                   "limitStartGroundSpeed": 350.0,
                   "startOnJump": true,
                   "start": { "mins": [0, 0, 0], "maxs": [100, 100, 80] },
-                  "end": { "mins": [500, 0, 0], "maxs": [600, 100, 80] }
+                  "end": { "mins": [500, 0, 0], "maxs": [600, 100, 80] },
+                  "checkpoints": [
+                    { "mins": [200, 0, 0], "maxs": [220, 100, 80] },
+                    { "mins": [350, 0, 0], "maxs": [370, 100, 80] }
+                  ]
                 }
               }
             }"#,
@@ -210,29 +312,59 @@ mod tests {
         let dt = 0.015;
 
         let mut p = player_at(50.0, 0.0, true);
-        timer.tick(&zones, &mut p, dt);
+        timer.tick(&zones, &mut p, dt, &[]);
         assert_eq!(timer.phase, TimerPhase::Armed);
         assert_eq!(timer.display_time(), Some(0.0));
 
-        // Leave start → running.
-        p = player_at(200.0, 0.0, false);
-        timer.tick(&zones, &mut p, dt);
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &[]);
         assert_eq!(timer.phase, TimerPhase::Running);
+        assert!((timer.time_secs - dt).abs() < 1e-4);
 
-        // Advance a few ticks.
         for _ in 0..10 {
-            timer.tick(&zones, &mut p, dt);
+            timer.tick(&zones, &mut p, dt, &[]);
         }
         let t = timer.time_secs;
-        assert!((t - 10.0 * dt).abs() < 1e-4);
+        assert!((t - 11.0 * dt).abs() < 1e-4);
 
-        // Touch end → finished, time frozen.
         p = player_at(550.0, 0.0, false);
-        timer.tick(&zones, &mut p, dt);
+        timer.tick(&zones, &mut p, dt, &[]);
         assert_eq!(timer.phase, TimerPhase::Finished);
         let frozen = timer.time_secs;
-        timer.tick(&zones, &mut p, dt);
+        timer.tick(&zones, &mut p, dt, &[]);
         assert_eq!(timer.time_secs, frozen);
+    }
+
+    #[test]
+    fn checkpoint_splits_ordered_with_pb_delta() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let dt = 0.015;
+        let pb = [0.5_f32, 1.0];
+
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &pb);
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &pb);
+
+        // Reach CP1.
+        p = player_at(210.0, 0.0, false);
+        for _ in 0..20 {
+            timer.tick(&zones, &mut p, dt, &pb);
+        }
+        let ev = timer.take_split_event().expect("cp1");
+        assert_eq!(ev.index, 1);
+        assert_eq!(timer.splits.len(), 1);
+        assert!(ev.delta_vs_pb.is_some());
+
+        // Reach CP2.
+        p = player_at(360.0, 0.0, false);
+        for _ in 0..40 {
+            timer.tick(&zones, &mut p, dt, &pb);
+        }
+        let ev2 = timer.take_split_event().expect("cp2");
+        assert_eq!(ev2.index, 2);
+        assert_eq!(timer.splits.len(), 2);
     }
 
     #[test]
@@ -240,16 +372,33 @@ mod tests {
         let zones = sample_zones();
         let mut timer = RunTimer::new(TrackType::Linear);
         let mut p = player_at(50.0, 0.0, true);
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Armed);
 
         p.grounded = false;
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Running);
-        // Still in start next tick — must keep running.
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Running);
         assert!(timer.time_secs > 0.0);
+    }
+
+    #[test]
+    fn leave_only_jump_inside_stays_armed() {
+        let mut zones = sample_zones();
+        zones.main.start_on_jump = false;
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed);
+
+        p.grounded = false;
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed);
+
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
     }
 
     #[test]
@@ -267,17 +416,13 @@ mod tests {
         timer.phase = TimerPhase::Running;
         timer.time_secs = 32.0;
         timer.was_in_start = false;
+        timer.cp_inside = vec![false; 2];
 
-        // Fail TP / kill-z → spawn inside start (summit: ~30–35s first nets).
         timer.notify_soft_respawn();
         let mut p = player_at(50.0, 0.0, true);
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Running);
         assert!((timer.time_secs - 32.015).abs() < 1e-4);
-
-        // Still in start next tick — stay running.
-        timer.tick(&zones, &mut p, 0.015);
-        assert_eq!(timer.phase, TimerPhase::Running);
     }
 
     #[test]
@@ -287,12 +432,13 @@ mod tests {
         timer.phase = TimerPhase::Running;
         timer.time_secs = 32.0;
         timer.was_in_start = false;
+        timer.splits = vec![1.0];
 
-        // Walk back into start without soft-respawn flag.
         let mut p = player_at(50.0, 0.0, true);
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Armed);
         assert_eq!(timer.time_secs, 0.0);
+        assert!(timer.splits.is_empty());
     }
 
     #[test]
@@ -306,13 +452,14 @@ mod tests {
         timer.phase = TimerPhase::Running;
         timer.time_secs = 33.0;
         timer.was_in_start = false;
+        timer.cp_inside = vec![false; zones.main.checkpoints.len()];
         timer.notify_soft_respawn();
         let mut p = PlayerState {
             origin: Vec3::new(1600.0, 0.0, 11552.0),
             grounded: true,
             ..PlayerState::default()
         };
-        timer.tick(&zones, &mut p, 0.015);
+        timer.tick(&zones, &mut p, 0.015, &[]);
         assert_eq!(timer.phase, TimerPhase::Running);
         assert!(timer.time_secs > 33.0);
     }

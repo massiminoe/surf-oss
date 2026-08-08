@@ -10,5 +10,9 @@ surf-core = { workspace = true }
 vbsp = { workspace = true }
 vtf = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+lzma-rs = "0.3"
+vmdl = "0.2.0"
 
 [dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

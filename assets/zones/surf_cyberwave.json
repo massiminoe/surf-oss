@@ -1,0 +1,51 @@
+{
+  "formatVersion": 1,
+  "mapName": "surf_cyberwave",
+  "trackType": "staged",
+  "source": "converted from Sayt123/SurfZones (ck_zones SQL)",
+  "tracks": {
+    "main": {
+      "limitStartGroundSpeed": 350.0,
+      "startOnJump": false,
+      "start": {
+        "mins": [
+          -479.969,
+          -15232.0,
+          13440.0
+        ],
+        "maxs": [
+          479.38,
+          -14464.2,
+          13712.0
+        ]
+      },
+      "end": {
+        "mins": [
+          -735.968,
+          13536.2,
+          -12000.0
+        ],
+        "maxs": [
+          736.606,
+          14848.0,
+          -9309.5
+        ]
+      },
+      "checkpoints": [
+        {
+          "mins": [
+            -480.029,
+            -15744.0,
+            -7808.43
+          ],
+          "maxs": [
+            479.329,
+            -14975.9,
+            -7658.06
+          ]
+        }
+      ]
+    }
+  },
+  "maxVelocity": 7500.0
+}

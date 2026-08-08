@@ -48,6 +48,9 @@ pub struct TrackZones {
 pub struct MapZones {
     pub map_name: String,
     pub track_type: TrackType,
+    /// Per-map `sv_maxvelocity`. `None` = use MoveVars preset (3500).
+    /// `Some(0)` = uncapped.
+    pub max_velocity: Option<f32>,
     pub main: TrackZones,
 }
 
@@ -120,9 +123,11 @@ pub fn parse_zones_json(text: &str) -> Result<MapZones, ZoneError> {
     Ok(MapZones {
         map_name: raw.map_name.unwrap_or_default(),
         track_type,
+        max_velocity: raw.max_velocity,
         main: TrackZones {
             limit_start_ground_speed: main.limit_start_ground_speed.unwrap_or(350.0),
-            start_on_jump: main.start_on_jump.unwrap_or(true),
+            // Default leave-zone start (classic SurfTimer EndTouch).
+            start_on_jump: main.start_on_jump.unwrap_or(false),
             start,
             end,
             checkpoints,
@@ -159,6 +164,8 @@ struct RawMapZones {
     map_name: Option<String>,
     #[serde(rename = "trackType")]
     track_type: Option<String>,
+    #[serde(rename = "maxVelocity")]
+    max_velocity: Option<f32>,
     tracks: RawTracks,
 }
 
@@ -211,7 +218,8 @@ mod tests {
         assert_eq!(z.map_name, "test_map");
         assert_eq!(z.track_type, TrackType::Linear);
         assert!((z.main.limit_start_ground_speed - 350.0).abs() < 1e-5);
-        assert!(z.main.start_on_jump);
+        assert!(z.main.start_on_jump); // explicit in SAMPLE
+        assert!(z.max_velocity.is_none());
         assert!(z.main.start.contains_player(Vec3::new(50.0, 50.0, 0.0), Hull::css_stand()));
         assert!(!z.main.start.contains_player(Vec3::new(200.0, 50.0, 0.0), Hull::css_stand()));
         assert!(z.main.end.contains_player(Vec3::new(550.0, 50.0, 0.0), Hull::css_stand()));
@@ -232,10 +240,29 @@ mod tests {
         }
         let z = load_zones_file(path).expect("summit zones");
         assert_eq!(z.map_name, "surf_summit");
+        assert!(!z.main.start_on_jump);
+        assert_eq!(z.max_velocity, Some(0.0));
         // Spawn 1600,0,11552 should be inside start.
         assert!(z
             .main
             .start
             .contains_player(Vec3::new(1600.0, 0.0, 11552.0), Hull::css_stand()));
+    }
+
+    #[test]
+    fn default_start_on_jump_is_false() {
+        let z = parse_zones_json(
+            r#"{
+              "mapName": "t",
+              "tracks": {
+                "main": {
+                  "start": { "mins": [0, 0, 0], "maxs": [1, 1, 1] },
+                  "end": { "mins": [2, 0, 0], "maxs": [3, 1, 1] }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert!(!z.main.start_on_jump);
     }
 }
