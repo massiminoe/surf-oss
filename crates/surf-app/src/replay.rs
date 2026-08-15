@@ -58,6 +58,11 @@ pub struct ReplayHeader {
     /// Ordered checkpoint split times (seconds from run start). Empty if none.
     #[serde(default)]
     pub splits: Vec<f32>,
+    /// How inputs relate to poses. Empty/legacy: inferred from `style` (KSF → buttons lag).
+    /// `"cmdProducesPose"` = apply frames[i] cmd to pose[i-1] → pose[i].
+    /// `"ksfButtonsLag"` = buttons on frame[i] belong to the next tick.
+    #[serde(default)]
+    pub input_semantics: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -227,7 +232,47 @@ pub struct Replay {
     pub frames: Vec<ReplayFrame>,
 }
 
+/// Shift KSF button/move fields so frame[i] holds the cmd that produced pose[i].
+///
+/// Angles and pose stay on frame[i]; forward/side/jump/duck come from frame[i-1].
+pub fn align_ksf_buttons_to_pose(frames: &mut [ReplayFrame]) {
+    if frames.len() < 2 {
+        return;
+    }
+    let prev: Vec<(f32, f32, u8)> = frames
+        .iter()
+        .map(|f| (f.forward_move, f.side_move, f.buttons))
+        .collect();
+    for i in 1..frames.len() {
+        frames[i].forward_move = prev[i - 1].0;
+        frames[i].side_move = prev[i - 1].1;
+        frames[i].buttons = prev[i - 1].2;
+    }
+}
+
 impl Replay {
+    /// True when on-disk buttons lag the pose by one tick (legacy KSF imports).
+    pub fn buttons_lag_pose(&self) -> bool {
+        match self.header.input_semantics.as_str() {
+            "cmdProducesPose" => false,
+            "ksfButtonsLag" => true,
+            "" => {
+                // Pre-field imports: KSF style means lagged buttons.
+                self.header.style == "ksf_css_66t" || self.header.style.starts_with("ksf_")
+            }
+            _ => false,
+        }
+    }
+
+    /// Frames safe for `tick` re-sim under native cmd-produces-pose semantics.
+    pub fn frames_for_resim(&self) -> Vec<ReplayFrame> {
+        let mut frames = self.frames.clone();
+        if self.buttons_lag_pose() {
+            align_ksf_buttons_to_pose(&mut frames);
+        }
+        frames
+    }
+
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("replay dir: {e}"))?;
@@ -362,6 +407,7 @@ impl ReplayRecorder {
                 recorded_at: unix_now(),
                 vars: ReplayVars::from_move_vars(vars),
                 splits: splits.to_vec(),
+                input_semantics: "cmdProducesPose".to_string(),
             },
             frames,
         })
@@ -818,6 +864,7 @@ mod tests {
                 recorded_at: 1_700_000_000,
                 vars: ReplayVars::from_move_vars(&MoveVars::momentum_surf()),
                 splits: vec![10.0, 20.5],
+                input_semantics: "cmdProducesPose".into(),
             },
             frames: vec![sample_frame(), {
                 let mut f = sample_frame();
@@ -890,6 +937,7 @@ mod tests {
                 recorded_at: 123,
                 vars: ReplayVars::from_move_vars(&MoveVars::momentum_surf()),
                 splits: Vec::new(),
+                input_semantics: "cmdProducesPose".into(),
             },
             frames: vec![sample_frame()],
         };
@@ -970,6 +1018,61 @@ mod tests {
         assert_eq!(cat[1].id, GHOST_AUTO);
         assert_eq!(cat[2].id, GHOST_PB);
         assert!(cat.len() >= 3);
+    }
+
+    #[test]
+    fn align_ksf_buttons_shifts_moves() {
+        let mut frames = vec![
+            ReplayFrame {
+                forward_move: 1.0,
+                side_move: 0.0,
+                buttons: BTN_JUMP,
+                ..sample_frame()
+            },
+            ReplayFrame {
+                forward_move: 0.0,
+                side_move: -1.0,
+                buttons: 0,
+                ..sample_frame()
+            },
+            ReplayFrame {
+                forward_move: 0.0,
+                side_move: 1.0,
+                buttons: BTN_DUCK,
+                ..sample_frame()
+            },
+        ];
+        align_ksf_buttons_to_pose(&mut frames);
+        assert!((frames[0].forward_move - 1.0).abs() < 1e-5);
+        assert!((frames[1].forward_move - 1.0).abs() < 1e-5);
+        assert!((frames[1].side_move - 0.0).abs() < 1e-5);
+        assert_eq!(frames[1].buttons, BTN_JUMP);
+        assert!((frames[2].side_move - (-1.0)).abs() < 1e-5);
+        assert_eq!(frames[2].buttons, 0);
+    }
+
+    #[test]
+    fn ksf_style_infers_buttons_lag() {
+        let replay = Replay {
+            header: ReplayHeader {
+                format_version: REPLAY_FORMAT_VERSION,
+                map: "surf_summit".into(),
+                track: TRACK_MAIN.into(),
+                style: "ksf_css_66t".into(),
+                tick_interval: 0.015,
+                time_secs: 1.0,
+                frame_count: 1,
+                recorded_at: 0,
+                vars: ReplayVars::from_move_vars(&MoveVars::momentum_surf()),
+                splits: Vec::new(),
+                input_semantics: String::new(),
+            },
+            frames: vec![sample_frame()],
+        };
+        assert!(replay.buttons_lag_pose());
+        let mut aligned = replay.clone();
+        aligned.header.input_semantics = "cmdProducesPose".into();
+        assert!(!aligned.buttons_lag_pose());
     }
 
     #[test]

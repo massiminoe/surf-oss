@@ -1,4 +1,4 @@
-//! CI gate for KSF summit WR: hard Layer A (ramps loaded) + soft Layer B vs baselines.
+//! CI gate for KSF summit WR: hard Layer A (ramps loaded) + soft windowed Layer B.
 //!
 //! Skips silently when BSP / ghost / baselines are absent.
 
@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use surf_app::replay::Replay;
 use surf_app::resim::{
-    audit_poses, preset_grid, resim_best_preset, ResimBaselines, SUMMIT_WR_OSXR,
+    audit_poses, preset_grid, resim_windows_best_preset, ResimBaselines, SUMMIT_WR_OSXR,
 };
 use surf_app::zones::{load_zones_file, zones_path_for_map};
 use surf_map::LoadedMap;
@@ -54,28 +54,36 @@ fn summit_wr_pose_and_soft_resim() {
         pose.on_ramp_frac()
     );
 
+    let frames = replay.frames_for_resim();
     let presets = preset_grid();
-    let (_all, best) = resim_best_preset(&loaded, &replay.frames, &zones, &presets);
-    let best = best.expect("resim produced stats");
+    let (segments, starts, _all, best) =
+        resim_windows_best_preset(&loaded, &frames, &zones, &presets);
     assert!(
-        !best.catastrophic(),
-        "catastrophic survival {:.0}% on preset {}",
-        100.0 * best.survival_frac(),
-        best.preset
+        !starts.is_empty(),
+        "no on-ramp windows (segments={})",
+        segments.len()
     );
+    let best = best.expect("window resim produced stats");
+    let h66 = best
+        .at_horizon(66)
+        .expect("H=66 aggregate");
     assert!(
-        best.p95_origin_err <= soft.max_p95_origin_err * 2.0,
-        "p95 {:.1} > 2× baseline {:.1} (best preset {})",
-        best.p95_origin_err,
-        soft.max_p95_origin_err,
+        h66.median_max_origin_err <= soft.max_median_origin_err_at_66 * 2.0,
+        "median@66 {:.1} > 2× baseline {:.1} (best preset {})",
+        h66.median_max_origin_err,
+        soft.max_median_origin_err_at_66,
         best.preset
     );
 
+    let worst = h66.worst.first();
     eprintln!(
-        "summit WR OK: on-ramp={:.1}%  best={} p95={:.0} surv={:.0}%",
+        "summit WR OK: on-ramp={:.1}%  segs={} starts={}  best={} med@66={:.0} p95Max@66={:.0}  worst_start={}",
         100.0 * pose.on_ramp_frac(),
+        segments.len(),
+        starts.len(),
         best.preset,
-        best.p95_origin_err,
-        100.0 * best.survival_frac()
+        h66.median_max_origin_err,
+        h66.p95_max_origin_err,
+        worst.map(|w| w.start_tick).unwrap_or(0)
     );
 }

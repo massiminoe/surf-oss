@@ -2,26 +2,74 @@
 //!
 //! Layer A probes recorded poses for ramp contact / fall-through / burial.
 //! Layer B feeds stored inputs through `tick` under a MoveVars preset grid.
+//! Primary B signal is short-horizon **windowed** re-sim on on-ramp segments;
+//! open-loop full-run remains a diagnostic only.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use surf_core::brush::World;
 use surf_core::is_on_surf_ramp;
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState};
 use surf_core::tick;
-use surf_core::trace::point_contents_box;
+use surf_core::trace::{point_contents_box, trace_box, TraceHit};
 use surf_map::LoadedMap;
 
 use crate::replay::ReplayFrame;
 use crate::zones::{MapZones, ZoneBox};
 
-/// Default linear maps for the v1 KSF harness (leave-zone, no push/staged deps).
+fn deserialize_f32_null_as_zero<'de, D: Deserializer<'de>>(de: D) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(de)?.unwrap_or(0.0))
+}
+
+/// Short-horizon lengths (ticks @ 66.67 Hz ≈ 0.45s / 1s / 2s).
+pub const WINDOW_HORIZONS: &[usize] = &[30, 66, 132];
+
+/// Minimum contiguous on-ramp run length to seed a window (~0.6s).
+pub const MIN_RAMP_SEGMENT_LEN: usize = 40;
+
+/// Cap evaluated windows per ghost so audits stay cheap.
+pub const MAX_WINDOWS: usize = 32;
+
+/// Original v1 KSF harness slice (leave-zone, no push/staged deps).
 pub const V1_MAPS: &[&str] = &[
     "surf_summit",
     "surf_boreas",
     "surf_tendies",
     "surf_hourglass",
     "surf_andromeda",
+];
+
+/// Wave 1 soft-audit expand: remaining 0-push linear maps with zones + KSF ghosts.
+pub const WAVE1_MAPS: &[&str] = &[
+    "surf_void",
+    "surf_lux",
+    "surf_aquaflow",
+    "surf_demise",
+    "surf_fornax",
+    "surf_lovetunnel",
+    "surf_pantheon",
+];
+
+/// Default soft-audit map list — all 18 zoned maps (linear + push + staged).
+pub const SOFT_AUDIT_MAPS: &[&str] = &[
+    "surf_summit",
+    "surf_boreas",
+    "surf_tendies",
+    "surf_hourglass",
+    "surf_andromeda",
+    "surf_void",
+    "surf_lux",
+    "surf_aquaflow",
+    "surf_demise",
+    "surf_fornax",
+    "surf_lovetunnel",
+    "surf_pantheon",
+    "surf_nyx",
+    "surf_frost",
+    "surf_cyberwave",
+    "surf_cement",
+    "surf_botanica",
+    "surf_overgrowth",
 ];
 
 /// Summit WR ghost filename (KSF rank 1).
@@ -237,6 +285,7 @@ fn player_from_frame(f: &ReplayFrame) -> PlayerState {
         old_jump: false,
         surface_friction: 1.0,
         ground_normal: Vec3::Z,
+        ..PlayerState::default()
     }
 }
 
@@ -283,6 +332,8 @@ pub fn resim_map_run_named(
     let mut reached_end = false;
 
     for (i, frame) in frames.iter().enumerate().skip(1) {
+        player.basevelocity = map.touch_push(player.origin);
+        player.gravity_scale = map.touch_gravity(player.origin);
         player = tick(&map.world, &player, &frame.to_usercmd(), vars);
 
         if let Some((dest, angles)) = map.touch_teleport(player.origin) {
@@ -335,6 +386,8 @@ pub fn resim_map_run_named(
 }
 
 /// Run the full preset grid; return all stats and the best by (survival, p95).
+///
+/// Open-loop diagnostic — prefer [`resim_windows_best_preset`] for Layer B gates.
 pub fn resim_best_preset(
     map: &LoadedMap,
     frames: &[ReplayFrame],
@@ -379,6 +432,440 @@ pub fn resim_best_preset(
 }
 
 // ---------------------------------------------------------------------------
+// Layer B — windowed short-horizon re-sim (primary signal)
+// ---------------------------------------------------------------------------
+// Phase 2 (not built yet): once a worst window is stable (audit prints
+// start_tick + maxErr), extract that ramp + WR slice into assets/fixtures/
+// for a tight mini-world unit test. Do not add extract tooling until then.
+
+
+
+/// Contiguous on-ramp run: `[start, end)` frame indices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RampSegment {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl RampSegment {
+    pub fn len(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+}
+
+/// One short-horizon window result.
+#[derive(Clone, Debug)]
+pub struct WindowStats {
+    pub preset: String,
+    pub start_tick: usize,
+    pub horizon: usize,
+    pub compared: usize,
+    pub max_origin_err: f32,
+    pub final_origin_err: f32,
+    pub mean_origin_err: f32,
+    pub max_vel_err: f32,
+    pub died: bool,
+    pub teleports: usize,
+}
+
+/// Aggregate over many windows at one horizon.
+#[derive(Clone, Debug)]
+pub struct HorizonAggregate {
+    pub horizon: usize,
+    pub n_windows: usize,
+    /// Median of per-window max origin error.
+    pub median_max_origin_err: f32,
+    /// p95 of per-window max origin error.
+    pub p95_max_origin_err: f32,
+    /// Worst windows by max origin error (up to 5), descending.
+    pub worst: Vec<WindowStats>,
+}
+
+/// Per-preset window sweep across [`WINDOW_HORIZONS`].
+#[derive(Clone, Debug)]
+pub struct WindowPresetResult {
+    pub preset: String,
+    pub starts: Vec<usize>,
+    pub by_horizon: Vec<HorizonAggregate>,
+}
+
+impl WindowPresetResult {
+    pub fn at_horizon(&self, h: usize) -> Option<&HorizonAggregate> {
+        self.by_horizon.iter().find(|a| a.horizon == h)
+    }
+
+    pub fn median_at_66(&self) -> Option<f32> {
+        self.at_horizon(66).map(|a| a.median_max_origin_err)
+    }
+}
+
+/// Find contiguous on-ramp runs of at least `min_len` frames.
+pub fn find_on_ramp_segments(
+    map: &LoadedMap,
+    frames: &[ReplayFrame],
+    min_len: usize,
+) -> Vec<RampSegment> {
+    let hull = Hull::css_stand();
+    let mut out = Vec::new();
+    let mut seg_start: Option<usize> = None;
+    for (i, f) in frames.iter().enumerate() {
+        let on = is_on_surf_ramp(&map.world, f.origin, &hull);
+        match (on, seg_start) {
+            (true, None) => seg_start = Some(i),
+            (false, Some(s)) => {
+                let end = i;
+                if end.saturating_sub(s) >= min_len {
+                    out.push(RampSegment { start: s, end });
+                }
+                seg_start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = seg_start {
+        let end = frames.len();
+        if end.saturating_sub(s) >= min_len {
+            out.push(RampSegment { start: s, end });
+        }
+    }
+    out
+}
+
+/// Pick up to `max_windows` segment starts: first, longest, then evenly spaced.
+pub fn select_window_starts(segments: &[RampSegment], max_windows: usize) -> Vec<usize> {
+    if segments.is_empty() || max_windows == 0 {
+        return Vec::new();
+    }
+    if segments.len() <= max_windows {
+        return segments.iter().map(|s| s.start).collect();
+    }
+
+    let mut chosen: Vec<usize> = Vec::with_capacity(max_windows);
+    let push_unique = |idx: usize, chosen: &mut Vec<usize>| {
+        let start = segments[idx].start;
+        if !chosen.contains(&start) {
+            chosen.push(start);
+        }
+    };
+
+    // First segment.
+    push_unique(0, &mut chosen);
+
+    // Longest segment.
+    let longest = segments
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, s)| s.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    push_unique(longest, &mut chosen);
+
+    // Evenly spaced across the remaining budget.
+    let n = segments.len();
+    let budget = max_windows.saturating_sub(chosen.len());
+    if budget > 0 && n > 1 {
+        for k in 0..budget {
+            let idx = ((k + 1) * (n - 1)) / (budget + 1);
+            push_unique(idx, &mut chosen);
+            if chosen.len() >= max_windows {
+                break;
+            }
+        }
+    }
+
+    // Fill any leftover from the front.
+    for i in 0..n {
+        if chosen.len() >= max_windows {
+            break;
+        }
+        push_unique(i, &mut chosen);
+    }
+
+    chosen.sort_unstable();
+    chosen.truncate(max_windows);
+    chosen
+}
+
+/// Sudden sim speed collapse while the ghost keeps flying — the "1px wall" signal.
+#[derive(Clone, Debug)]
+pub struct SpeedSnag {
+    pub tick: usize,
+    pub sim_before: f32,
+    pub sim_after: f32,
+    pub ghost_speed: f32,
+}
+
+/// Scan window rows for ticks where sim XY speed drops below `keep_frac` of the
+/// previous sim speed while still above `min_before`, and the ghost stays fast.
+pub fn find_speed_snags(
+    rows: &[WindowTickRow],
+    min_before: f32,
+    keep_frac: f32,
+) -> Vec<SpeedSnag> {
+    let mut out = Vec::new();
+    let mut prev_sim = rows.first().map(|r| r.sim_speed).unwrap_or(0.0);
+    for r in rows.iter().skip(1) {
+        if prev_sim >= min_before
+            && r.sim_speed < prev_sim * keep_frac
+            && r.ghost_speed >= min_before * 0.8
+        {
+            out.push(SpeedSnag {
+                tick: r.tick,
+                sim_before: prev_sim,
+                sim_after: r.sim_speed,
+                ghost_speed: r.ghost_speed,
+            });
+        }
+        prev_sim = r.sim_speed;
+    }
+    out
+}
+
+/// Per-tick row from [`resim_window_trace`].
+#[derive(Clone, Debug)]
+pub struct WindowTickRow {
+    pub tick: usize,
+    pub origin_err: f32,
+    pub vel_err: f32,
+    pub sim_origin: Vec3,
+    pub ghost_origin: Vec3,
+    pub sim_vel: Vec3,
+    pub ghost_vel: Vec3,
+    pub sim_speed: f32,
+    pub ghost_speed: f32,
+    pub sim_grounded: bool,
+    pub ghost_grounded: bool,
+    pub sim_on_ramp: bool,
+    pub ghost_on_ramp: bool,
+    pub teleported: bool,
+    pub fwd: f32,
+    pub side: f32,
+    pub yaw: f32,
+    /// First sweep hit along pre-tick velocity (diagnostic; may differ slightly from move).
+    pub sweep_fraction: f32,
+    pub sweep_hit: Option<TraceHit>,
+}
+
+/// Re-sim a window and return per-tick comparison rows (plus summary stats).
+pub fn resim_window_trace(
+    map: &LoadedMap,
+    frames: &[ReplayFrame],
+    start_tick: usize,
+    horizon: usize,
+    vars: &MoveVars,
+    preset_name: &str,
+) -> (WindowStats, Vec<WindowTickRow>) {
+    let empty = || {
+        (
+            WindowStats {
+                preset: preset_name.to_string(),
+                start_tick,
+                horizon,
+                compared: 0,
+                max_origin_err: 0.0,
+                final_origin_err: 0.0,
+                mean_origin_err: 0.0,
+                max_vel_err: 0.0,
+                died: false,
+                teleports: 0,
+            },
+            Vec::new(),
+        )
+    };
+    if start_tick >= frames.len() || horizon == 0 {
+        return empty();
+    }
+
+    let hull = Hull::css_stand();
+    let end = (start_tick + horizon + 1).min(frames.len());
+    let mut player = player_from_frame(&frames[start_tick]);
+    let mut sum_err = 0.0_f32;
+    let mut max_origin_err = 0.0_f32;
+    let mut final_origin_err = 0.0_f32;
+    let mut max_vel_err = 0.0_f32;
+    let mut teleports = 0usize;
+    let mut died = false;
+    let mut compared = 0usize;
+    let mut rows = Vec::with_capacity(horizon);
+
+    for i in (start_tick + 1)..end {
+        let frame = &frames[i];
+        // Diagnostic sweep along pre-tick velocity (same hull as movement).
+        let sweep_end = player.origin + player.velocity * vars.tick_interval;
+        let sweep = trace_box(
+            &map.world,
+            player.origin,
+            sweep_end,
+            hull.mins,
+            hull.maxs,
+        );
+
+        player.basevelocity = map.touch_push(player.origin);
+        player.gravity_scale = map.touch_gravity(player.origin);
+        player = tick(&map.world, &player, &frame.to_usercmd(), vars);
+
+        let mut teleported = false;
+        if let Some((dest, angles)) = map.touch_teleport(player.origin) {
+            player.origin = dest;
+            player.viewangles = angles;
+            teleports += 1;
+            teleported = true;
+        }
+
+        if player.origin.z < map.kill_z {
+            died = true;
+            break;
+        }
+
+        let oerr = (player.origin - frame.origin).length();
+        let verr = (player.velocity - frame.velocity).length();
+        compared += 1;
+        sum_err += oerr;
+        max_origin_err = max_origin_err.max(oerr);
+        final_origin_err = oerr;
+        max_vel_err = max_vel_err.max(verr);
+
+        rows.push(WindowTickRow {
+            tick: i,
+            origin_err: oerr,
+            vel_err: verr,
+            sim_origin: player.origin,
+            ghost_origin: frame.origin,
+            sim_vel: player.velocity,
+            ghost_vel: frame.velocity,
+            sim_speed: player.velocity.length_2d(),
+            ghost_speed: frame.velocity.length_2d(),
+            sim_grounded: player.grounded,
+            ghost_grounded: frame.grounded,
+            sim_on_ramp: is_on_surf_ramp(&map.world, player.origin, &hull),
+            ghost_on_ramp: is_on_surf_ramp(&map.world, frame.origin, &hull),
+            teleported,
+            fwd: frame.forward_move,
+            side: frame.side_move,
+            yaw: frame.yaw,
+            sweep_fraction: sweep.fraction,
+            sweep_hit: sweep.hit,
+        });
+    }
+
+    let mean_origin_err = if compared == 0 {
+        0.0
+    } else {
+        sum_err / compared as f32
+    };
+
+    (
+        WindowStats {
+            preset: preset_name.to_string(),
+            start_tick,
+            horizon,
+            compared,
+            max_origin_err,
+            final_origin_err,
+            mean_origin_err,
+            max_vel_err,
+            died,
+            teleports,
+        },
+        rows,
+    )
+}
+
+/// Re-sim up to `horizon` ticks seeded at `start_tick`.
+pub fn resim_window(
+    map: &LoadedMap,
+    frames: &[ReplayFrame],
+    start_tick: usize,
+    horizon: usize,
+    vars: &MoveVars,
+    preset_name: &str,
+) -> WindowStats {
+    resim_window_trace(map, frames, start_tick, horizon, vars, preset_name).0
+}
+
+fn aggregate_horizon(horizon: usize, windows: Vec<WindowStats>) -> HorizonAggregate {
+    let n = windows.len();
+    let mut max_errs: Vec<f32> = windows.iter().map(|w| w.max_origin_err).collect();
+    max_errs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_max_origin_err = percentile_sorted(&max_errs, 0.5);
+    let p95_max_origin_err = percentile_sorted(&max_errs, 0.95);
+
+    let mut worst = windows;
+    worst.sort_by(|a, b| {
+        b.max_origin_err
+            .partial_cmp(&a.max_origin_err)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    worst.truncate(5);
+
+    HorizonAggregate {
+        horizon,
+        n_windows: n,
+        median_max_origin_err,
+        p95_max_origin_err,
+        worst,
+    }
+}
+
+/// Window sweep for one preset over selected on-ramp starts.
+pub fn resim_windows_named(
+    map: &LoadedMap,
+    frames: &[ReplayFrame],
+    vars: &MoveVars,
+    preset_name: &str,
+    starts: &[usize],
+    horizons: &[usize],
+) -> WindowPresetResult {
+    let mut by_horizon = Vec::with_capacity(horizons.len());
+    for &h in horizons {
+        let windows: Vec<WindowStats> = starts
+            .iter()
+            .map(|&s| resim_window(map, frames, s, h, vars, preset_name))
+            .collect();
+        by_horizon.push(aggregate_horizon(h, windows));
+    }
+    WindowPresetResult {
+        preset: preset_name.to_string(),
+        starts: starts.to_vec(),
+        by_horizon,
+    }
+}
+
+/// Discover on-ramp windows and sweep the preset grid; best = lowest median max-err @ H=66.
+pub fn resim_windows_best_preset(
+    map: &LoadedMap,
+    frames: &[ReplayFrame],
+    zones: &MapZones,
+    presets: &[NamedPreset],
+) -> (Vec<RampSegment>, Vec<usize>, Vec<WindowPresetResult>, Option<WindowPresetResult>) {
+    let segments = find_on_ramp_segments(map, frames, MIN_RAMP_SEGMENT_LEN);
+    let starts = select_window_starts(&segments, MAX_WINDOWS);
+    let mut all = Vec::with_capacity(presets.len());
+    for p in presets {
+        let vars = vars_for_map(&p.vars, zones);
+        all.push(resim_windows_named(
+            map,
+            frames,
+            &vars,
+            p.name,
+            &starts,
+            WINDOW_HORIZONS,
+        ));
+    }
+    let best = all
+        .iter()
+        .filter(|r| r.median_at_66().is_some())
+        .min_by(|a, b| {
+            a.median_at_66()
+                .unwrap_or(f32::MAX)
+                .partial_cmp(&b.median_at_66().unwrap_or(f32::MAX))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned();
+    (segments, starts, all, best)
+}
+
+// ---------------------------------------------------------------------------
 // Baselines (checked-in JSON)
 // ---------------------------------------------------------------------------
 
@@ -389,7 +876,11 @@ pub struct MapBaseline {
     pub min_on_ramp_frac: f32,
     pub max_kill_z_frac: f32,
     pub max_buried_frac: f32,
-    /// Soft p95 origin-error ceiling for the best preset (units).
+    /// Soft ceiling: median of per-window max origin err @ H=66 (best preset).
+    pub max_median_origin_err_at_66: f32,
+    /// Open-loop full-run p95 (diagnostic; not used for CI soft gate).
+    /// `null` / missing deserializes as 0 (e.g. calibrated with `--no-open-loop`).
+    #[serde(default, deserialize_with = "deserialize_f32_null_as_zero")]
     pub max_p95_origin_err: f32,
     /// Preferred preset name from calibration (informational).
     #[serde(default)]
@@ -460,5 +951,33 @@ mod tests {
         let v: Vec<f32> = (0..100).map(|i| i as f32).collect();
         // idx = round((n-1)*0.95) = round(94.05) = 94
         assert!((percentile_sorted(&v, 0.95) - 94.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn select_window_starts_picks_first_and_longest() {
+        let segs = vec![
+            RampSegment { start: 10, end: 60 },   // len 50
+            RampSegment { start: 100, end: 200 }, // len 100 (longest)
+            RampSegment { start: 300, end: 350 }, // len 50
+            RampSegment { start: 400, end: 450 },
+            RampSegment { start: 500, end: 550 },
+        ];
+        let starts = select_window_starts(&segs, 3);
+        assert!(starts.contains(&10), "first: {starts:?}");
+        assert!(starts.contains(&100), "longest: {starts:?}");
+        assert_eq!(starts.len(), 3);
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[test]
+    fn select_window_starts_caps() {
+        let segs: Vec<_> = (0..40)
+            .map(|i| RampSegment {
+                start: i * 100,
+                end: i * 100 + 50,
+            })
+            .collect();
+        let starts = select_window_starts(&segs, MAX_WINDOWS);
+        assert_eq!(starts.len(), MAX_WINDOWS);
     }
 }

@@ -31,12 +31,32 @@ pub struct TeleportTrigger {
     pub dest_angles: Angle,
 }
 
+/// Continuous `trigger_push` — applies as player basevelocity while touching.
+#[derive(Clone, Debug)]
+pub struct PushTrigger {
+    pub brushes: Vec<Brush>,
+    pub bounds: Aabb,
+    /// Precomputed `speed * pushdir_forward` (u/s).
+    pub velocity: Vec3,
+}
+
+/// `trigger_gravity` — multiplies MoveVars gravity while touching.
+#[derive(Clone, Debug)]
+pub struct GravityTrigger {
+    pub brushes: Vec<Brush>,
+    pub bounds: Aabb,
+    pub scale: f32,
+}
+
 pub struct ParsedEntities {
     /// Gameplay start (stage start / most-targeted teleport dest — not lobby T/CT).
     pub spawn: NamedPoint,
     pub teleports: Vec<TeleportTrigger>,
-    /// Model indices to render in addition to world (func_illusionary / solid func_brush).
-    pub render_models: Vec<usize>,
+    pub pushes: Vec<PushTrigger>,
+    pub gravities: Vec<GravityTrigger>,
+    /// Brush models to render in addition to world (func_illusionary / never-solid func_brush).
+    /// `(model_index, entity origin)` — bmodel verts are local to origin.
+    pub render_models: Vec<(usize, Vec3)>,
 }
 
 pub fn parse_entities(
@@ -47,6 +67,10 @@ pub fn parse_entities(
     let mut player_spawns = Vec::new();
     // (model, target, start_disabled, origin, filtername)
     let mut teleports_raw: Vec<(usize, String, bool, Vec3, String)> = Vec::new();
+    // (model, origin, velocity) — continuous only (skip Once-only flag 128).
+    let mut pushes_raw: Vec<(usize, Vec3, Vec3)> = Vec::new();
+    // (model, origin, gravity scale)
+    let mut gravities_raw: Vec<(usize, Vec3, f32)> = Vec::new();
     let mut named: HashMap<String, NamedEntity> = HashMap::new();
     let mut render_models = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
@@ -108,10 +132,56 @@ pub fn parse_entities(
                     }
                 }
             }
+            "trigger_push" => {
+                let start_disabled =
+                    ent.prop("StartDisabled").map(|v| v == "1").unwrap_or(false);
+                if start_disabled {
+                    continue;
+                }
+                let spawnflags: u32 = ent
+                    .prop("spawnflags")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                // SF_TRIG_PUSH_ONCE = 128 — deferred (corpus maps use continuous).
+                if spawnflags & 128 != 0 {
+                    continue;
+                }
+                let speed: f32 = ent
+                    .prop("speed")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                if speed == 0.0 {
+                    continue;
+                }
+                let pushdir = parse_pushdir(&ent);
+                let (fwd, _, _) = pushdir.vectors();
+                let velocity = fwd * speed;
+                if let Some(model) = ent.prop("model").and_then(parse_model_index) {
+                    if model > 0 {
+                        pushes_raw.push((model, origin, velocity));
+                    }
+                }
+            }
+            "trigger_gravity" => {
+                let start_disabled =
+                    ent.prop("StartDisabled").map(|v| v == "1").unwrap_or(false);
+                if start_disabled {
+                    continue;
+                }
+                let scale: f32 = ent
+                    .prop("gravity")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1.0);
+                if let Some(model) = ent.prop("model").and_then(parse_model_index) {
+                    if model > 0 {
+                        gravities_raw.push((model, origin, scale));
+                    }
+                }
+            }
             "func_illusionary" => {
                 if let Some(model) = ent.prop("model").and_then(parse_model_index) {
                     if model > 0 {
-                        render_models.push(model);
+                        render_models.push((model, origin));
                     }
                 }
             }
@@ -121,7 +191,7 @@ pub fn parse_entities(
                 if solidity == "1" {
                     if let Some(model) = ent.prop("model").and_then(parse_model_index) {
                         if model > 0 {
-                            render_models.push(model);
+                            render_models.push((model, origin));
                         }
                     }
                 }
@@ -144,45 +214,89 @@ pub fn parse_entities(
         let Some(dest) = named.get(&target) else {
             continue;
         };
-        let Some(model) = bsp.models.get(model_idx) else {
+        let Some((brushes, bounds)) =
+            harvest_trigger_brushes(bsp, leaf_ranges, world_bounds, model_idx, origin)
+        else {
             continue;
         };
-        let indices = collect_model_brushes(bsp, leaf_ranges, model.head_node);
-        let mut brushes = Vec::new();
-        let mut bounds: Option<Aabb> = None;
-        for bi in indices {
-            // Trigger brushes lie as SOLID in the lump — take all in the model.
-            // Bmodel planes are entity-local; shift into world space.
-            if let Some(brush) = brush_from_bsp(bsp, bi, world_bounds) {
-                let brush = translate_brush(brush, origin);
-                bounds = Some(match bounds {
-                    None => brush.bounds,
-                    Some(b) => merge_aabb(b, brush.bounds),
-                });
-                brushes.push(brush);
-            }
-        }
-        if brushes.is_empty() {
-            let b = Aabb::from_mins_maxs(
-                Vec3::new(model.mins.x, model.mins.y, model.mins.z) + origin,
-                Vec3::new(model.maxs.x, model.maxs.y, model.maxs.z) + origin,
-            );
-            brushes.push(Brush::aabb(b.mins, b.maxs));
-            bounds = Some(b);
-        }
         teleports.push(TeleportTrigger {
             brushes,
-            bounds: bounds.unwrap_or(world_bounds),
+            bounds,
             dest_origin: dest.point.origin,
             dest_angles: dest.point.angles,
+        });
+    }
+
+    let mut pushes = Vec::new();
+    for (model_idx, origin, velocity) in pushes_raw {
+        let Some((brushes, bounds)) =
+            harvest_trigger_brushes(bsp, leaf_ranges, world_bounds, model_idx, origin)
+        else {
+            continue;
+        };
+        pushes.push(PushTrigger {
+            brushes,
+            bounds,
+            velocity,
+        });
+    }
+
+    let mut gravities = Vec::new();
+    for (model_idx, origin, scale) in gravities_raw {
+        let Some((brushes, bounds)) =
+            harvest_trigger_brushes(bsp, leaf_ranges, world_bounds, model_idx, origin)
+        else {
+            continue;
+        };
+        gravities.push(GravityTrigger {
+            brushes,
+            bounds,
+            scale,
         });
     }
 
     Ok(ParsedEntities {
         spawn,
         teleports,
+        pushes,
+        gravities,
         render_models,
     })
+}
+
+/// Harvest brush planes for a trigger bmodel, shifted by entity `origin`.
+fn harvest_trigger_brushes(
+    bsp: &Bsp,
+    leaf_ranges: &[LeafBrushRange],
+    world_bounds: Aabb,
+    model_idx: usize,
+    origin: Vec3,
+) -> Option<(Vec<Brush>, Aabb)> {
+    let model = bsp.models.get(model_idx)?;
+    let indices = collect_model_brushes(bsp, leaf_ranges, model.head_node);
+    let mut brushes = Vec::new();
+    let mut bounds: Option<Aabb> = None;
+    for bi in indices {
+        // Trigger brushes lie as SOLID in the lump — take all in the model.
+        // Bmodel planes are entity-local; shift into world space.
+        if let Some(brush) = brush_from_bsp(bsp, bi, world_bounds) {
+            let brush = translate_brush(brush, origin);
+            bounds = Some(match bounds {
+                None => brush.bounds,
+                Some(b) => merge_aabb(b, brush.bounds),
+            });
+            brushes.push(brush);
+        }
+    }
+    if brushes.is_empty() {
+        let b = Aabb::from_mins_maxs(
+            Vec3::new(model.mins.x, model.mins.y, model.mins.z) + origin,
+            Vec3::new(model.maxs.x, model.maxs.y, model.maxs.z) + origin,
+        );
+        brushes.push(Brush::aabb(b.mins, b.maxs));
+        bounds = Some(b);
+    }
+    Some((brushes, bounds.unwrap_or(world_bounds)))
 }
 
 /// Surf maps put T/CT in a cosmetic lobby; stage start is usually an
@@ -416,6 +530,20 @@ fn parse_angles(ent: &vbsp::RawEntity<'_>) -> Angle {
         }
     }
     Angle::new(0.0, 0.0, 0.0)
+}
+
+/// `trigger_push.pushdir` is pitch/yaw/roll degrees (same layout as `angles`).
+fn parse_pushdir(ent: &vbsp::RawEntity<'_>) -> Angle {
+    if let Some(a) = ent.prop("pushdir").and_then(|s| {
+        let mut it = s.split_whitespace();
+        let pitch: f32 = it.next()?.parse().ok()?;
+        let yaw: f32 = it.next()?.parse().ok()?;
+        let roll: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        Some(Angle::new(pitch, yaw, roll))
+    }) {
+        return a;
+    }
+    Angle::ZERO
 }
 
 fn parse_model_index(s: &str) -> Option<usize> {

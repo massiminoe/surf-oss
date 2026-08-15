@@ -164,6 +164,10 @@ pub struct UserCmd {
 pub struct PlayerState {
     pub origin: Vec3,
     pub velocity: Vec3,
+    /// Conveyor / `trigger_push` carry for this tick (Source basevelocity).
+    pub basevelocity: Vec3,
+    /// `trigger_gravity` multiplier (1.0 = normal).
+    pub gravity_scale: f32,
     pub viewangles: Angle,
     pub grounded: bool,
     pub ducked: bool,
@@ -179,6 +183,8 @@ impl Default for PlayerState {
         Self {
             origin: Vec3::ZERO,
             velocity: Vec3::ZERO,
+            basevelocity: Vec3::ZERO,
+            gravity_scale: 1.0,
             viewangles: Angle::ZERO,
             grounded: false,
             ducked: false,

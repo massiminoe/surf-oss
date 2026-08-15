@@ -69,6 +69,8 @@ pub struct HudState {
     pub pb_flash: bool,
     /// Checkpoint split flash, e.g. `"CP2 12.340  -0.210"`.
     pub split_line: Option<String>,
+    /// Staged maps: `"STAGE 2/5"` while armed/running/finished.
+    pub stage_line: Option<String>,
     /// Live time delta vs PB ghost (negative = ahead). Shown while racing ghost.
     pub ghost_time_delta: Option<f32>,
     /// Live 2D speed delta vs PB ghost (positive = faster than ghost).
@@ -93,6 +95,7 @@ impl Default for HudState {
             show_keys: None,
             pb_flash: false,
             split_line: None,
+            stage_line: None,
             ghost_time_delta: None,
             ghost_speed_delta: None,
             menu: None,
@@ -340,9 +343,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
 
         let phase_label = match hud.timer_phase {
-            HudTimerPhase::Armed => Some("START"),
             HudTimerPhase::Finished => Some("FINISH"),
-            _ => None,
+            HudTimerPhase::Armed => hud.stage_line.as_deref().or(Some("START")),
+            HudTimerPhase::Running => hud.stage_line.as_deref(),
+            HudTimerPhase::Idle => None,
         };
         if let Some(p) = phase_label {
             set_buf_text(

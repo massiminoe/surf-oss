@@ -2,43 +2,165 @@
   "maps": [
     {
       "map": "surf_summit",
-      "minOnRampFrac": 0.20,
+      "minOnRampFrac": 0.234,
       "maxKillZFrac": 0.001,
       "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
       "maxP95OriginErr": 28000.0,
-      "bestPreset": "ksf_css_66t"
+      "bestPreset": "momentum_surf"
     },
     {
       "map": "surf_boreas",
-      "minOnRampFrac": 0.12,
+      "minOnRampFrac": 0.223,
       "maxKillZFrac": 0.001,
       "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
       "maxP95OriginErr": 32000.0,
-      "bestPreset": "aa100_accel5"
+      "bestPreset": "momentum_surf"
     },
     {
       "map": "surf_tendies",
       "minOnRampFrac": 0.15,
       "maxKillZFrac": 0.001,
       "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
       "maxP95OriginErr": 23000.0,
       "bestPreset": "momentum_surf"
     },
     {
       "map": "surf_hourglass",
-      "minOnRampFrac": 0.25,
+      "minOnRampFrac": 0.256,
       "maxKillZFrac": 0.001,
       "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
       "maxP95OriginErr": 22000.0,
-      "bestPreset": "ksf_css_stock"
+      "bestPreset": "momentum_surf"
     },
     {
       "map": "surf_andromeda",
-      "minOnRampFrac": 0.20,
+      "minOnRampFrac": 0.231,
       "maxKillZFrac": 0.001,
       "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
       "maxP95OriginErr": 13000.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_void",
+      "minOnRampFrac": 0.171,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_lux",
+      "minOnRampFrac": 0.128,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_aquaflow",
+      "minOnRampFrac": 0.091,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 140.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "ksf_css_66t"
+    },
+    {
+      "map": "surf_demise",
+      "minOnRampFrac": 0.197,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 90.0,
+      "maxP95OriginErr": 0.0,
       "bestPreset": "ksf_css_stock"
+    },
+    {
+      "map": "surf_fornax",
+      "minOnRampFrac": 0.163,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_lovetunnel",
+      "minOnRampFrac": 0.212,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_pantheon",
+      "minOnRampFrac": 0.166,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_nyx",
+      "minOnRampFrac": 0.195,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_frost",
+      "minOnRampFrac": 0.151,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_cyberwave",
+      "minOnRampFrac": 0.234,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_cement",
+      "minOnRampFrac": 0.146,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_botanica",
+      "minOnRampFrac": 0.205,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "momentum_surf"
+    },
+    {
+      "map": "surf_overgrowth",
+      "minOnRampFrac": 0.107,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 17510.0,
+      "maxP95OriginErr": 0.0,
+      "bestPreset": "aa100_accel5"
     }
   ]
 }

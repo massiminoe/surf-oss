@@ -117,12 +117,17 @@ pub fn tick(world: &World, state: &PlayerState, cmd: &UserCmd, vars: &MoveVars) 
 }
 
 fn start_gravity(p: &mut PlayerState, vars: &MoveVars) {
-    p.velocity.z -= vars.gravity * 0.5 * vars.tick_interval;
+    let g = vars.gravity * p.gravity_scale;
+    p.velocity.z -= g * 0.5 * vars.tick_interval;
+    // Source: apply basevelocity.z once here, then clear z so Walk/Air only carry XY.
+    p.velocity.z += p.basevelocity.z * vars.tick_interval;
+    p.basevelocity.z = 0.0;
     check_velocity(&mut p.velocity, &mut p.origin, vars.maxvelocity);
 }
 
 fn finish_gravity(p: &mut PlayerState, vars: &MoveVars) {
-    p.velocity.z -= vars.gravity * 0.5 * vars.tick_interval;
+    let g = vars.gravity * p.gravity_scale;
+    p.velocity.z -= g * 0.5 * vars.tick_interval;
     check_velocity(&mut p.velocity, &mut p.origin, vars.maxvelocity);
 }
 
@@ -174,7 +179,10 @@ fn air_move(
         vars.tick_interval,
         vars.air_wishspeed_cap,
     );
+    // Add basevelocity for the position step, then subtract so it doesn't bake in.
+    p.velocity = p.velocity + p.basevelocity;
     try_player_move(world, p, vars, hull);
+    p.velocity = p.velocity - p.basevelocity;
 }
 
 fn walk_move(
@@ -197,7 +205,11 @@ fn walk_move(
     );
     p.velocity.z = 0.0;
 
+    // Basevelocity may still carry XY from a push pad on the ground.
+    p.velocity = p.velocity + p.basevelocity;
+
     if p.velocity.length() < 1.0 {
+        p.velocity = p.velocity - p.basevelocity;
         p.velocity = Vec3::ZERO;
         stay_on_ground(world, p, vars, hull);
         return;
@@ -211,12 +223,14 @@ fn walk_move(
     let tr = trace_player(world, p.origin, dest, hull);
     if tr.fraction == 1.0 {
         p.origin = tr.endpos;
+        p.velocity = p.velocity - p.basevelocity;
         stay_on_ground(world, p, vars, hull);
         return;
     }
 
     // Step up over obstacles.
     step_move(world, p, dest, vars, hull);
+    p.velocity = p.velocity - p.basevelocity;
     stay_on_ground(world, p, vars, hull);
 }
 
@@ -801,6 +815,57 @@ mod tests {
         assert!(
             (stayed_up.origin.z - unducked.origin.z - delta).abs() < 1e-3,
             "releasing duck in clear air should drop feet by {delta}"
+        );
+    }
+
+    #[test]
+    fn continuous_push_carries_origin_without_baking_speed() {
+        let world = World::empty();
+        let vars = MoveVars::momentum_surf();
+        let mut p = PlayerState {
+            origin: Vec3::new(0.0, 0.0, 256.0),
+            velocity: Vec3::ZERO,
+            grounded: false,
+            basevelocity: Vec3::new(1000.0, 0.0, 0.0),
+            ..PlayerState::default()
+        };
+        let before = p.origin;
+        p = tick(&world, &p, &UserCmd::default(), &vars);
+        let dx = p.origin.x - before.x;
+        // One tick of 1000 u/s base ≈ 15 units; gravity pulls z but not x.
+        assert!(
+            (dx - 1000.0 * vars.tick_interval).abs() < 0.05,
+            "push carry dx={dx}"
+        );
+        // Stored velocity must not keep the push (add/subtract).
+        assert!(
+            p.velocity.x.abs() < 1.0,
+            "push must not bake into velocity, got vx={}",
+            p.velocity.x
+        );
+    }
+
+    #[test]
+    fn gravity_scale_halves_fall() {
+        let world = World::empty();
+        let vars = MoveVars::momentum_surf();
+        let mut full = PlayerState {
+            origin: Vec3::new(0.0, 0.0, 512.0),
+            velocity: Vec3::ZERO,
+            grounded: false,
+            gravity_scale: 1.0,
+            ..PlayerState::default()
+        };
+        let mut half = full.clone();
+        half.gravity_scale = 0.5;
+        full = tick(&world, &full, &UserCmd::default(), &vars);
+        half = tick(&world, &half, &UserCmd::default(), &vars);
+        // After one tick, vz ≈ -g*dt (both half-gravity steps). Half scale → half vz.
+        assert!(
+            (half.velocity.z - full.velocity.z * 0.5).abs() < 0.1,
+            "half gravity vz={} full={}",
+            half.velocity.z,
+            full.velocity.z
         );
     }
 }

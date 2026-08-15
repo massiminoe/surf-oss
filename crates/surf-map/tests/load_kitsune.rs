@@ -99,3 +99,27 @@ fn summit_teleports_use_entity_origin() {
         "world origin must not be a fail net after origin transform"
     );
 }
+
+#[test]
+fn cement_thin_stage2_teleport_fires_with_hull() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_cement.bsp");
+    let map = LoadedMap::load_path(path).expect("load cement");
+    // Stage-1 end slab is ~2u thick at z≈7425. Point probes miss it; hull touch
+    // must fire once feet enter the volume (WR falls through here → stage2).
+    let hit = map
+        .touch_teleport(Vec3::new(-14720.0, 12800.0, 7425.0))
+        .expect("cement tos2 thin floor should teleport");
+    assert!(
+        (hit.0.x - 4352.0).abs() < 1.0
+            && (hit.0.y - 8192.0).abs() < 1.0
+            && (hit.0.z - 14464.0).abs() < 1.0,
+        "expected stage2 dest, got {:?}",
+        hit.0
+    );
+    // Still above the slab: feet at WR pre-tele frame must not fire yet.
+    assert!(
+        map.touch_teleport(Vec3::new(-14739.0, 12845.0, 7440.0))
+            .is_none(),
+        "hull above thin slab should not teleport early"
+    );
+}

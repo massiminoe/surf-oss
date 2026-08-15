@@ -32,6 +32,8 @@ pub struct RunTimer {
     /// Elapsed seconds while Running / frozen Finished time.
     pub time_secs: f32,
     pub track_type: TrackType,
+    /// 1-based current stage (staged maps only; always 1 on linear).
+    pub current_stage: usize,
     /// Checkpoint split times for the current / finished run (ordered).
     pub splits: Vec<f32>,
     /// Latest split event (consumed by app for HUD flash).
@@ -52,6 +54,7 @@ impl Default for RunTimer {
             phase: TimerPhase::Idle,
             time_secs: 0.0,
             track_type: TrackType::Linear,
+            current_stage: 1,
             splits: Vec::new(),
             last_split: None,
             was_in_start: false,
@@ -75,6 +78,7 @@ impl RunTimer {
     pub fn reset(&mut self) {
         self.phase = TimerPhase::Idle;
         self.time_secs = 0.0;
+        self.current_stage = 1;
         self.splits.clear();
         self.last_split = None;
         self.was_in_start = false;
@@ -83,11 +87,21 @@ impl RunTimer {
         self.cp_inside.clear();
     }
 
-    /// Fail teleport / kill-z snapped the player (possibly into start).
-    /// Linear maps keep the clock; do not treat this as voluntary start re-entry.
+    /// Fail teleport / kill-z snapped the player (possibly into a stage start).
+    /// Soft-respawn keeps the clock; do not treat this as voluntary start re-entry.
     pub fn notify_soft_respawn(&mut self) {
         if matches!(self.phase, TimerPhase::Running | TimerPhase::Finished) {
             self.soft_enter_start = true;
+        }
+    }
+
+    /// After a soft snap, sync `current_stage` if the player landed in a stage zone.
+    pub fn sync_stage_after_respawn(&mut self, zones: &MapZones, player: &PlayerState) {
+        if self.track_type != TrackType::Staged {
+            return;
+        }
+        if let Some(s) = zones.main.stage_containing(player.origin, player.hull()) {
+            self.current_stage = s;
         }
     }
 
@@ -111,6 +125,7 @@ impl RunTimer {
                 if in_start {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.current_stage = 1;
                     self.splits.clear();
                     self.next_cp = 0;
                 }
@@ -129,10 +144,11 @@ impl RunTimer {
             TimerPhase::Running => {
                 self.time_secs += dt;
                 // Cancel on voluntary re-entry from outside. Soft-respawn into
-                // start (fail TP / kill-z → td_mapstart) must keep Running.
+                // start (fail TP / kill-z → stage/map start) must keep Running.
                 if in_start && !self.was_in_start && !soft {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.current_stage = 1;
                     self.splits.clear();
                     self.next_cp = 0;
                     self.last_split = None;
@@ -147,6 +163,7 @@ impl RunTimer {
                 if in_start && !soft {
                     self.phase = TimerPhase::Armed;
                     self.time_secs = 0.0;
+                    self.current_stage = 1;
                     self.splits.clear();
                     self.next_cp = 0;
                     self.last_split = None;
@@ -154,8 +171,15 @@ impl RunTimer {
             }
         }
 
-        // Prespeed while standing in start (armed or after fail soft-enter).
-        if in_start && matches!(self.phase, TimerPhase::Armed | TimerPhase::Running) {
+        // Prespeed: linear = main start; staged = current stage zone.
+        let prespeed_zone = if self.track_type == TrackType::Staged {
+            track.stage_zone(self.current_stage)
+        } else {
+            &track.start
+        };
+        if prespeed_zone.contains_player(player.origin, hull)
+            && matches!(self.phase, TimerPhase::Armed | TimerPhase::Running)
+        {
             apply_prespeed(player, track.limit_start_ground_speed);
         }
 
@@ -166,6 +190,7 @@ impl RunTimer {
     fn start_run(&mut self, cp_count: usize) {
         self.phase = TimerPhase::Running;
         self.time_secs = 0.0;
+        self.current_stage = 1;
         self.splits.clear();
         self.last_split = None;
         self.next_cp = 0;
@@ -197,6 +222,10 @@ impl RunTimer {
                 delta_vs_pb: delta,
             });
             self.next_cp += 1;
+            // Entering checkpoint i (0-based) means arriving at stage i+2.
+            if self.track_type == TrackType::Staged {
+                self.current_stage = i + 2;
+            }
         }
         self.cp_inside[i] = now;
         // Keep other inside flags updated so re-entry after skip isn't weird.
@@ -221,6 +250,22 @@ impl RunTimer {
 
     pub fn take_split_event(&mut self) -> Option<SplitEvent> {
         self.last_split.take()
+    }
+
+    /// `STAGE k/n` while armed/running/finished on staged maps.
+    pub fn stage_hud_label(&self, zones: &MapZones) -> Option<String> {
+        if self.track_type != TrackType::Staged {
+            return None;
+        }
+        if matches!(
+            self.phase,
+            TimerPhase::Idle
+        ) {
+            return None;
+        }
+        let n = zones.main.stage_count().max(1);
+        let k = self.current_stage.clamp(1, n);
+        Some(format!("STAGE {k}/{n}"))
     }
 }
 
@@ -258,12 +303,18 @@ pub fn format_pb_delta(delta: f32) -> String {
     format!("{sign}{abs}")
 }
 
-/// HUD line for a checkpoint split flash.
-pub fn format_split_line(ev: SplitEvent) -> String {
+/// HUD line for a checkpoint / stage split flash.
+pub fn format_split_line(ev: SplitEvent, staged: bool) -> String {
     let t = format_time(ev.time_secs);
+    let label = if staged {
+        // Split index 1 = arriving at stage 2.
+        format!("S{}", ev.index + 1)
+    } else {
+        format!("CP{}", ev.index)
+    };
     match ev.delta_vs_pb {
-        Some(d) => format!("CP{} {t}  {}", ev.index, format_pb_delta(d)),
-        None => format!("CP{} {t}", ev.index),
+        Some(d) => format!("{label} {t}  {}", format_pb_delta(d)),
+        None => format!("{label} {t}"),
     }
 }
 
@@ -469,5 +520,78 @@ mod tests {
         assert_eq!(format_time(0.0), "0.000");
         assert_eq!(format_time(12.3456), "12.346");
         assert_eq!(format_time(72.5), "1:12.500");
+    }
+
+    fn staged_zones() -> MapZones {
+        let mut z = sample_zones();
+        z.track_type = TrackType::Staged;
+        z.main.start_on_jump = false;
+        z
+    }
+
+    #[test]
+    fn staged_advances_stage_on_checkpoint() {
+        let zones = staged_zones();
+        let mut timer = RunTimer::new(TrackType::Staged);
+        let dt = 0.015;
+
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed);
+        assert_eq!(timer.current_stage, 1);
+        assert_eq!(timer.stage_hud_label(&zones).as_deref(), Some("STAGE 1/3"));
+
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert_eq!(timer.current_stage, 1);
+
+        p = player_at(210.0, 0.0, false);
+        for _ in 0..20 {
+            timer.tick(&zones, &mut p, dt, &[]);
+        }
+        assert_eq!(timer.current_stage, 2);
+        let ev = timer.take_split_event().expect("stage split");
+        assert_eq!(format_split_line(ev, true), format!("S2 {}", format_time(ev.time_secs)));
+    }
+
+    #[test]
+    fn staged_soft_respawn_syncs_stage_and_prespeed() {
+        let zones = staged_zones();
+        let mut timer = RunTimer::new(TrackType::Staged);
+        timer.phase = TimerPhase::Running;
+        timer.time_secs = 10.0;
+        timer.current_stage = 2;
+        timer.next_cp = 1;
+        timer.cp_inside = vec![false; 2];
+        timer.was_in_start = false;
+
+        // Kill-z style snap into stage-2 zone center.
+        let spawn = zones.main.stage_spawn(2);
+        let mut p = PlayerState {
+            origin: spawn,
+            velocity: Vec3::new(500.0, 0.0, 0.0),
+            grounded: true,
+            ..PlayerState::default()
+        };
+        timer.notify_soft_respawn();
+        timer.sync_stage_after_respawn(&zones, &p);
+        assert_eq!(timer.current_stage, 2);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!(timer.time_secs > 10.0);
+        // Prespeed in stage zone.
+        assert!((p.velocity.length_2d() - 350.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn staged_stage_spawn_is_box_floor_center() {
+        let zones = staged_zones();
+        let o = zones.main.stage_spawn(1);
+        assert!((o.x - 50.0).abs() < 1e-3);
+        assert!((o.y - 50.0).abs() < 1e-3);
+        assert!((o.z - 0.0).abs() < 1e-3);
+        let o2 = zones.main.stage_spawn(2);
+        assert!((o2.x - 210.0).abs() < 1e-3);
     }
 }

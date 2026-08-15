@@ -1,14 +1,22 @@
 //! Embedded Source static-prop models (`.mdl` + `.vvd` + `.dx90.vtx`).
+//!
+//! Cyberwave-style maps ship surf ramps as `solid=Physics` MDLs. We render those
+//! and build TraceBox collision from the same mesh (`.phy` decode can replace this
+//! later). Decorative props stay render-skip until full prop support.
 
 use std::collections::HashMap;
 
 use surf_core::graybox::{GrayboxMesh, Tri};
 use surf_core::math::Vec3;
-use vbsp::Bsp;
+use surf_core::CollisionTri;
+use vbsp::{Bsp, SolidType};
 use vmdl::{Mdl, Model, Vtx, Vvd};
 
 use crate::materials::MaterialBank;
 use crate::pak::normalize_path;
+
+/// Thin prism thickness for prop collision faces (matches displacements).
+const PROP_TRI_THICKNESS: f32 = 2.0;
 
 #[derive(Clone)]
 struct LocalTri {
@@ -32,7 +40,10 @@ pub fn append_static_props(
         };
         // Surf maps often ship their ramps as static MDLs among thousands of
         // decorative props. Render gameplay ramps now; full prop instancing is later.
-        if !model_name.as_str().to_ascii_lowercase().contains("ramp") {
+        let name_l = model_name.as_str().to_ascii_lowercase();
+        let is_ramp = name_l.contains("/ramps/")
+            || (name_l.contains("ramp") && !name_l.contains("ramp_detail"));
+        if !is_ramp {
             continue;
         }
         if !cache.contains_key(&model_type) {
@@ -66,6 +77,67 @@ pub fn append_static_props(
         }
     }
     added
+}
+
+/// Collision for `solid=Physics` static props (cyberwave / MDL ramps).
+///
+/// Uses the render mesh as a stand-in for `.phy` ledges — same transform as draw.
+/// Only keeps upward-facing tris (surfable tops); full two-sided shells bury the
+/// hull inside the mesh volume and trip Layer A burial gates.
+pub fn extract_prop_collision(bsp: &Bsp, materials: &mut MaterialBank) -> Vec<CollisionTri> {
+    let mut cache: HashMap<u16, Option<Vec<[Vec3; 3]>>> = HashMap::new();
+    let mut out = Vec::new();
+
+    for prop in &bsp.static_props.props.props {
+        if !matches!(prop.solid, SolidType::Physics) {
+            continue;
+        }
+        let model_type = prop.prop_type;
+        let Some(model_name) = bsp.static_props.dict.name.get(model_type as usize) else {
+            continue;
+        };
+        // Same gate as render: gameplay ramps only (skip light towers / portals).
+        // Prefer `.../ramps/...` paths; also allow names with "ramp" but not
+        // decorative `ramp_details` shells that fill volume and bury the hull.
+        let name_l = model_name.as_str().to_ascii_lowercase();
+        let is_ramp = name_l.contains("/ramps/")
+            || (name_l.contains("ramp") && !name_l.contains("ramp_detail"));
+        if !is_ramp {
+            continue;
+        }
+        if !cache.contains_key(&model_type) {
+            let decoded = decode_model(materials, model_name.as_str())
+                .map(|tris| tris.into_iter().map(|t| t.positions).collect());
+            cache.insert(model_type, decoded);
+        }
+        let Some(local_tris) = cache.get(&model_type).and_then(Option::as_ref) else {
+            continue;
+        };
+
+        let origin = Vec3::new(prop.origin.x, prop.origin.y, prop.origin.z);
+        for positions in local_tris {
+            let a = origin + rotate_source(positions[0], prop.angles);
+            let b = origin + rotate_source(positions[1], prop.angles);
+            let c = origin + rotate_source(positions[2], prop.angles);
+            let n = (b - a).cross(c - a);
+            // Flip so the face normal points upward when the tri is a ramp top.
+            let (a, b, c) = if n.z < 0.0 { (a, c, b) } else { (a, b, c) };
+            let n = (b - a).cross(c - a);
+            let len = n.length();
+            if len < 1e-5 {
+                continue;
+            }
+            let nz = n.z / len;
+            // Surfable / walkable tops only — skip walls, undersides, junk.
+            if nz < 0.05 {
+                continue;
+            }
+            if let Some(tri) = CollisionTri::from_points(a, b, c, PROP_TRI_THICKNESS) {
+                out.push(tri);
+            }
+        }
+    }
+    out
 }
 
 fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<Vec<LocalTri>> {

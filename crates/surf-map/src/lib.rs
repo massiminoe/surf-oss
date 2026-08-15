@@ -23,7 +23,7 @@ use surf_core::graybox::GrayboxMesh;
 use surf_core::math::{Angle, Vec3};
 use surf_core::{Aabb, Brush, World};
 
-pub use entities::{NamedPoint, TeleportTrigger};
+pub use entities::{GravityTrigger, NamedPoint, PushTrigger, TeleportTrigger};
 pub use lightmap::LightmapAtlas;
 pub use materials::{MaterialAtlas, SkyboxAtlas};
 
@@ -65,6 +65,8 @@ pub struct LoadedMap {
     pub spawn_origin: Vec3,
     pub spawn_angles: Angle,
     pub teleports: Vec<TeleportTrigger>,
+    pub pushes: Vec<PushTrigger>,
+    pub gravities: Vec<GravityTrigger>,
     /// Soft reset when the player falls below this Z (disp holes, voids).
     pub kill_z: f32,
     pub world_bounds: Aabb,
@@ -112,7 +114,9 @@ impl LoadedMap {
         let mut materials = materials::MaterialBank::new(pak, stock);
         let mut lightmaps = lightmap::LightmapBaker::from_bsp_bytes(data);
         let disps = disp::extract_displacements(&bsp, &mut materials, &mut lightmaps);
-        let world = World::with_tris(brushes, disps.collision, disp::TRI_GRID_CELL);
+        let mut coll_tris = disps.collision;
+        coll_tris.extend(models::extract_prop_collision(&bsp, &mut materials));
+        let world = World::with_tris(brushes, coll_tris, disp::TRI_GRID_CELL);
 
         let ents = entities::parse_entities(&bsp, &leaf_ranges, world_bounds)?;
         let mut mesh = mesh::build_mesh(&bsp, &ents.render_models, &mut materials, &mut lightmaps);
@@ -133,27 +137,69 @@ impl LoadedMap {
             spawn_origin: ents.spawn.origin,
             spawn_angles: ents.spawn.angles,
             teleports: ents.teleports,
+            pushes: ents.pushes,
+            gravities: ents.gravities,
             kill_z: world_bounds.mins.z - 256.0,
             world_bounds,
             skyname,
         })
     }
 
-    /// If the player is inside a teleport trigger, return destination origin+angles.
+    /// If the player hull overlaps a teleport trigger, return destination origin+angles.
+    ///
+    /// Uses the standing CS:S hull AABB (not a point probe). Thin horizontal
+    /// stage/fail slabs (often ~2u thick) are easy to tunnel past with a
+    /// center-point sample; hull overlap matches Source trigger touch.
     pub fn touch_teleport(&self, origin: Vec3) -> Option<(Vec3, Angle)> {
-        // Probe near hull center so floor-aligned triggers still fire.
-        let probe = origin + Vec3::new(0.0, 0.0, 36.0);
+        let hull = surf_core::movement::Hull::css_stand();
+        let mins = origin + hull.mins;
+        let maxs = origin + hull.maxs;
         for tp in &self.teleports {
-            if !tp.bounds.expand(64.0).contains_point(probe) {
+            let expanded = tp.bounds.expand(8.0);
+            if !aabb_overlap(mins, maxs, expanded.mins, expanded.maxs) {
                 continue;
             }
             for brush in &tp.brushes {
-                if brush_contains_point_padded(brush, probe, 4.0) {
+                if brush_intersects_aabb(brush, mins, maxs, 1.0) {
                     return Some((tp.dest_origin, tp.dest_angles));
                 }
             }
         }
         None
+    }
+
+    /// Sum of continuous push velocities while the player is inside any push trigger.
+    pub fn touch_push(&self, origin: Vec3) -> Vec3 {
+        let probe = origin + Vec3::new(0.0, 0.0, 36.0);
+        let mut sum = Vec3::ZERO;
+        for push in &self.pushes {
+            if !push.bounds.expand(64.0).contains_point(probe) {
+                continue;
+            }
+            for brush in &push.brushes {
+                if brush_contains_point_padded(brush, probe, 4.0) {
+                    sum = sum + push.velocity;
+                    break;
+                }
+            }
+        }
+        sum
+    }
+
+    /// Gravity scale from the first touching `trigger_gravity`, else 1.0.
+    pub fn touch_gravity(&self, origin: Vec3) -> f32 {
+        let probe = origin + Vec3::new(0.0, 0.0, 36.0);
+        for g in &self.gravities {
+            if !g.bounds.expand(64.0).contains_point(probe) {
+                continue;
+            }
+            for brush in &g.brushes {
+                if brush_contains_point_padded(brush, probe, 4.0) {
+                    return g.scale;
+                }
+            }
+        }
+        1.0
     }
 }
 
@@ -164,6 +210,31 @@ fn brush_contains_point_padded(brush: &Brush, p: Vec3, pad: f32) -> bool {
         }
     }
     true
+}
+
+/// True when the AABB is not entirely outside any brush plane (intersects or inside).
+/// Brush planes are outward-facing; inside ⇒ signed distance ≤ 0 on every plane.
+fn brush_intersects_aabb(brush: &Brush, mins: Vec3, maxs: Vec3, pad: f32) -> bool {
+    for plane in &brush.planes {
+        let n = plane.normal;
+        // AABB corner with the smallest signed distance (most "inside" along -n).
+        let x = if n.x >= 0.0 { mins.x } else { maxs.x };
+        let y = if n.y >= 0.0 { mins.y } else { maxs.y };
+        let z = if n.z >= 0.0 { mins.z } else { maxs.z };
+        if plane.distance(Vec3::new(x, y, z)) > pad {
+            return false;
+        }
+    }
+    true
+}
+
+fn aabb_overlap(a_mins: Vec3, a_maxs: Vec3, b_mins: Vec3, b_maxs: Vec3) -> bool {
+    a_mins.x <= b_maxs.x
+        && a_maxs.x >= b_mins.x
+        && a_mins.y <= b_maxs.y
+        && a_maxs.y >= b_mins.y
+        && a_mins.z <= b_maxs.z
+        && a_maxs.z >= b_mins.z
 }
 
 fn worldspawn_skyname(bsp: &vbsp::Bsp) -> Option<String> {
@@ -193,4 +264,33 @@ fn load_skybox(pak: &pak::PakFs, stock: &stock::StockFs, skyname: Option<&str>) 
         return atlas;
     }
     materials::SkyboxAtlas::from_pak_and_stock(pak, stock, STOCK_FALLBACK)
+}
+
+#[cfg(test)]
+mod push_parse_tests {
+    use super::LoadedMap;
+    use std::path::PathBuf;
+
+    fn maps_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/maps")
+    }
+
+    #[test]
+    fn frost_nyx_overgrowth_parse_pushes() {
+        let dir = maps_dir();
+        let frost = LoadedMap::load_path(dir.join("surf_frost.bsp")).expect("frost");
+        assert_eq!(frost.pushes.len(), 8, "frost pushes");
+        assert!(frost.gravities.is_empty());
+
+        let nyx = LoadedMap::load_path(dir.join("surf_nyx.bsp")).expect("nyx");
+        assert_eq!(nyx.pushes.len(), 1, "nyx pushes");
+
+        let og = LoadedMap::load_path(dir.join("surf_overgrowth.bsp")).expect("overgrowth");
+        assert_eq!(og.pushes.len(), 11, "overgrowth pushes");
+        assert_eq!(og.gravities.len(), 2, "overgrowth gravities");
+
+        let summit = LoadedMap::load_path(dir.join("surf_summit.bsp")).expect("summit");
+        assert!(summit.pushes.is_empty());
+        assert!(summit.gravities.is_empty());
+    }
 }

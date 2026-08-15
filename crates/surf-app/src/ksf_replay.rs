@@ -4,6 +4,12 @@
 //! `docs/KSF-REPLAY-HANDOFF.md`). Reimplemented here — no dependency on KSF
 //! frontend code. Imported poses are for ghosts / soft metrics, not golden
 //! physics masters (KSF CS:S server vs our Momentum-style fixed CS:S).
+//!
+//! Input layout: KSF stores buttons held *at* each pose; the cmd that produced
+//! pose[i] is sample[i-1]'s buttons (angles stay with pose[i]). [`to_osxr`]
+//! shifts buttons so native re-sim semantics apply. Legacy `.osxr` without
+//! `inputSemantics: cmdProducesPose` are aligned at re-sim time via
+//! [`crate::replay::Replay::frames_for_resim`].
 
 use std::path::Path;
 
@@ -17,6 +23,11 @@ use crate::zones::MapZones;
 
 /// Style tag for KSF CS:S 66-tick imports (distinct from native Momentum recordings).
 pub const STYLE_KSF_CSS_66T: &str = "ksf_css_66t";
+
+/// Header `inputSemantics`: apply `frames[i]` cmd to pose[i-1] → pose[i] (native + aligned KSF).
+pub const INPUT_SEMANTICS_CMD_PRODUCES_POSE: &str = "cmdProducesPose";
+/// Legacy KSF imports: buttons on frame[i] are held *at* pose[i] (lag one tick vs cmd).
+pub const INPUT_SEMANTICS_KSF_BUTTONS_LAG: &str = "ksfButtonsLag";
 
 const TICK_INTERVAL: f32 = 0.015;
 const BOOKMARK_SIZE: usize = 524;
@@ -338,7 +349,12 @@ pub fn to_osxr(
         return Err(KsfError::Crop("crop end past frames".into()));
     }
     let slice = &ksf.frames[crop.start_idx..=crop.end_idx];
-    let frames: Vec<ReplayFrame> = slice.iter().copied().map(KsfFrame::to_replay_frame).collect();
+    let mut frames: Vec<ReplayFrame> =
+        slice.iter().copied().map(KsfFrame::to_replay_frame).collect();
+    // KSF samples store buttons held *at* the pose; the cmd that produced pose[i]
+    // is the buttons from sample[i-1] (angles stay with pose[i]). Shift so native
+    // re-sim semantics hold: apply frames[i].to_usercmd() to pose[i-1] → pose[i].
+    crate::replay::align_ksf_buttons_to_pose(&mut frames);
     let vars = MoveVars::ksf_css_66t();
     let time_secs = meta_time_secs.unwrap_or_else(|| crop.duration_secs(TICK_INTERVAL));
     let hull = Hull::css_stand();
@@ -356,6 +372,8 @@ pub fn to_osxr(
             recorded_at: 0,
             vars: ReplayVars::from_move_vars(&vars),
             splits,
+            // Buttons already shifted to cmd-produces-pose layout.
+            input_semantics: INPUT_SEMANTICS_CMD_PRODUCES_POSE.to_string(),
         },
         frames,
     })

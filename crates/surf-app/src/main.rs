@@ -8,8 +8,9 @@
 //!   cargo run -p surf-app --release -- --perf-secs 8 --size 2560x1440
 //!   cargo run -p surf-app --release -- --no-vsync
 //!
-//! Controls: WASD move, mouse look, Space jump (autobhop), Ctrl duck, R reset,
-//! Esc menu/pause (ghost picker + trail toggle), [ ] sens, - = airaccel.
+//! Controls: WASD move, mouse look, Space jump (autobhop), Ctrl duck, R full reset,
+//! T stage reset (staged maps), Esc menu/pause (ghost picker + trail toggle),
+//! [ ] sens, - = airaccel.
 //! Readability (brightness / edges) and audio (volume, core/air/sub levels,
 //! wipe style) in Esc. Perf line logs to stdout once per second;
 //! `--perf-secs N` exits after N.
@@ -27,11 +28,10 @@ use surf_app::pb::PbStore;
 use surf_app::replay::{self, derive_splits, GhostPlayback, GhostOption, Replay, ReplayRecorder};
 use surf_app::settings::{Settings, GHOST_AUTO, GHOST_OFF, GHOST_PB};
 use surf_app::timer::{format_split_line, format_time, RunTimer, TimerPhase};
-use surf_app::zones::{self, MapZones};
-use surf_core::movement::Hull;
+use surf_app::zones::{self, MapZones, TrackType};
 use surf_core::graybox::{self, GrayboxMesh, GrayboxWorld};
 use surf_core::math::{Angle, Vec3};
-use surf_core::movement::{MoveVars, PlayerState, UserCmd};
+use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
 use surf_audio::{
     AudioEngine, AudioEvent, EventDetector, Levels as AudioLevels, Observation,
     Params as AudioParams, WipeStyle,
@@ -272,6 +272,20 @@ impl Level {
         }
     }
 
+    fn touch_push(&self, origin: Vec3) -> Vec3 {
+        match self {
+            Level::Graybox(_) => Vec3::ZERO,
+            Level::Map(m) => m.touch_push(origin),
+        }
+    }
+
+    fn touch_gravity(&self, origin: Vec3) -> f32 {
+        match self {
+            Level::Graybox(_) => 1.0,
+            Level::Map(m) => m.touch_gravity(origin),
+        }
+    }
+
     fn title(&self) -> String {
         match self {
             Level::Graybox(_) => "osx-surf M0 — graybox".into(),
@@ -373,7 +387,7 @@ impl App {
         let track_type = zones
             .as_ref()
             .map(|z| z.track_type)
-            .unwrap_or(surf_app::zones::TrackType::Linear);
+            .unwrap_or(TrackType::Linear);
         let pb_store = match PbStore::open_default() {
             Ok(s) => Some(s),
             Err(e) => {
@@ -852,6 +866,51 @@ impl App {
         }
     }
 
+    /// Snap to the current stage start without clearing the run clock / splits.
+    /// Linear maps fall back to a full [`Self::reset`].
+    fn reset_stage(&mut self) {
+        if self.zones.is_none() || self.run_timer.track_type != TrackType::Staged {
+            self.reset();
+            return;
+        }
+        let stage = self.run_timer.current_stage;
+        let angles = self.player.viewangles;
+        let (spawn_origin, spawn_angles) = {
+            let zones = self.zones.as_ref().unwrap();
+            stage_respawn_pose(zones, &self.level, stage, angles)
+        };
+        self.player = PlayerState {
+            origin: spawn_origin,
+            viewangles: spawn_angles,
+            grounded: true,
+            ..PlayerState::default()
+        };
+        for _ in 0..10 {
+            self.player = tick(
+                self.level.world(),
+                &self.player,
+                &UserCmd::default(),
+                &self.vars,
+            );
+        }
+        self.prev_origin = self.player.origin;
+        self.accumulator = 0.0;
+        // Keep phase / time / splits / current_stage; soft-enter so landing
+        // inside a stage start doesn't cancel or double-split.
+        self.run_timer.notify_soft_respawn();
+        if let Some(zones) = self.zones.as_ref() {
+            self.run_timer
+                .sync_stage_after_respawn(zones, &self.player);
+        }
+        self.audio_on_ramp = false;
+        self.audio_detect
+            .resync(false, self.player.grounded);
+        if let Some(audio) = self.audio.as_ref() {
+            audio.set_params(AudioParams::default());
+            audio.push(AudioEvent::Rearm);
+        }
+    }
+
     fn init_gpu(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
@@ -1006,6 +1065,9 @@ impl App {
             let prev_vel = self.player.velocity;
             let cmd = self.build_cmd();
             let wishing = cmd.forward_move.abs() + cmd.side_move.abs() > 0.0;
+            // Field triggers feed basevelocity / gravity_scale before physics.
+            self.player.basevelocity = self.level.touch_push(self.player.origin);
+            self.player.gravity_scale = self.level.touch_gravity(self.player.origin);
             self.player = tick(self.level.world(), &self.player, &cmd, &self.vars);
 
             let mut soft_respawned = false;
@@ -1015,16 +1077,36 @@ impl App {
                 soft_respawned = true;
             }
             if self.player.origin.z < self.level.kill_z() {
-                let (spawn_origin, spawn_angles) = self.level.spawn();
+                let (spawn_origin, spawn_angles) = if self.run_timer.track_type == TrackType::Staged
+                {
+                    if let Some(zones) = self.zones.as_ref() {
+                        stage_respawn_pose(
+                            zones,
+                            &self.level,
+                            self.run_timer.current_stage,
+                            self.player.viewangles,
+                        )
+                    } else {
+                        self.level.spawn()
+                    }
+                } else {
+                    self.level.spawn()
+                };
                 self.player.origin = spawn_origin;
                 self.player.viewangles = spawn_angles;
                 self.player.velocity = Vec3::ZERO;
+                self.player.basevelocity = Vec3::ZERO;
+                self.player.gravity_scale = 1.0;
                 self.player.grounded = true;
                 soft_respawned = true;
             }
 
             if soft_respawned {
                 self.run_timer.notify_soft_respawn();
+                if let Some(zones) = self.zones.as_ref() {
+                    self.run_timer
+                        .sync_stage_after_respawn(zones, &self.player);
+                }
             }
 
             // Audio observation. Surfing is airborne by definition, so ramp
@@ -1056,7 +1138,8 @@ impl App {
                 self.run_timer
                     .tick(zones, &mut self.player, tick_dt, &pb_splits);
                 if let Some(ev) = self.run_timer.take_split_event() {
-                    let line = format_split_line(ev);
+                    let staged = self.run_timer.track_type == TrackType::Staged;
+                    let line = format_split_line(ev, staged);
                     println!("{line}");
                     self.split_flash_line = Some(line);
                     self.split_flash_left = SPLIT_FLASH_SECS;
@@ -1164,6 +1247,10 @@ impl App {
         } else {
             None
         };
+        let stage_line = self
+            .zones
+            .as_ref()
+            .and_then(|z| self.run_timer.stage_hud_label(z));
         let hud = HudState {
             speed,
             sync: self.sync_display,
@@ -1177,6 +1264,7 @@ impl App {
             show_keys,
             pb_flash: self.pb_flash_left > 0.0,
             split_line,
+            stage_line,
             ghost_time_delta,
             ghost_speed_delta,
             menu,
@@ -1431,6 +1519,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         KeyCode::KeyR => self.reset(),
+                        KeyCode::KeyT => self.reset_stage(),
                         KeyCode::BracketLeft => {
                             self.settings.mouse_sens =
                                 Settings::clamp_sens(self.settings.mouse_sens / 1.25);
@@ -1559,6 +1648,26 @@ fn audio_levels(settings: &Settings) -> AudioLevels {
         air: settings.audio_air,
         sub: settings.audio_sub,
     }
+}
+
+/// Prefer a map teleport destination that sits inside the stage zone (real
+/// platform), falling back to the zone-box floor center.
+fn stage_respawn_pose(
+    zones: &MapZones,
+    level: &Level,
+    stage: usize,
+    fallback_angles: Angle,
+) -> (Vec3, Angle) {
+    let hull = Hull::css_stand();
+    let zone = zones.main.stage_zone(stage);
+    if let Level::Map(m) = level {
+        for tp in &m.teleports {
+            if zone.contains_player(tp.dest_origin, hull) {
+                return (tp.dest_origin, tp.dest_angles);
+            }
+        }
+    }
+    (zones.main.stage_spawn(stage), fallback_angles)
 }
 
 fn load_zones_for(map_path: &std::path::Path) -> Option<MapZones> {
@@ -1713,7 +1822,7 @@ fn main() {
     let title = opts.level.title();
     println!("{title}");
     println!(
-        "Click to capture. WASD, Space, R reset, Esc menu, [ ] sens, - = airaccel."
+        "Click to capture. WASD, Space, R reset, T stage, Esc menu, [ ] sens, - = airaccel."
     );
     println!(
         "Movevars: aa={} accel={} friction={} tick={:.0}Hz autobhop={} (Momentum surf defaults).",

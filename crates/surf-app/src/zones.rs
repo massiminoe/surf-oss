@@ -12,7 +12,8 @@ use surf_core::math::Vec3;
 use surf_core::movement::Hull;
 
 /// Linear: fail teleports / kill-z do not stop the timer.
-/// Staged: segment rules later; R still restarts the track.
+/// Staged: fail / kill-z respawns at the current stage start; R restarts the track;
+/// T retries the current stage (keeps clock + splits).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackType {
     Linear,
@@ -33,6 +34,13 @@ impl ZoneBox {
             self.aabb.maxs,
         )
     }
+
+    /// Feet spawn at box XY center on the box floor (MVP; no teleDest yet).
+    pub fn spawn_origin(&self) -> Vec3 {
+        let cx = 0.5 * (self.aabb.mins.x + self.aabb.maxs.x);
+        let cy = 0.5 * (self.aabb.mins.y + self.aabb.maxs.y);
+        Vec3::new(cx, cy, self.aabb.mins.z)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -41,7 +49,42 @@ pub struct TrackZones {
     pub start_on_jump: bool,
     pub start: ZoneBox,
     pub end: ZoneBox,
+    /// Linear: split-only CPs. Staged: stage starts 2..=N (stage 1 = `start`).
     pub checkpoints: Vec<ZoneBox>,
+}
+
+impl TrackZones {
+    pub fn stage_count(&self) -> usize {
+        self.checkpoints.len() + 1
+    }
+
+    /// 1-based stage zone (clamped).
+    pub fn stage_zone(&self, stage: usize) -> &ZoneBox {
+        let n = self.stage_count().max(1);
+        let s = stage.clamp(1, n);
+        if s <= 1 {
+            &self.start
+        } else {
+            &self.checkpoints[s - 2]
+        }
+    }
+
+    pub fn stage_spawn(&self, stage: usize) -> Vec3 {
+        self.stage_zone(stage).spawn_origin()
+    }
+
+    /// Which stage zone contains the player, if any (1-based).
+    pub fn stage_containing(&self, origin: Vec3, hull: Hull) -> Option<usize> {
+        if self.start.contains_player(origin, hull) {
+            return Some(1);
+        }
+        for (i, cp) in self.checkpoints.iter().enumerate() {
+            if cp.contains_player(origin, hull) {
+                return Some(i + 2);
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -253,6 +253,17 @@ pub fn trace_box(
             }
             let solid_index = brush_base + ti as usize;
             let tr = trace_planes(&tri.planes, solid_index, start, end, mins, maxs);
+            // Thin-prism edge planes are walls at every triangle seam. Surfing into
+            // them is the classic "1px wall" snag (nyx @ ghost tick 979: edge hit
+            // dropped 2629→378 u/s). Skip edge hits — neighboring face planes still
+            // provide the surfable surface; startsolid still uses the full prism.
+            if tr
+                .hit
+                .as_ref()
+                .is_some_and(|h| h.plane_index >= 2)
+            {
+                continue;
+            }
             if tr.startsolid {
                 any_startsolid = true;
                 if tr.allsolid {
