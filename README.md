@@ -7,15 +7,41 @@ with no Source engine and no networking.
 
 ## Status
 
-**M0 complete** — physics + graybox feel-check. **Next: M1** (real BSP maps).
+**M0–M3 complete** — physics, real BSP map loading, timer/zones/replays, textures
+and lightmaps, procedural audio.
 
-→ New implementers for map loading: **[`docs/M1-HANDOFF.md`](docs/M1-HANDOFF.md)**  
-→ First map preference: **`surf_summit` (CS:S)** (not yet in `assets/maps/`; see handoff)
+## Setup
+
+Map BSPs are **not** committed (17 MB–175 MB each, ~1.4 GB for the full corpus).
+Fetch them first — they come from the public [fastdl.me](https://main.fastdl.me)
+mirror and are community-made maps, *not* Valve content, so no game install is
+needed to obtain them:
 
 ```bash
-cargo test --workspace
-cargo run -p surf-app --release   # graybox M0
+python3 tools/fetch_maps.py --batch tests   # what `cargo test` needs (~700 MB)
+python3 tools/fetch_maps.py --all           # full corpus (~1.4 GB)
+python3 tools/fetch_maps.py --verify        # re-check on-disk files, no network
 ```
+
+Every download is verified against the sha256 in
+[`assets/maps/manifest.json`](assets/maps/manifest.json). Those hashes pin the
+exact recompiles that `assets/zones/*.json` and the resim baselines were derived
+from — a mirror serving a different build of a map would silently move spawns and
+zone volumes.
+
+```bash
+cargo test --workspace                        # requires --batch tests maps
+cargo run -p surf-app --release               # surf_summit
+cargo run -p surf-app --release -- --graybox  # no map needed (M0 arena)
+```
+
+The map-loading tests deliberately **fail** rather than skip when a BSP is
+missing, so absent assets can't quietly hide a regression behind a green run.
+
+**Optional — stock CS:S/HL2 textures.** Most corpus maps embed their custom
+assets in the BSP pakfile and render standalone. Faces using Valve *stock*
+materials need a real game install: set `OSX_SURF_GAME_DIR` to it. This is the
+only part that requires owning Counter-Strike: Source.
 
 ### Feel-check controls
 
@@ -51,8 +77,10 @@ Graybox course: high drop-in → long striped V → mid pad → one-sided ramp �
 crates/surf-core    pure f32 physics (zero I/O)
 crates/surf-render  wgpu flat-shaded mesh + HUD bars
 crates/surf-app     winit loop, 66.67 Hz tick + interpolation
-crates/surf-map     (M1 — not created yet)
-assets/maps/        BSP test corpus (+ surf_summit when acquired)
+crates/surf-map     BSP v19/20/21 → collision brushes, mesh, materials
+crates/surf-audio   procedural f32 DSP (zero audio assets)
+assets/maps/        BSP corpus — gitignored; manifest.json + fetch_maps.py
+assets/zones/       timer zone volumes (tracked)
 docs/research/      research reports
 docs/reference/     read-only upstream (do not copy into game code)
 docs/M1-HANDOFF.md  next-milestone brief

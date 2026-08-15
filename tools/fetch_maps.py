@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Download CS:S surf BSPs from fastdl.me into assets/maps/.
+"""Download the CS:S surf BSP corpus from fastdl.me into assets/maps/.
+
+BSPs are not committed to the repo (they run ~17 MB–175 MB each). This script
+is the reproducible way to get them, and it verifies every file against the
+sha256 pinned in assets/maps/manifest.json — the zone AABBs, resim baselines
+and surf-map tests are all keyed to those exact recompiles.
 
 Usage:
+  python3 tools/fetch_maps.py --all              # whole corpus (~1.4 GB)
+  python3 tools/fetch_maps.py --batch core       # maps the test suite needs
   python3 tools/fetch_maps.py surf_nyx surf_boreas
-  python3 tools/fetch_maps.py --batch linear-wave1
+  python3 tools/fetch_maps.py --verify           # check what's on disk, no network
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ from __future__ import annotations
 import argparse
 import bz2
 import hashlib
+import json
 import ssl
 import urllib.error
 import urllib.request
@@ -26,44 +34,51 @@ except ImportError:
 BASE = "https://main.fastdl.me/maps"
 UA = "osx-surf-research/1.0 (+local-dev; FastDL map acquisition)"
 
-# Linear / aesthetic wave — user's list + matching recommendations with wrldspawn zones.
-BATCHES = {
-    "linear-wave1": [
-        "surf_void",
-        "surf_lux",
-        "surf_hourglass",
-        "surf_nyx",
-        "surf_boreas",
-        "surf_tendies",
-        "surf_andromeda",
-        "surf_pantheon",
-    ],
-    "linear-wave2": [
-        "surf_lovetunnel",
-        "surf_frost",
-        "surf_fornax",
-        "surf_demise",
-        "surf_cyberwave",  # staged-ish in some lists; still acquire
-        "surf_aquaflow",
-    ],
-    "staged-later": [
-        "surf_overgrowth",
-        "surf_cement",
-        "surf_botanica",
-    ],
-}
-
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def download_one(name: str, dest_dir: Path, force: bool = False) -> Path:
+def load_manifest() -> dict:
+    path = repo_root() / "assets" / "maps" / "manifest.json"
+    with path.open() as f:
+        return json.load(f)
+
+
+def batches(doc: dict) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for name, entry in doc["maps"].items():
+        out.setdefault(entry["batch"], []).append(name)
+    out["tests"] = list(doc["required_by_tests"])
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def normalize(name: str) -> str:
     stem = name[:-4] if name.endswith(".bsp") else name
+    return stem if stem.startswith("surf_") else f"surf_{stem}"
+
+
+def check(path: Path, entry: dict) -> str | None:
+    """Return None if the file matches the manifest, else a reason string."""
+    if not path.is_file():
+        return "missing"
+    size = path.stat().st_size
+    if size != entry["bytes"]:
+        return f"size {size} != manifest {entry['bytes']}"
+    got = hashlib.sha256(path.read_bytes()).hexdigest()
+    if got != entry["sha256"]:
+        return f"sha256 {got[:16]}… != manifest {entry['sha256'][:16]}…"
+    return None
+
+
+def download_one(stem: str, entry: dict, dest_dir: Path, force: bool = False) -> None:
     out = dest_dir / f"{stem}.bsp"
     if out.exists() and not force:
-        print(f"skip (exists): {out} ({out.stat().st_size} bytes)")
-        return out
+        why = check(out, entry)
+        if why is None:
+            print(f"ok (cached): {stem}")
+            return
+        print(f"re-fetching {stem}: {why}")
 
     url = f"{BASE}/{stem}.bsp.bz2"
     print(f"GET {url}")
@@ -78,19 +93,52 @@ def download_one(name: str, dest_dir: Path, force: bool = False) -> Path:
     if data[:4] != b"VBSP":
         raise SystemExit(f"failed {stem}: decompressed data is not VBSP")
 
+    got = hashlib.sha256(data).hexdigest()
+    if got != entry["sha256"]:
+        raise SystemExit(
+            f"failed {stem}: sha256 mismatch\n"
+            f"  manifest {entry['sha256']}\n"
+            f"  fetched  {got}\n"
+            f"The mirror is serving a different build of this map. Zones and "
+            f"baselines are pinned to the manifest hash — do not overwrite it "
+            f"without re-deriving assets/zones/{stem}.json."
+        )
+
     tmp = out.with_suffix(".bsp.part")
     tmp.write_bytes(data)
     tmp.replace(out)
-    sha1 = hashlib.sha1(data).hexdigest()
-    print(f"wrote {out} ({len(data)} bytes, sha1={sha1})")
-    return out
+    print(f"wrote {out} ({len(data)} bytes)")
+
+
+def verify_all(manifest: dict[str, dict], names: list[str], dest: Path) -> None:
+    bad = 0
+    for stem in names:
+        why = check(dest / f"{stem}.bsp", manifest[stem])
+        if why is None:
+            print(f"ok       {stem}")
+        else:
+            print(f"BAD      {stem}: {why}")
+            bad += 1
+    print(f"\n{len(names) - bad}/{len(names)} ok")
+    if bad:
+        raise SystemExit(1)
 
 
 def main() -> None:
+    doc = load_manifest()
+    manifest = doc["maps"]
+    known = batches(doc)
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("maps", nargs="*", help="Map names (with or without surf_ / .bsp)")
-    ap.add_argument("--batch", choices=sorted(BATCHES), help="Named batch")
-    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--all", action="store_true", help="Every map in the manifest")
+    ap.add_argument("--batch", choices=sorted(known), help="Named batch")
+    ap.add_argument("--force", action="store_true", help="Re-download even if cached")
+    ap.add_argument(
+        "--verify",
+        action="store_true",
+        help="Check on-disk files against the manifest; no network",
+    )
     ap.add_argument(
         "--dir",
         type=Path,
@@ -100,20 +148,32 @@ def main() -> None:
     args = ap.parse_args()
 
     names: list[str] = []
+    if args.all:
+        names.extend(sorted(manifest))
     if args.batch:
-        names.extend(BATCHES[args.batch])
-    names.extend(args.maps)
+        names.extend(known[args.batch])
+    names.extend(normalize(n) for n in args.maps)
     if not names:
-        ap.error("pass map names or --batch")
+        if args.verify:
+            names = sorted(manifest)
+        else:
+            ap.error("pass map names, --batch, or --all")
 
+    unknown = [n for n in names if n not in manifest]
+    if unknown:
+        ap.error(f"not in manifest: {', '.join(unknown)}")
+
+    # De-dupe, preserving order.
+    names = list(dict.fromkeys(names))
     dest = args.dir or (repo_root() / "assets" / "maps")
-    dest.mkdir(parents=True, exist_ok=True)
 
-    for name in names:
-        n = name
-        if not n.startswith("surf_") and not n.endswith(".bsp"):
-            n = f"surf_{n}"
-        download_one(n, dest, force=args.force)
+    if args.verify:
+        verify_all(manifest, names, dest)
+        return
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for stem in names:
+        download_one(stem, manifest[stem], dest, force=args.force)
 
 
 if __name__ == "__main__":

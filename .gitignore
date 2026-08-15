@@ -17,6 +17,12 @@
 # Third-party replay binaries (local cache only; not for redistribution)
 /assets/replays/external/
 
+# Map BSPs — 17 MB–175 MB each, ~1.4 GB for the corpus. Not committed.
+# Reproducible via `python3 tools/fetch_maps.py --all`, pinned by sha256 in
+# assets/maps/manifest.json (which IS tracked).
+/assets/maps/*.bsp
+/assets/maps/*.bsp.part
+
 # Local Python bytecode
 tools/__pycache__/
 

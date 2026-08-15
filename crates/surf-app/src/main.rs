@@ -1758,12 +1758,28 @@ fn parse_args() -> LaunchOpts {
         }
     }
 
+    /// BSPs are not in the repo (too large); point the user at the fetcher.
+    fn fetch_hint(path: &std::path::Path) -> String {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("surf_summit");
+        format!(
+            "map file not found. BSPs are not committed — fetch it with:\n  \
+             python3 tools/fetch_maps.py {stem}\n(or `--batch tests` for the \
+             test corpus, `--all` for everything)"
+        )
+    }
+
     let (level, zones) = if graybox {
         (Level::Graybox(graybox::surf_ramp_arena()), None)
     } else if let Some(path) = map_path {
         println!("Loading map {} …", path.display());
         let map = LoadedMap::load_path(&path).unwrap_or_else(|e| {
             eprintln!("failed to load {}: {e}", path.display());
+            if !path.is_file() {
+                eprintln!("{}", fetch_hint(&path));
+            }
             std::process::exit(1);
         });
         print_map_stats(&map);
@@ -1785,6 +1801,8 @@ fn parse_args() -> LaunchOpts {
                 }
             }
         } else {
+            eprintln!("{}", fetch_hint(&summit));
+            eprintln!("falling back to the graybox arena.\n");
             (Level::Graybox(graybox::surf_ramp_arena()), None)
         }
     };
