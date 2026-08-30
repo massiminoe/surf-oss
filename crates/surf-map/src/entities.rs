@@ -21,6 +21,10 @@ struct NamedEntity {
     point: NamedPoint,
     /// Prefer `info_teleport_destination` / `info_target` over trigger origins.
     is_teleport_dest: bool,
+    /// `model=*N` — a brush volume, so `point.origin` is its *centre*, not a
+    /// place to stand. lovetunnel's `startzone` centre is 144u up and flush
+    /// against a wall corner: spawning there wedges the hull startsolid.
+    is_brush: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +78,7 @@ pub fn parse_entities(
     let mut named: HashMap<String, NamedEntity> = HashMap::new();
     let mut render_models = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
+    let mut start_volumes: Vec<Aabb> = Vec::new();
 
     for ent in bsp.entities.iter() {
         let class = ent.prop("classname").unwrap_or("");
@@ -89,6 +94,18 @@ pub fn parse_entities(
                 "info_teleport_destination" | "info_target" | "info_landmark"
             );
             let point = NamedPoint { origin, angles };
+            let model_index = ent.prop("model").and_then(parse_model_index);
+            // A trigger named like a start marks the start *area*. Keep its
+            // world box: the point entity the map actually teleports you to
+            // sits inside it, whatever that entity is called.
+            if name_is_start_like(name) {
+                if let Some(m) = model_index.and_then(|i| bsp.models.get(i)) {
+                    start_volumes.push(Aabb::from_mins_maxs(
+                        Vec3::new(m.mins.x, m.mins.y, m.mins.z) + origin,
+                        Vec3::new(m.maxs.x, m.maxs.y, m.maxs.z) + origin,
+                    ));
+                }
+            }
             // Prefer a real teleport destination when several ents share a name.
             match named.get(name) {
                 Some(prev) if prev.is_teleport_dest && !is_teleport_dest => {}
@@ -98,6 +115,7 @@ pub fn parse_entities(
                         NamedEntity {
                             point,
                             is_teleport_dest,
+                            is_brush: model_index.is_some(),
                         },
                     );
                 }
@@ -200,8 +218,13 @@ pub fn parse_entities(
         }
     }
 
-    let spawn = pick_gameplay_spawn(&named, &teleport_target_counts, &player_spawns)
-        .ok_or(MapError::NoSpawn)?;
+    let spawn = pick_gameplay_spawn_debug(
+        &named,
+        &teleport_target_counts,
+        &player_spawns,
+        &start_volumes,
+    )
+    .ok_or(MapError::NoSpawn)?;
 
     let mut teleports = Vec::new();
     for (model_idx, target, start_disabled, origin, filtername) in teleports_raw {
@@ -299,13 +322,54 @@ fn harvest_trigger_brushes(
     Some((brushes, bounds.unwrap_or(world_bounds)))
 }
 
+/// `OSX_SURF_SPAWN_DEBUG=1` names the entity the picker chose, and every start
+/// volume it recognised — the fastest way to explain a wrong spawn.
+fn pick_gameplay_spawn_debug(
+    named: &HashMap<String, NamedEntity>,
+    teleport_target_counts: &HashMap<String, usize>,
+    player_spawns: &[(&str, NamedPoint)],
+    start_volumes: &[Aabb],
+) -> Option<NamedPoint> {
+    let pick = pick_gameplay_spawn(named, teleport_target_counts, player_spawns, start_volumes);
+    if std::env::var_os("OSX_SURF_SPAWN_DEBUG").is_some() {
+        for v in start_volumes {
+            println!("SPAWN startvolume {:?}..{:?}", v.mins, v.maxs);
+        }
+        match pick {
+            Some(pt) => {
+                let name = named
+                    .iter()
+                    .find(|(_, e)| {
+                        !e.is_brush
+                            && e.point.origin.x == pt.origin.x
+                            && e.point.origin.y == pt.origin.y
+                            && e.point.origin.z == pt.origin.z
+                    })
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("<player spawn ent>");
+                println!("SPAWN pick '{name}' at {:?}", pt.origin);
+            }
+            None => println!("SPAWN pick <none>"),
+        }
+    }
+    pick
+}
+
 /// Surf maps put T/CT in a cosmetic lobby; stage start is usually an
 /// `info_teleport_destination` (e.g. `td_mapstart`) that fail-teleports target.
 fn pick_gameplay_spawn(
     named: &HashMap<String, NamedEntity>,
     teleport_target_counts: &HashMap<String, usize>,
     player_spawns: &[(&str, NamedPoint)],
+    start_volumes: &[Aabb],
 ) -> Option<NamedPoint> {
+    // A brush entity's origin is the centre of a volume, not a standing spot —
+    // never spawn on one. (lovetunnel: `startzone`, 144u of air and flush with
+    // a wall corner, which leaves the hull startsolid and unable to move.)
+    let candidates = || named.iter().filter(|(_, ent)| !ent.is_brush);
+    let score = |name: &str, ent: &NamedEntity| {
+        score_spawn_name(name, ent.is_teleport_dest) + start_zone_bonus(ent, start_volumes)
+    };
     // 1) Well-known stage-start names (case-insensitive exact).
     const PREFERRED: &[&str] = &[
         "td_mapstart",
@@ -325,8 +389,7 @@ fn pick_gameplay_spawn(
         "start",
     ];
     for want in PREFERRED {
-        let mut hits: Vec<&NamedEntity> = named
-            .iter()
+        let mut hits: Vec<&NamedEntity> = candidates()
             .filter(|(n, _)| n.eq_ignore_ascii_case(want) && !is_bonus_or_later_stage(n))
             .map(|(_, ent)| ent)
             .collect();
@@ -337,10 +400,9 @@ fn pick_gameplay_spawn(
     }
 
     // 2) Best-scored name among non-bonus ents (stable: name order).
-    let mut scored: Vec<(i32, &str, &NamedEntity)> = named
-        .iter()
+    let mut scored: Vec<(i32, &str, &NamedEntity)> = candidates()
         .filter(|(n, _)| !is_bonus_or_later_stage(n))
-        .map(|(n, ent)| (score_spawn_name(n, ent.is_teleport_dest), n.as_str(), ent))
+        .map(|(n, ent)| (score(n, ent), n.as_str(), ent))
         .filter(|(score, _, _)| *score > 0)
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
@@ -355,8 +417,10 @@ fn pick_gameplay_spawn(
         .filter(|(n, _)| !is_bonus_or_later_stage(n))
         .filter_map(|(n, &count)| {
             let ent = named.get(n)?;
-            let score = score_spawn_name(n, ent.is_teleport_dest);
-            Some((score, count, n.as_str()))
+            if ent.is_brush {
+                return None;
+            }
+            Some((score(n, ent), count, n.as_str()))
         })
         .collect();
     targets.sort_by(|a, b| {
@@ -390,7 +454,14 @@ fn pick_gameplay_spawn(
         }
     }
 
-    // 4) Fall back to player spawn entities: start → T → CT → any.
+    // 4) Fall back to player spawn entities — one inside the start zone first
+    // (surf maps put T/CT in a cosmetic lobby far from the course).
+    if let Some((_, pt)) = player_spawns
+        .iter()
+        .find(|(_, pt)| inside_any(pt.origin, start_volumes))
+    {
+        return Some(*pt);
+    }
     for class in [
         "info_player_start",
         "info_player_terrorist",
@@ -402,6 +473,35 @@ fn pick_gameplay_spawn(
         }
     }
     player_spawns.first().map(|(_, pt)| *pt)
+}
+
+/// Does this targetname mark the start area? Used to recognise a *volume*
+/// (`startzone`, `start_zone`, `s1_start`…), not to score a spawn point.
+fn name_is_start_like(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !is_bonus_or_later_stage(&lower) && lower.contains("start")
+}
+
+/// Whatever the map calls the entity it teleports you to, if it stands inside
+/// the start trigger it *is* the map start. Big enough to outweigh the
+/// fail/reset name penalty (lovetunnel's only destination is named `reset`).
+fn start_zone_bonus(ent: &NamedEntity, start_volumes: &[Aabb]) -> i32 {
+    if ent.is_teleport_dest && inside_any(ent.point.origin, start_volumes) {
+        120
+    } else {
+        0
+    }
+}
+
+fn inside_any(p: Vec3, volumes: &[Aabb]) -> bool {
+    volumes.iter().any(|v| {
+        p.x >= v.mins.x
+            && p.x <= v.maxs.x
+            && p.y >= v.mins.y
+            && p.y <= v.maxs.y
+            && p.z >= v.mins.z
+            && p.z <= v.maxs.z
+    })
 }
 
 fn is_bonus_or_later_stage(name: &str) -> bool {

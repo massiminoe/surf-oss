@@ -54,29 +54,122 @@ fn summit_prefers_td_mapstart_over_lobby() {
     );
 }
 
+/// The gameplay spawn must land in the map's own start zone, standing free.
+///
+/// Coordinates are deliberately *not* hard-coded here: the earlier version of
+/// this test pinned the exact origins the picker happened to produce, and three
+/// of them (fornax / frost / lovetunnel) were trigger-volume centres — lovetunnel's
+/// left the hull startsolid, i.e. unable to move at all. Assert the properties
+/// that matter instead, against `assets/zones/<map>.json`:
+///   * inside the main start box (so: not a bonus start, not the lobby),
+///   * hull free (not wedged in geometry),
+///   * a floor within a short drop underneath.
 #[test]
 fn aesthetic_maps_spawn_in_start_zone_not_bonus() {
-    // Regression: `bonus1_start`.contains(`s1_start`) used to steal gameplay spawn.
-    let cases = [
-        ("surf_nyx", 14120.0, -8248.0, 2216.0),
-        ("surf_fornax", -13920.0, -3776.0, 15232.0),
-        ("surf_frost", -4032.0, -11904.0, 576.0),
-        ("surf_lovetunnel", -6096.0, -11552.0, 5248.0),
-    ];
-    for (name, x, y, z) in cases {
+    let hull_mins = Vec3::new(-16.0, -16.0, 0.0);
+    let hull_maxs = Vec3::new(16.0, 16.0, 62.0);
+    for name in [
+        "surf_nyx",
+        "surf_fornax",
+        "surf_frost",
+        "surf_lovetunnel",
+        "surf_void",
+        "surf_hourglass",
+        "surf_lux",
+        "surf_pantheon",
+    ] {
         let path = format!(
             "{}/../../assets/maps/{name}.bsp",
             env!("CARGO_MANIFEST_DIR")
         );
         let map = LoadedMap::load_path(&path).unwrap_or_else(|e| panic!("load {name}: {e}"));
+        let spawn = map.spawn_origin;
+
+        let zone: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!(
+                "{}/../../assets/zones/{name}.json",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap_or_else(|e| panic!("zones for {name}: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("parse zones for {name}: {e}"));
+        let start = &zone["tracks"]["main"]["start"];
+        let axis = |k: &str, i: usize| start[k][i].as_f64().expect("zone bound") as f32;
+        for (i, v) in [spawn.x, spawn.y, spawn.z].into_iter().enumerate() {
+            assert!(
+                v >= axis("mins", i) && v <= axis("maxs", i),
+                "{name}: spawn {spawn:?} outside start zone on axis {i} \
+                 ({}..{})",
+                axis("mins", i),
+                axis("maxs", i)
+            );
+        }
+
+        let tr = surf_core::trace::trace_box(
+            &map.world,
+            spawn,
+            spawn - Vec3::new(0.0, 0.0, 4096.0),
+            hull_mins,
+            hull_maxs,
+        );
         assert!(
-            (map.spawn_origin.x - x).abs() < 1.0
-                && (map.spawn_origin.y - y).abs() < 1.0
-                && (map.spawn_origin.z - z).abs() < 1.0,
-            "{name}: expected gameplay spawn ({x},{y},{z}), got {:?}",
-            map.spawn_origin
+            !tr.startsolid,
+            "{name}: spawn {spawn:?} is wedged in geometry — the player cannot move"
+        );
+        assert!(tr.fraction < 1.0, "{name}: nothing under the spawn");
+        let drop = spawn.z - tr.endpos.z;
+        assert!(
+            drop < 400.0,
+            "{name}: spawn is {drop:.0}u above the floor, not on a start platform"
         );
     }
+}
+
+/// lovetunnel names its only teleport destination `reset`, and the score table
+/// penalises fail/reset pads — so the picker fell through to the `startzone`
+/// *trigger*, whose centre is 144u of air flush against a wall corner. The hull
+/// touched that corner, `trace_box` reported startsolid, and every move clipped
+/// to fraction 0: hovering, unable to walk, fall or jump.
+///
+/// A teleport destination standing inside the start trigger is the map start,
+/// whatever it is called.
+#[test]
+fn lovetunnel_spawns_on_its_start_platform_not_in_the_startzone_wall() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_lovetunnel.bsp"
+    );
+    let map = LoadedMap::load_path(path).expect("load lovetunnel");
+    let spawn = map.spawn_origin;
+    let hull_mins = Vec3::new(-16.0, -16.0, 0.0);
+    let hull_maxs = Vec3::new(16.0, 16.0, 62.0);
+
+    // The old pick, kept explicit so the failure mode stays recognisable.
+    let wedged = Vec3::new(-6096.0, -11552.0, 5248.0);
+    assert!(
+        surf_core::trace::point_contents_box(&map.world, wedged, hull_mins, hull_maxs),
+        "the startzone centre is supposed to be the wedged case"
+    );
+    assert!(
+        (spawn - wedged).length() > 1.0,
+        "spawn is still the startzone trigger centre"
+    );
+
+    let tr = surf_core::trace::trace_box(
+        &map.world,
+        spawn,
+        spawn - Vec3::new(0.0, 0.0, 4096.0),
+        hull_mins,
+        hull_maxs,
+    );
+    assert!(!tr.startsolid, "spawn {spawn:?} still wedged");
+    let normal = tr.hit.as_ref().expect("floor under spawn").normal;
+    assert!(normal.z > 0.99, "start platform should be flat, got {normal:?}");
+    assert!(
+        (tr.endpos.z - 5104.0).abs() < 8.0,
+        "landed at z={:.1}, expected the start-platform floor at 5104",
+        tr.endpos.z
+    );
 }
 
 #[test]

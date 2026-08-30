@@ -150,6 +150,11 @@ impl LoadedMap {
         // lm_uv was pixel-space while the atlas height grew; normalize now.
         lightmap::normalize_lm_uvs(&mut mesh, lightmaps.width, lightmaps.height);
 
+        // A spawn whose hull starts solid cannot move at all — every trace
+        // returns fraction 0, so the player floats in place. Source refuses to
+        // leave an entity wedged (`EntityPlacementTest`); so do we.
+        let spawn_origin = unstick(&world, ents.spawn.origin);
+
         Ok(Self {
             name,
             world,
@@ -157,7 +162,7 @@ impl LoadedMap {
             materials,
             lightmaps,
             skybox,
-            spawn_origin: ents.spawn.origin,
+            spawn_origin,
             spawn_angles: ents.spawn.angles,
             teleports: ents.teleports,
             pushes: ents.pushes,
@@ -226,6 +231,48 @@ impl LoadedMap {
         }
         1.0
     }
+}
+
+/// Nudge a spawn out of solid geometry, or return it unchanged when it is free.
+///
+/// The failure this guards against is total, not cosmetic: `trace_box` reports
+/// `startsolid` for a hull that merely *touches* a face (matching Source's
+/// `d1 > 0` test), every move then clips to fraction 0, and the player hangs in
+/// the air unable to walk, fall or jump. lovetunnel hit this when the spawn
+/// picker used a trigger volume's centre, which sat flush against a wall corner.
+///
+/// Search order is up first — a spawn is nearly always slightly *into* the floor
+/// — then sideways, then down, at growing distance. Deterministic, and it gives
+/// up rather than teleporting the player somewhere unrelated.
+fn unstick(world: &World, origin: Vec3) -> Vec3 {
+    let hull = surf_core::movement::Hull::css_stand();
+    if !surf_core::trace::point_contents_box(world, origin, hull.mins, hull.maxs) {
+        return origin;
+    }
+    // All 26 axis combinations, up-most first: a wedge is usually a corner, so
+    // a single-axis nudge can free the floor while staying inside the wall.
+    let mut dirs: Vec<Vec3> = Vec::with_capacity(26);
+    for dz in [1, 0, -1] {
+        for dx in [-1, 0, 1] {
+            for dy in [-1, 0, 1] {
+                if (dx, dy, dz) != (0, 0, 0) {
+                    dirs.push(Vec3::new(dx as f32, dy as f32, dz as f32));
+                }
+            }
+        }
+    }
+    // Fewest axes first within each Z tier, so the smallest useful move wins.
+    dirs.sort_by_key(|d| d.x.abs() as i32 + d.y.abs() as i32);
+    dirs.sort_by_key(|d| -(d.z as i32));
+    for step in [1.0, 2.0, 4.0, 8.0, 16.0, 24.0, 32.0, 48.0, 64.0] {
+        for dir in &dirs {
+            let candidate = origin + *dir * step;
+            if !surf_core::trace::point_contents_box(world, candidate, hull.mins, hull.maxs) {
+                return candidate;
+            }
+        }
+    }
+    origin
 }
 
 fn brush_contains_point_padded(brush: &Brush, p: Vec3, pad: f32) -> bool {
@@ -318,7 +365,7 @@ fn load_skybox(pak: &pak::PakFs, stock: &stock::StockFs, skyname: Option<&str>) 
 
 #[cfg(test)]
 mod push_parse_tests {
-    use super::LoadedMap;
+    use super::{unstick, Brush, LoadedMap, Vec3, World};
     use std::path::PathBuf;
 
     fn maps_dir() -> PathBuf {
@@ -342,5 +389,43 @@ mod push_parse_tests {
         let summit = LoadedMap::load_path(dir.join("surf_summit.bsp")).expect("summit");
         assert!(summit.pushes.is_empty());
         assert!(summit.gravities.is_empty());
+    }
+
+    /// A hull flush against a wall face is `startsolid` (Source's `d1 > 0` test
+    /// treats touching as inside), which pins every trace at fraction 0.
+    #[test]
+    fn unstick_frees_a_hull_flush_against_a_wall() {
+        // Floor slab plus a wall whose face is exactly at x = 0.
+        let world = World::new(vec![
+            Brush::aabb(Vec3::new(-512.0, -512.0, -16.0), Vec3::new(512.0, 512.0, 0.0)),
+            Brush::aabb(Vec3::new(-512.0, -512.0, 0.0), Vec3::new(0.0, 512.0, 128.0)),
+        ]);
+        let hull = surf_core::movement::Hull::css_stand();
+        // Origin at x = 16 puts the hull's -x face exactly on the wall.
+        let flush = Vec3::new(16.0, 0.0, 0.0);
+        assert!(
+            surf_core::trace::point_contents_box(&world, flush, hull.mins, hull.maxs),
+            "flush against the wall should read as startsolid"
+        );
+
+        let freed = unstick(&world, flush);
+        assert_ne!(freed.x, flush.x, "expected a sideways nudge off the wall");
+        assert!(
+            !surf_core::trace::point_contents_box(&world, freed, hull.mins, hull.maxs),
+            "unstick returned a still-solid spot {freed:?}"
+        );
+        assert!((freed - flush).length() <= 64.0, "nudged too far: {freed:?}");
+    }
+
+    /// A free spawn must be returned untouched — this runs on every map load.
+    #[test]
+    fn unstick_leaves_a_free_spawn_alone() {
+        let world = World::new(vec![Brush::aabb(
+            Vec3::new(-512.0, -512.0, -16.0),
+            Vec3::new(512.0, 512.0, 0.0),
+        )]);
+        let p = Vec3::new(0.0, 0.0, 64.0);
+        let out = unstick(&world, p);
+        assert_eq!((out.x, out.y, out.z), (p.x, p.y, p.z));
     }
 }
