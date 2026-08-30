@@ -79,6 +79,25 @@ pub fn see_through_kind(
 /// world surfaces. Foliage cards (boreas' pines) are the case this exists for:
 /// without it every branch card draws as an opaque black quad.
 pub fn is_alpha_tested(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
+    flag_through_includes(get, material_name, &["$alphatest", "$translucent"])
+}
+
+/// True when the material is drawn `$additive` (following `patch`/`include`).
+///
+/// Additive materials *add* light: a black texel contributes nothing at all.
+/// We have no blended pass, so drawing one opaque turns cyberwave's energy ball
+/// into a giant black disc over the skyline — the single most "broken texture"
+/// looking thing on the map. See `MaterialBank`'s additive keying.
+pub fn is_additive(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
+    flag_through_includes(get, material_name, &["$additive"])
+}
+
+/// True when any of `keys` is present and non-zero, following patch includes.
+fn flag_through_includes(
+    get: &impl Fn(&str) -> Option<Vec<u8>>,
+    material_name: &str,
+    keys: &[&str],
+) -> bool {
     let mat = normalize_path(material_name);
     let mut vmt_path = format!("materials/{mat}.vmt");
     let mut depth = 0;
@@ -87,7 +106,7 @@ pub fn is_alpha_tested(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &s
         let Some(text) = get(&vmt_path).and_then(|b| decode_text(&b)) else {
             return false;
         };
-        for key in ["$alphatest", "$translucent"] {
+        for key in keys {
             if let Some(v) = find_key_value(&text, key) {
                 if v.trim() != "0" {
                     return true;
@@ -103,6 +122,78 @@ pub fn is_alpha_tested(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &s
         }
     }
     false
+}
+
+/// A material's constant colour multiplier (`$color2`, else `$color`), as a
+/// **linear** RGB factor, following `patch`/`include` chains.
+///
+/// This is not decoration: Source ships a plain white `lights/white.vtf` and
+/// maps recolour it per material, so on cyberwave all twelve neon strips are
+/// the same white texture and *only* `$color2` tells them apart. Ignore it and
+/// a neon map renders monochrome.
+///
+/// Source spells the value two ways and they are not the same number:
+/// `{20 114 255}` is 0–255 in **gamma** space, `[1 .25 .5]` is already linear.
+pub fn resolve_tint(
+    get: &impl Fn(&str) -> Option<Vec<u8>>,
+    material_name: &str,
+) -> Option<[f32; 3]> {
+    let mat = normalize_path(material_name);
+    let mut vmt_path = format!("materials/{mat}.vmt");
+    let mut depth = 0;
+    while depth < 4 {
+        depth += 1;
+        let text = get(&vmt_path).and_then(|b| decode_text(&b))?;
+        // `$color2` wins: a patch that sets both means the second to override.
+        // Try every occurrence — `Proxies` blocks animate the value by writing
+        // `$color2[1]`, and those component writes must not shadow the real one.
+        for key in ["$color2", "$color"] {
+            for v in find_key_values(&text, key) {
+                if let Some(c) = parse_color(&v) {
+                    return Some(c);
+                }
+            }
+        }
+        let include = find_quoted_value(&text, "include")?;
+        vmt_path = normalize_path(&include);
+        if !vmt_path.ends_with(".vmt") {
+            vmt_path = format!("materials/{}.vmt", strip_materials_prefix(&vmt_path));
+        }
+    }
+    None
+}
+
+/// `{r g b}` (0–255, gamma) | `[r g b]` (0–1, linear) | bare `r g b`.
+fn parse_color(raw: &str) -> Option<[f32; 3]> {
+    let s = raw.trim();
+    let gamma = s.starts_with('{');
+    let body = s.trim_matches(|c| c == '{' || c == '}' || c == '[' || c == ']');
+    let mut it = body
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|t| !t.is_empty());
+    let mut out = [0.0f32; 3];
+    for slot in out.iter_mut() {
+        *slot = it.next()?.parse::<f32>().ok()?;
+    }
+    if it.next().is_some() {
+        return None;
+    }
+    if gamma {
+        // 0–255 gamma → linear, the way the engine reads a braced colour.
+        for c in out.iter_mut() {
+            *c = (*c / 255.0).clamp(0.0, 1.0).powf(2.2);
+        }
+    } else {
+        for c in out.iter_mut() {
+            *c = c.clamp(0.0, 8.0);
+        }
+    }
+    // An all-white tint is the identity; treat it as "no tint" so it never
+    // splits a texture into two identical atlas layers.
+    if out.iter().all(|&c| (c - 1.0).abs() < 1e-4) {
+        return None;
+    }
+    Some(out)
 }
 
 fn strip_materials_prefix(path: &str) -> &str {
@@ -129,6 +220,12 @@ fn first_token(text: &str) -> &str {
 }
 
 fn find_key_value(text: &str, key: &str) -> Option<String> {
+    find_key_values(text, key).into_iter().next()
+}
+
+/// Every value assigned to `key`, in file order.
+fn find_key_values(text: &str, key: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let lower = text.to_ascii_lowercase();
     let key_l = key.to_ascii_lowercase();
     let mut search_from = 0;
@@ -153,11 +250,11 @@ fn find_key_value(text: &str, key: &str) -> Option<String> {
             rest = &rest[1..];
         }
         if let Some(val) = parse_value_after(rest) {
-            return Some(val);
+            out.push(val);
         }
         search_from = after;
     }
-    None
+    out
 }
 
 fn find_quoted_value(text: &str, key: &str) -> Option<String> {
@@ -273,5 +370,64 @@ mod tests {
             see_through_kind(&get, "ice/icicle"),
             Some(SeeThrough::Refract)
         );
+    }
+
+    #[test]
+    fn braced_color_is_gamma_0_255_and_bracketed_is_linear() {
+        // cyberwave/neon_blue.vmt and models/cyberwave/neon_magenta_pulse.vmt.
+        let braced = parse_color("{20 114 255}").unwrap();
+        assert!((braced[2] - 1.0).abs() < 1e-4, "255 must be full scale");
+        assert!(braced[0] < 0.01 && braced[1] > 0.1 && braced[1] < 0.25);
+        let bracketed = parse_color("[1 0.25 0.5]").unwrap();
+        assert_eq!(bracketed, [1.0, 0.25, 0.5]);
+    }
+
+    #[test]
+    fn white_tint_is_no_tint() {
+        assert!(parse_color("{255 255 255}").is_none());
+        assert!(parse_color("[1 1 1]").is_none());
+        assert!(parse_color("garbage").is_none());
+        assert!(parse_color("{1 2}").is_none());
+    }
+
+    #[test]
+    fn tint_is_read_through_a_patch_include_and_color2_wins() {
+        let get = |path: &str| match path {
+            "materials/models/cyberwave/neon_blue.vmt" => Some(
+                br#""unlitgeneric" { "$basetexture" "lights/white" "$color2" "{20 114 255}" }"#
+                    .to_vec(),
+            ),
+            "materials/patched.vmt" => Some(
+                br#""patch" { "include" "materials/models/cyberwave/neon_blue.vmt" }"#.to_vec(),
+            ),
+            "materials/both.vmt" => {
+                Some(br#""unlitgeneric" { "$color" "[1 0 0]" "$color2" "[0 1 0]" }"#.to_vec())
+            }
+            _ => None,
+        };
+        let direct = resolve_tint(&get, "models/cyberwave/neon_blue").unwrap();
+        let patched = resolve_tint(&get, "patched").unwrap();
+        assert_eq!(direct, patched);
+        assert_eq!(resolve_tint(&get, "both"), Some([0.0, 1.0, 0.0]));
+        assert_eq!(resolve_tint(&get, "nope"), None);
+    }
+
+    #[test]
+    fn additive_is_read_through_a_patch_include() {
+        let get = |path: &str| match path {
+            "materials/effects/emp_ball1.vmt" => Some(
+                br#""UnlitGeneric" { "$basetexture" "effects/emp_ball1" "$additive" "1" }"#
+                    .to_vec(),
+            ),
+            "materials/maps/m/effects/emp_ball1_0_0_0.vmt" => {
+                Some(br#""patch" { "include" "materials/effects/emp_ball1.vmt" }"#.to_vec())
+            }
+            "materials/plain.vmt" => Some(br#""UnlitGeneric" { "$additive" "0" }"#.to_vec()),
+            _ => None,
+        };
+        assert!(is_additive(&get, "effects/emp_ball1"));
+        assert!(is_additive(&get, "maps/m/effects/emp_ball1_0_0_0"));
+        assert!(!is_additive(&get, "plain"));
+        assert!(!is_additive(&get, "absent"));
     }
 }

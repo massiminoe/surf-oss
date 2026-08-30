@@ -25,6 +25,10 @@ pub struct MaterialAtlas {
     pub missing_count: u32,
     /// Sample of missing material names (capped) for diagnostics.
     pub missing_names: Vec<String>,
+    /// Every resolved material name → its layer. "Which texture is that white
+    /// wall?" is the question every texture triage starts with, and without
+    /// this the atlas is an anonymous pile of images.
+    pub layer_of: Vec<(String, u32)>,
 }
 
 impl MaterialAtlas {
@@ -38,6 +42,7 @@ impl MaterialAtlas {
             textured_count: 0,
             missing_count: 0,
             missing_names: Vec::new(),
+            layer_of: Vec::new(),
         }
     }
 }
@@ -62,6 +67,10 @@ enum LoadedAlbedo {
         texture_path: String,
     },
     Placeholder(DynamicImage),
+    /// A material that *is* a colour: `$color`/`$color2` with no basetexture we
+    /// can load. Built directly at the right absolute brightness rather than
+    /// tinted afterwards — see [`flat_color_layer`].
+    FlatColor([f32; 3]),
 }
 
 impl MaterialBank {
@@ -111,20 +120,35 @@ impl MaterialBank {
         // disagreeing about that, hence the flag in the dedupe key.
         let get = |p: &str| self.get_bytes(p);
         let alpha_tested = vmt::is_alpha_tested(&get, &key);
-        let id = match self.load_albedo(&key) {
+        // `$color2`/`$color` is baked into the layer rather than carried per
+        // vertex: it needs no new bind group, and the tint must be part of the
+        // dedupe key or six differently-coloured neon strips sharing one white
+        // VTF collapse into one white layer.
+        let off = disabled();
+        let tint = (!off.tint).then(|| vmt::resolve_tint(&get, &key)).flatten();
+        let additive = !off.additive && vmt::is_additive(&get, &key);
+        let id = match self.load_albedo(&key, tint) {
             Some(LoadedAlbedo::Real {
                 image,
                 texture_path,
             }) => {
-                let cache_key = format!("{texture_path}#{}", u8::from(alpha_tested));
+                let cache_key = format!(
+                    "{texture_path}#{}{}#{}",
+                    u8::from(alpha_tested),
+                    u8::from(additive),
+                    tint_key(tint)
+                );
                 if let Some(&id) = self.by_texture.get(&cache_key) {
                     id
                 } else {
                     let id = self.layers.len() as u32;
                     let mut layer = resize_layer(image);
-                    if !alpha_tested {
+                    if additive {
+                        key_additive_alpha(&mut layer, alpha_tested);
+                    } else if !alpha_tested {
                         force_opaque(&mut layer);
                     }
+                    apply_tint(&mut layer, tint);
                     self.layers.push(layer);
                     self.by_texture.insert(cache_key, id);
                     self.textured_count += 1;
@@ -136,7 +160,14 @@ impl MaterialBank {
                 let id = self.layers.len() as u32;
                 let mut layer = resize_layer(img);
                 force_opaque(&mut layer);
+                apply_tint(&mut layer, tint);
                 self.layers.push(layer);
+                id
+            }
+            Some(LoadedAlbedo::FlatColor(c)) => {
+                self.note_missing(&key);
+                let id = self.layers.len() as u32;
+                self.layers.push(flat_color_layer(c));
                 id
             }
             None => {
@@ -155,7 +186,7 @@ impl MaterialBank {
         }
     }
 
-    fn load_albedo(&self, material_name: &str) -> Option<LoadedAlbedo> {
+    fn load_albedo(&self, material_name: &str, tint: Option<[f32; 3]>) -> Option<LoadedAlbedo> {
         let get = |p: &str| self.get_bytes(p);
         if let Some(bt) = vmt::resolve_basetexture(&get, material_name) {
             let texture_path = normalize_path(&format!("materials/{bt}.vtf"));
@@ -193,6 +224,14 @@ impl MaterialBank {
             let px = RgbaImage::from_pixel(8, 8, rgb);
             return Some(LoadedAlbedo::Placeholder(DynamicImage::ImageRgba8(px)));
         }
+        // A tinted material whose basetexture we do not have is almost always a
+        // recoloured stock flat — `lights/white`, the texture every neon strip
+        // in the corpus is built from. White here is not a guess about the
+        // missing VTF so much as the only value that lets the tint speak; the
+        // material is still counted missing.
+        if let Some(c) = tint {
+            return Some(LoadedAlbedo::FlatColor(c));
+        }
         None
     }
 
@@ -215,6 +254,11 @@ impl MaterialBank {
             textured_count: self.textured_count,
             missing_count: self.missing_count,
             missing_names: self.missing_names,
+            layer_of: {
+                let mut v: Vec<_> = self.by_material.into_iter().collect();
+                v.sort();
+                v
+            },
         }
     }
 }
@@ -228,11 +272,135 @@ fn material_key(path: &str) -> String {
         .to_string()
 }
 
+/// Turn an `$additive` layer's alpha into "how much light does this texel add",
+/// so the shader's uniform cutout erases the parts that add nothing.
+///
+/// Source composites these as `dst += src.rgb` (times `src.a` when the material
+/// also declares `$translucent`/`$alphatest`), which means black is invisible.
+/// With no blended pass, drawing them opaque is what put a black disc over
+/// cyberwave's skyline where an energy ball belongs. Keying on contribution is
+/// the same bargain the Water/Refract stand-ins make: a hard-edged approximation
+/// that can never *hide* something the player is meant to see.
+///
+/// The ×2 puts the shader's 0.5 test at a contribution of ~0.25. It is not a
+/// free parameter: cyberwave's `emp_ball1` peaks at luma 102/255, so testing the
+/// raw luminance at 0.5 would erase the sprite completely.
+fn key_additive_alpha(img: &mut RgbaImage, modulate_by_alpha: bool) {
+    for px in img.pixels_mut() {
+        let [r, g, b, a] = px.0;
+        let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+        let scale = if modulate_by_alpha {
+            a as f32 / 255.0
+        } else {
+            1.0
+        };
+        px.0[3] = (luma * scale * 2.0).min(255.0) as u8;
+    }
+}
+
 /// Blank the alpha channel so the shader's cutout test can never fire on a
 /// material that never asked for one.
 fn force_opaque(img: &mut RgbaImage) {
     for px in img.pixels_mut() {
         px.0[3] = 255;
+    }
+}
+
+/// A layer for a material that is nothing but a colour — `$color`/`$color2`
+/// with no basetexture we can load. hourglass builds its sky, its hourglass
+/// props and its tree trunks this way; so does demise's fake red sky.
+///
+/// The halving is the point. The fragment shader draws textured surfaces as
+/// `albedo * light * 2`, a calibration against the LDR lightmap scale, and for
+/// a real VTF that is right — its brightness is relative to every other
+/// texture. A flat `$color` is not relative to anything: it *is* the surface
+/// colour the author picked, so it has to survive the round trip. Skip the
+/// halving and hourglass's `{220 220 220}` overcast sky clips to pure white.
+fn flat_color_layer(linear: [f32; 3]) -> RgbaImage {
+    let mut px = [255u8; 4];
+    for (i, c) in linear.iter().enumerate() {
+        px[i] = (linear_to_srgb((c * 0.5).clamp(0.0, 1.0)) * 255.0).round() as u8;
+    }
+    RgbaImage::from_pixel(
+        TEX_LAYER_SIZE,
+        TEX_LAYER_SIZE,
+        image::Rgba([px[0], px[1], px[2], 255]),
+    )
+}
+
+/// A/B lever, same convention as `OSX_SURF_NO_PHY` / `OSX_SURF_NO_FIELDS`:
+/// `OSX_SURF_NO_VMT_SHADING=tint|additive|all`. Kept separable because the two
+/// land on overlapping maps and a corpus diff that cannot tell them apart says
+/// nothing useful — nyx's cave darkens under `tint` (the mapper's own
+/// `$color [0.2 0.2 0.2]` on the rock) and its glow rails change under
+/// `additive`, and reading that as one number would have called a correct
+/// change a regression.
+#[derive(Clone, Copy, Default)]
+struct Disabled {
+    tint: bool,
+    additive: bool,
+}
+
+fn disabled() -> Disabled {
+    let Some(v) = std::env::var_os("OSX_SURF_NO_VMT_SHADING") else {
+        return Disabled::default();
+    };
+    let v = v.to_string_lossy().to_ascii_lowercase();
+    let all = v.is_empty() || v == "1" || v == "all";
+    Disabled {
+        tint: all || v.contains("tint"),
+        additive: all || v.contains("additive"),
+    }
+}
+
+/// Stable dedupe-key fragment for a tint (quantised, so float noise cannot
+/// split one colour into two layers).
+fn tint_key(tint: Option<[f32; 3]>) -> String {
+    match tint {
+        None => "_".to_string(),
+        Some(c) => format!(
+            "{}:{}:{}",
+            (c[0] * 1024.0) as i32,
+            (c[1] * 1024.0) as i32,
+            (c[2] * 1024.0) as i32
+        ),
+    }
+}
+
+/// Multiply a layer by a linear tint.
+///
+/// The atlas is uploaded as `Rgba8UnormSrgb`, so the bytes are gamma-encoded
+/// and the multiply has to happen in linear space — doing it on the raw bytes
+/// would make every tinted material read far too bright.
+fn apply_tint(img: &mut RgbaImage, tint: Option<[f32; 3]>) {
+    let Some(tint) = tint else { return };
+    let mut lut = [[0u8; 256]; 3];
+    for (c, factor) in tint.iter().enumerate() {
+        for v in 0..256usize {
+            let linear = srgb_to_linear(v as f32 / 255.0) * factor;
+            lut[c][v] = (linear_to_srgb(linear.clamp(0.0, 1.0)) * 255.0).round() as u8;
+        }
+    }
+    for px in img.pixels_mut() {
+        for c in 0..3 {
+            px.0[c] = lut[c][px.0[c] as usize];
+        }
+    }
+}
+
+fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(v: f32) -> f32 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
     }
 }
 
