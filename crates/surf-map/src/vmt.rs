@@ -32,8 +32,53 @@ pub fn resolve_basetexture(
     None
 }
 
-/// True for Source water/refract shaders, following patch includes.
-pub fn is_water_or_refract(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
+/// Which see-through Source shader a material uses, if any. We have no
+/// alpha-blended pass, so each gets a different opaque stand-in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SeeThrough {
+    /// `Water` — a body of water. A flat opaque teal reads correctly.
+    Water,
+    /// `Refract` — ice, glass, crystal. Teal does *not* read correctly here:
+    /// boreas' icicles came out as saturated blue slabs. Frosted white-blue is
+    /// the honest stand-in, and unlike making them invisible it can never hide
+    /// a surface the player is meant to see.
+    Refract,
+}
+
+/// Classify a material's shader, following patch includes.
+pub fn see_through_kind(
+    get: &impl Fn(&str) -> Option<Vec<u8>>,
+    material_name: &str,
+) -> Option<SeeThrough> {
+    let mat = normalize_path(material_name);
+    let mut vmt_path = format!("materials/{mat}.vmt");
+    let mut depth = 0;
+    while depth < 4 {
+        depth += 1;
+        let text = get(&vmt_path).and_then(|b| decode_text(&b))?;
+        match first_token(&text).to_ascii_lowercase().as_str() {
+            "water" => return Some(SeeThrough::Water),
+            "refract" => return Some(SeeThrough::Refract),
+            _ => {}
+        }
+        let include = find_quoted_value(&text, "include")?;
+        vmt_path = normalize_path(&include);
+        if !vmt_path.ends_with(".vmt") {
+            vmt_path = format!("materials/{}.vmt", strip_materials_prefix(&vmt_path));
+        }
+    }
+    None
+}
+
+/// True when the material declares `$alphatest` or `$translucent` (following
+/// `patch`/`include` chains).
+///
+/// Only these keep their cutout alpha. Source reuses the alpha channel of
+/// ordinary textures for envmap masks and `$selfillum`, so alpha-testing
+/// unconditionally would punch holes in — or erase entirely — perfectly opaque
+/// world surfaces. Foliage cards (boreas' pines) are the case this exists for:
+/// without it every branch card draws as an opaque black quad.
+pub fn is_alpha_tested(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
     let mat = normalize_path(material_name);
     let mut vmt_path = format!("materials/{mat}.vmt");
     let mut depth = 0;
@@ -42,9 +87,12 @@ pub fn is_water_or_refract(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name
         let Some(text) = get(&vmt_path).and_then(|b| decode_text(&b)) else {
             return false;
         };
-        let shader = first_token(&text).to_ascii_lowercase();
-        if shader == "water" || shader == "refract" {
-            return true;
+        for key in ["$alphatest", "$translucent"] {
+            if let Some(v) = find_key_value(&text, key) {
+                if v.trim() != "0" {
+                    return true;
+                }
+            }
         }
         let Some(include) = find_quoted_value(&text, "include") else {
             return false;
@@ -171,6 +219,36 @@ mod tests {
     }
 
     #[test]
+    fn alphatest_is_read_through_a_patch_include() {
+        let get = |path: &str| match path {
+            "materials/foliage/leaf_patch.vmt" => {
+                Some(br#""patch" { "include" "materials/foliage/leaf.vmt" }"#.to_vec())
+            }
+            "materials/foliage/leaf.vmt" => Some(
+                br#""VertexLitGeneric" { "$basetexture" "foliage/leaf" "$alphatest" "1" }"#
+                    .to_vec(),
+            ),
+            // Opaque rock that happens to carry an envmap mask in alpha.
+            "materials/rock/rock01.vmt" => Some(
+                br#""LightmappedGeneric" { "$basetexture" "rock/r" "$basealphaenvmapmask" "1" }"#
+                    .to_vec(),
+            ),
+            _ => None,
+        };
+        assert!(is_alpha_tested(&get, "foliage/leaf_patch"));
+        assert!(!is_alpha_tested(&get, "rock/rock01"));
+    }
+
+    #[test]
+    fn alphatest_zero_is_not_alpha_tested() {
+        let get = |path: &str| match path {
+            "materials/x/y.vmt" => Some(br#""VertexLitGeneric" { "$alphatest" "0" }"#.to_vec()),
+            _ => None,
+        };
+        assert!(!is_alpha_tested(&get, "x/y"));
+    }
+
+    #[test]
     fn recognizes_included_water_shader() {
         let get = |path: &str| match path {
             "materials/maps/test/water_depth.vmt" => {
@@ -179,6 +257,21 @@ mod tests {
             "materials/nature/water.vmt" => Some(br#""Water" { "$normalmap" "water/n" }"#.to_vec()),
             _ => None,
         };
-        assert!(is_water_or_refract(&get, "maps/test/water_depth"));
+        assert_eq!(
+            see_through_kind(&get, "maps/test/water_depth"),
+            Some(SeeThrough::Water)
+        );
+    }
+
+    #[test]
+    fn refract_is_distinguished_from_water() {
+        let get = |path: &str| match path {
+            "materials/ice/icicle.vmt" => Some(br#""Refract" { "$normalmap" "ice/n" }"#.to_vec()),
+            _ => None,
+        };
+        assert_eq!(
+            see_through_kind(&get, "ice/icicle"),
+            Some(SeeThrough::Refract)
+        );
     }
 }

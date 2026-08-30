@@ -29,7 +29,7 @@ fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
     var clip = camera.view_proj * vec4<f32>(v.position, 1.0);
     // Force depth to far plane.
-    clip.z = clip.w;
+    clip.z = 0.0; // far plane under reversed-Z
     out.clip = clip;
     out.uv = v.uv;
     out.tex = v.tex;
@@ -224,7 +224,7 @@ impl SkyboxRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -279,11 +279,11 @@ fn sky_cube_mesh() -> (Vec<MeshVertex>, Vec<u32>) {
     // Axis-aligned cube in Y-up space. Layers: ft,bk,lf,rt,up,dn.
     let faces: [([[f32; 3]; 4], u32); 6] = [
         ([[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s]], 0), // ft
-        ([[s, -s, s], [-s, -s, s], [-s, s, s], [s, s, s]], 1),       // bk
-        ([[-s, -s, s], [-s, -s, -s], [-s, s, -s], [-s, s, s]], 2),   // lf
-        ([[s, -s, -s], [s, -s, s], [s, s, s], [s, s, -s]], 3),       // rt
-        ([[-s, s, -s], [s, s, -s], [s, s, s], [-s, s, s]], 4),       // up
-        ([[-s, -s, s], [s, -s, s], [s, -s, -s], [-s, -s, -s]], 5),   // dn
+        ([[s, -s, s], [-s, -s, s], [-s, s, s], [s, s, s]], 1),     // bk
+        ([[-s, -s, s], [-s, -s, -s], [-s, s, -s], [-s, s, s]], 2), // lf
+        ([[s, -s, -s], [s, -s, s], [s, s, s], [s, s, -s]], 3),     // rt
+        ([[-s, s, -s], [s, s, -s], [s, s, s], [-s, s, s]], 4),     // up
+        ([[-s, -s, s], [s, -s, s], [s, -s, -s], [-s, -s, -s]], 5), // dn
     ];
     let uvs = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
     let mut verts = Vec::new();

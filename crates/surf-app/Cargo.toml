@@ -22,6 +22,26 @@ path = "src/bin/ksf_import.rs"
 name = "ksf_resim_audit"
 path = "examples/ksf_resim_audit.rs"
 
+[[example]]
+name = "snag_probe"
+path = "examples/snag_probe.rs"
+
+[[example]]
+name = "surface_scan"
+path = "examples/surface_scan.rs"
+
+[[example]]
+name = "ghost_eye"
+path = "examples/ghost_eye.rs"
+
+[[example]]
+name = "ramp_tour"
+path = "examples/ramp_tour.rs"
+
+[[example]]
+name = "ramp_surface_audit"
+path = "examples/ramp_surface_audit.rs"
+
 [dependencies]
 surf-core = { workspace = true }
 surf-map = { workspace = true }

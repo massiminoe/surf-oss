@@ -94,7 +94,7 @@ impl GhostRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -133,11 +133,7 @@ impl GhostRenderer {
         queue.write_buffer(&self.vbo, 0, bytemuck::cast_slice(&verts));
     }
 
-    pub fn draw<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        camera_bg: &'a wgpu::BindGroup,
-    ) {
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, camera_bg: &'a wgpu::BindGroup) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, camera_bg, &[]);
         pass.set_vertex_buffer(0, self.vbo.slice(..));

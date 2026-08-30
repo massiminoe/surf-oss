@@ -13,6 +13,7 @@ mod materials;
 mod mesh;
 mod models;
 mod pak;
+mod phy;
 mod stock;
 mod vmt;
 
@@ -26,6 +27,7 @@ use surf_core::{Aabb, Brush, World};
 pub use entities::{GravityTrigger, NamedPoint, PushTrigger, TeleportTrigger};
 pub use lightmap::LightmapAtlas;
 pub use materials::{MaterialAtlas, SkyboxAtlas};
+pub use models::PropInstance;
 
 #[derive(Debug)]
 pub enum MapError {
@@ -67,6 +69,13 @@ pub struct LoadedMap {
     pub teleports: Vec<TeleportTrigger>,
     pub pushes: Vec<PushTrigger>,
     pub gravities: Vec<GravityTrigger>,
+    /// Index into `world.tris` where static-prop collision begins; everything
+    /// before it is displacement. Lets tools attribute a snag to the right
+    /// source — prop tris come from a render mesh, displacement tris do not.
+    pub prop_tri_start: usize,
+    /// Every static prop placed in the map, with the slice of prop collision it
+    /// owns. Lets tools answer "what did I just hit?" with a model name.
+    pub props: Vec<models::PropInstance>,
     /// Soft reset when the player falls below this Z (disp holes, voids).
     pub kill_z: f32,
     pub world_bounds: Aabb,
@@ -115,13 +124,27 @@ impl LoadedMap {
         let mut lightmaps = lightmap::LightmapBaker::from_bsp_bytes(data);
         let disps = disp::extract_displacements(&bsp, &mut materials, &mut lightmaps);
         let mut coll_tris = disps.collision;
-        coll_tris.extend(models::extract_prop_collision(&bsp, &mut materials));
+        let prop_tri_start = coll_tris.len();
+        // The map's own area partition tells us which props are 3D-skybox
+        // backdrop; those are neither drawn nor collided.
+        let leaf_areas = leaves::parse_leaf_areas(data).unwrap_or_default();
+        let skybox_props = models::skybox_prop_mask(&bsp, &leaf_areas, skybox_area(&bsp, data));
+        let (prop_tris, mut props) =
+            models::extract_prop_collision(&bsp, &mut materials, &skybox_props);
+        coll_tris.extend(prop_tris);
         let world = World::with_tris(brushes, coll_tris, disp::TRI_GRID_CELL);
 
         let ents = entities::parse_entities(&bsp, &leaf_ranges, world_bounds)?;
         let mut mesh = mesh::build_mesh(&bsp, &ents.render_models, &mut materials, &mut lightmaps);
         mesh.tris.extend(disps.render);
-        models::append_static_props(&bsp, &mut materials, &mut mesh);
+        let (_, render_bounds) =
+            models::append_static_props(&bsp, &mut materials, &mut mesh, &skybox_props);
+        for prop in &mut props {
+            if let Some((range, bounds)) = render_bounds.get(prop.index) {
+                prop.render_tris = range.clone();
+                prop.render_bounds = *bounds;
+            }
+        }
         let materials = materials.into_atlas();
         let lightmaps = lightmaps.finish();
         // lm_uv was pixel-space while the atlas height grew; normalize now.
@@ -139,6 +162,8 @@ impl LoadedMap {
             teleports: ents.teleports,
             pushes: ents.pushes,
             gravities: ents.gravities,
+            prop_tri_start,
+            props,
             kill_z: world_bounds.mins.z - 256.0,
             world_bounds,
             skyname,
@@ -235,6 +260,31 @@ fn aabb_overlap(a_mins: Vec3, a_maxs: Vec3, b_mins: Vec3, b_maxs: Vec3) -> bool 
         && a_maxs.y >= b_mins.y
         && a_mins.z <= b_maxs.z
         && a_maxs.z >= b_mins.z
+}
+
+/// The BSP area holding the 3D skybox, found by asking which leaf the map's own
+/// `sky_camera` sits in.
+///
+/// Source draws that area scaled-down around the sky camera as a backdrop. We
+/// have no 3D-skybox pass, so drawing it as ordinary world geometry puts a
+/// full-size forest tens of thousands of units below the map: on boreas that is
+/// 640 of 1587 props and **51% of the entire draw mesh**, none of it ever
+/// meant to be seen at that scale.
+///
+/// Returns `None` when the map has no sky camera or the lumps will not parse,
+/// in which case nothing is excluded — an unreadable BSP must not silently
+/// delete scenery.
+fn skybox_area(bsp: &vbsp::Bsp, bsp_bytes: &[u8]) -> Option<u16> {
+    let origin = bsp.entities.iter().find_map(|ent| {
+        (ent.prop("classname") == Some("sky_camera")).then(|| ent.prop("origin"))?
+    })?;
+    let mut parts = origin
+        .split_whitespace()
+        .filter_map(|v| v.parse::<f32>().ok());
+    let point = [parts.next()?, parts.next()?, parts.next()?];
+    let leaf = leaves::leaf_index_at(bsp_bytes, point).ok()?;
+    let areas = leaves::parse_leaf_areas(bsp_bytes).ok()?;
+    areas.get(leaf).copied()
 }
 
 fn worldspawn_skyname(bsp: &vbsp::Bsp) -> Option<String> {

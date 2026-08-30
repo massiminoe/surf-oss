@@ -199,13 +199,7 @@ fn path_bounds(start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> Aabb {
 
 /// Swept AABB from `start`→`end` (origin = feet). `mins`/`maxs` are hull extents
 /// relative to origin (CS:S stand: mins=(-16,-16,0), maxs=(16,16,62)).
-pub fn trace_box(
-    world: &World,
-    start: Vec3,
-    end: Vec3,
-    mins: Vec3,
-    maxs: Vec3,
-) -> TraceResult {
+pub fn trace_box(world: &World, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3) -> TraceResult {
     let mut best = TraceResult::free(end);
     let mut any_startsolid = false;
 
@@ -257,11 +251,7 @@ pub fn trace_box(
             // them is the classic "1px wall" snag (nyx @ ghost tick 979: edge hit
             // dropped 2629→378 u/s). Skip edge hits — neighboring face planes still
             // provide the surfable surface; startsolid still uses the full prism.
-            if tr
-                .hit
-                .as_ref()
-                .is_some_and(|h| h.plane_index >= 2)
-            {
+            if tr.hit.as_ref().is_some_and(|h| h.plane_index >= 2) {
                 continue;
             }
             if tr.startsolid {
@@ -295,6 +285,19 @@ pub fn trace_box(
     }
 
     best
+}
+
+/// `trace_planes` for diagnostics — lets tools ask what a single solid says
+/// about a sweep, independent of the broadphase and the edge-plane filter.
+pub fn trace_planes_pub(
+    planes: &[Plane],
+    solid_index: usize,
+    start: Vec3,
+    end: Vec3,
+    mins: Vec3,
+    maxs: Vec3,
+) -> TraceResult {
+    trace_planes(planes, solid_index, start, end, mins, maxs)
 }
 
 /// Point contents test for the player hull at `origin` (unswept).

@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use surf_core::brush::World;
+use surf_core::is_on_surf_ramp;
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
-use surf_core::is_on_surf_ramp;
 
 use crate::settings::{GHOST_AUTO, GHOST_OFF, GHOST_PB};
 use crate::zones::ZoneBox;
@@ -204,25 +204,29 @@ impl ReplayFrame {
 
 fn read_f32(r: &mut Cursor<&[u8]>) -> Result<f32, String> {
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).map_err(|e| format!("replay eof: {e}"))?;
+    r.read_exact(&mut buf)
+        .map_err(|e| format!("replay eof: {e}"))?;
     Ok(f32::from_le_bytes(buf))
 }
 
 fn read_u8(r: &mut Cursor<&[u8]>) -> Result<u8, String> {
     let mut buf = [0u8; 1];
-    r.read_exact(&mut buf).map_err(|e| format!("replay eof: {e}"))?;
+    r.read_exact(&mut buf)
+        .map_err(|e| format!("replay eof: {e}"))?;
     Ok(buf[0])
 }
 
 fn read_u16(r: &mut Cursor<&[u8]>) -> Result<u16, String> {
     let mut buf = [0u8; 2];
-    r.read_exact(&mut buf).map_err(|e| format!("replay eof: {e}"))?;
+    r.read_exact(&mut buf)
+        .map_err(|e| format!("replay eof: {e}"))?;
     Ok(u16::from_le_bytes(buf))
 }
 
 fn read_u32(r: &mut Cursor<&[u8]>) -> Result<u32, String> {
     let mut buf = [0u8; 4];
-    r.read_exact(&mut buf).map_err(|e| format!("replay eof: {e}"))?;
+    r.read_exact(&mut buf)
+        .map_err(|e| format!("replay eof: {e}"))?;
     Ok(u32::from_le_bytes(buf))
 }
 
@@ -296,9 +300,8 @@ impl Replay {
         }
         let header_json =
             serde_json::to_vec(&self.header).map_err(|e| format!("replay header json: {e}"))?;
-        let mut out = Vec::with_capacity(
-            4 + 2 + 4 + header_json.len() + self.frames.len() * FRAME_BYTES,
-        );
+        let mut out =
+            Vec::with_capacity(4 + 2 + 4 + header_json.len() + self.frames.len() * FRAME_BYTES);
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&REPLAY_FORMAT_VERSION.to_le_bytes());
         out.extend_from_slice(&(header_json.len() as u32).to_le_bytes());
@@ -329,8 +332,7 @@ impl Replay {
             .map_err(|e| format!("replay header: {e}"))?;
         let header: ReplayHeader =
             serde_json::from_slice(&header_buf).map_err(|e| format!("replay header json: {e}"))?;
-        if header.format_version < MIN_LOAD_VERSION
-            || header.format_version > REPLAY_FORMAT_VERSION
+        if header.format_version < MIN_LOAD_VERSION || header.format_version > REPLAY_FORMAT_VERSION
         {
             return Err(format!(
                 "header formatVersion {} out of range",
@@ -494,10 +496,7 @@ impl GhostPlayback {
             .map(|f| is_on_surf_ramp(world, f.origin, &hull))
             .collect();
         let on = self.on_ramp.iter().filter(|&&b| b).count();
-        println!(
-            "  ghost trail: {on}/{} frames on-ramp",
-            self.on_ramp.len()
-        );
+        println!("  ghost trail: {on}/{} frames on-ramp", self.on_ramp.len());
     }
 
     pub fn begin(&mut self) {
@@ -508,6 +507,20 @@ impl GhostPlayback {
     pub fn stop(&mut self) {
         self.active = false;
         self.frame_idx = 0;
+    }
+
+    /// Jump playback to the frame nearest `secs` (loadloc: the live clock moved,
+    /// so the ghost has to move with it or every delta on screen is a lie).
+    /// Frame `i` is elapsed `(i + 1) * tick_interval`, matching [`derive_splits`].
+    pub fn seek_secs(&mut self, secs: f32) {
+        if self.frames.is_empty() || self.tick_interval <= 0.0 {
+            self.active = false;
+            return;
+        }
+        let idx = (secs / self.tick_interval).round() - 1.0;
+        let idx = idx.max(0.0).min((self.frames.len() - 1) as f32);
+        self.frame_idx = idx as usize;
+        self.active = true;
     }
 
     pub fn advance(&mut self) {
@@ -627,13 +640,10 @@ pub fn ghost_catalog(map: &str, current_id: &str) -> Vec<GhostOption> {
         out.push(g);
     }
 
-    if current_id != GHOST_OFF
-        && current_id != GHOST_PB
-        && current_id != GHOST_AUTO
-    {
+    if current_id != GHOST_OFF && current_id != GHOST_PB && current_id != GHOST_AUTO {
         let cur = PathBuf::from(current_id);
-        let already = listed_paths.iter().any(|p| p == &cur)
-            || out.iter().any(|o| o.id == current_id);
+        let already =
+            listed_paths.iter().any(|p| p == &cur) || out.iter().any(|o| o.id == current_id);
         if !already && cur.is_file() {
             let label = cur
                 .file_stem()
@@ -757,10 +767,7 @@ fn load_ksf_manifest_labels(map: &str) -> std::collections::HashMap<String, KsfM
         return out;
     };
     for rec in records {
-        let file = rec
-            .get("file")
-            .and_then(|f| f.as_str())
-            .unwrap_or_default();
+        let file = rec.get("file").and_then(|f| f.as_str()).unwrap_or_default();
         let stem = file.trim_end_matches(".rec");
         if stem.is_empty() {
             continue;
@@ -772,10 +779,7 @@ fn load_ksf_manifest_labels(map: &str) -> std::collections::HashMap<String, KsfM
             .unwrap_or("?")
             .to_string();
         let time = rec.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0) as f32;
-        out.insert(
-            stem.to_string(),
-            KsfManifestMeta { rank, name, time },
-        );
+        out.insert(stem.to_string(), KsfManifestMeta { rank, name, time });
     }
     out
 }
@@ -981,7 +985,9 @@ mod tests {
             player = tick(&gb.world, &player, &cmd, &vars);
             rec.push(&cmd, &player);
         }
-        let replay = rec.finish("graybox", 120.0 * vars.tick_interval, &vars, &[]).unwrap();
+        let replay = rec
+            .finish("graybox", 120.0 * vars.tick_interval, &vars, &[])
+            .unwrap();
         let err = resim_max_origin_error(&gb.world, &start, &replay.frames, &vars);
         assert!(
             err < 1e-3,
@@ -1091,7 +1097,10 @@ mod tests {
         g.classify_ramp_contact(&loaded.world);
         let on = g.on_ramp.iter().filter(|&&b| b).count();
         let n = g.on_ramp.len();
-        assert!(on > n / 10, "expected substantial on-ramp share, got {on}/{n}");
+        assert!(
+            on > n / 10,
+            "expected substantial on-ramp share, got {on}/{n}"
+        );
         assert!(on < n, "expected some air frames, got {on}/{n}");
     }
 }

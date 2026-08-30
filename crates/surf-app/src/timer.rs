@@ -16,6 +16,39 @@ pub enum TimerPhase {
     Finished,
 }
 
+impl TimerPhase {
+    /// Stable id for on-disk loc files.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimerPhase::Idle => "idle",
+            TimerPhase::Armed => "armed",
+            TimerPhase::Running => "running",
+            TimerPhase::Finished => "finished",
+        }
+    }
+
+    pub fn from_str_or_idle(s: &str) -> Self {
+        match s {
+            "armed" => TimerPhase::Armed,
+            "running" => TimerPhase::Running,
+            "finished" => TimerPhase::Finished,
+            _ => TimerPhase::Idle,
+        }
+    }
+}
+
+/// Restorable slice of run state — what a saveloc captures and a loadloc puts
+/// back. Edge-detect flags are deliberately absent: they are re-derived from the
+/// world on restore, so a snapshot can never resurrect a stale edge.
+#[derive(Clone, Debug)]
+pub struct TimerSnapshot {
+    pub phase: TimerPhase,
+    pub time_secs: f32,
+    pub current_stage: usize,
+    pub splits: Vec<f32>,
+    pub next_cp: usize,
+}
+
 /// Just-hit checkpoint info for HUD flash.
 #[derive(Clone, Copy, Debug)]
 pub struct SplitEvent {
@@ -38,6 +71,10 @@ pub struct RunTimer {
     pub splits: Vec<f32>,
     /// Latest split event (consumed by app for HUD flash).
     pub last_split: Option<SplitEvent>,
+    /// Set when the run was interfered with (loadloc). The clock keeps running
+    /// and the HUD keeps showing a time, but the result is not a real run: no PB,
+    /// no replay. Cleared only by a genuine start (`start_run`) or a reset.
+    pub practice: bool,
     was_in_start: bool,
     was_grounded: bool,
     /// Set by fail teleport / kill-z soft-respawn into start: do not cancel.
@@ -57,6 +94,7 @@ impl Default for RunTimer {
             current_stage: 1,
             splits: Vec::new(),
             last_split: None,
+            practice: false,
             was_in_start: false,
             was_grounded: true,
             soft_enter_start: false,
@@ -81,10 +119,57 @@ impl RunTimer {
         self.current_stage = 1;
         self.splits.clear();
         self.last_split = None;
+        self.practice = false;
         self.was_in_start = false;
         self.soft_enter_start = false;
         self.next_cp = 0;
         self.cp_inside.clear();
+    }
+
+    /// Capture the run state a loc should remember.
+    pub fn snapshot(&self) -> TimerSnapshot {
+        TimerSnapshot {
+            phase: self.phase,
+            time_secs: self.time_secs,
+            current_stage: self.current_stage,
+            splits: self.splits.clone(),
+            next_cp: self.next_cp,
+        }
+    }
+
+    /// Put a snapshot back (loadloc). Does **not** set [`Self::practice`] —
+    /// callers decide, because restoring a start-zone loc is just a respawn.
+    ///
+    /// `was_in_start` / `soft_enter_start` are set so the first tick after a
+    /// restore can never read as voluntary start re-entry and cancel the run;
+    /// the real edge is re-established on the tick after that.
+    pub fn restore(&mut self, snap: &TimerSnapshot, grounded: bool) {
+        self.phase = snap.phase;
+        self.time_secs = snap.time_secs;
+        self.current_stage = snap.current_stage.max(1);
+        self.splits = snap.splits.clone();
+        self.next_cp = snap.next_cp;
+        self.last_split = None;
+        self.cp_inside.clear();
+        self.was_in_start = true;
+        self.was_grounded = grounded;
+        self.soft_enter_start = true;
+    }
+
+    /// Mark the current run as practice-only (loadloc).
+    pub fn mark_practice(&mut self) {
+        self.practice = true;
+    }
+
+    /// Re-derive checkpoint overlap from where the player actually is, so a loc
+    /// restored *inside* a checkpoint box doesn't immediately re-fire its split.
+    pub fn sync_checkpoints_after_restore(&mut self, zones: &MapZones, player: &PlayerState) {
+        let cps = &zones.main.checkpoints;
+        let hull = player.hull();
+        self.cp_inside = cps
+            .iter()
+            .map(|cp| cp.contains_player(player.origin, hull))
+            .collect();
     }
 
     /// Fail teleport / kill-z snapped the player (possibly into a stage start).
@@ -106,13 +191,7 @@ impl RunTimer {
     }
 
     /// Per-tick update after physics. May clamp start-zone ground speed on `player`.
-    pub fn tick(
-        &mut self,
-        zones: &MapZones,
-        player: &mut PlayerState,
-        dt: f32,
-        pb_splits: &[f32],
-    ) {
+    pub fn tick(&mut self, zones: &MapZones, player: &mut PlayerState, dt: f32, pb_splits: &[f32]) {
         let hull = player.hull();
         let track = &zones.main;
         let in_start = track.start.contains_player(player.origin, hull);
@@ -128,6 +207,7 @@ impl RunTimer {
                     self.current_stage = 1;
                     self.splits.clear();
                     self.next_cp = 0;
+                    self.practice = false;
                 }
             }
             TimerPhase::Armed => {
@@ -152,6 +232,7 @@ impl RunTimer {
                     self.splits.clear();
                     self.next_cp = 0;
                     self.last_split = None;
+                    self.practice = false;
                 } else if in_end && !in_start {
                     self.phase = TimerPhase::Finished;
                 } else {
@@ -167,6 +248,7 @@ impl RunTimer {
                     self.splits.clear();
                     self.next_cp = 0;
                     self.last_split = None;
+                    self.practice = false;
                 }
             }
         }
@@ -193,6 +275,7 @@ impl RunTimer {
         self.current_stage = 1;
         self.splits.clear();
         self.last_split = None;
+        self.practice = false;
         self.next_cp = 0;
         self.cp_inside = vec![false; cp_count];
     }
@@ -257,10 +340,7 @@ impl RunTimer {
         if self.track_type != TrackType::Staged {
             return None;
         }
-        if matches!(
-            self.phase,
-            TimerPhase::Idle
-        ) {
+        if matches!(self.phase, TimerPhase::Idle) {
             return None;
         }
         let n = zones.main.stage_count().max(1);
@@ -516,6 +596,118 @@ mod tests {
     }
 
     #[test]
+    fn restored_loc_keeps_timing_but_stays_practice_through_the_finish() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let dt = 0.015;
+
+        // A real run, mid-flight.
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &[]);
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!(!timer.practice);
+        let snap = timer.snapshot();
+
+        // Wipe out, then loadloc back to the snapshot.
+        timer.reset();
+        timer.restore(&snap, false);
+        timer.mark_practice();
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!((timer.time_secs - snap.time_secs).abs() < 1e-6);
+
+        // The clock is real…
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert!(timer.time_secs > snap.time_secs);
+        // …the run is not, all the way through the finish.
+        p = player_at(550.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Finished);
+        assert!(timer.practice);
+
+        // Re-entering start clears the taint, so the next run counts.
+        p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed);
+        assert!(!timer.practice);
+    }
+
+    #[test]
+    fn loc_saved_in_start_zone_still_produces_an_official_run() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let dt = 0.015;
+        let snap = TimerSnapshot {
+            phase: TimerPhase::Armed,
+            time_secs: 0.0,
+            current_stage: 1,
+            splits: Vec::new(),
+            next_cp: 0,
+        };
+        timer.restore(&snap, true);
+        timer.mark_practice();
+
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed);
+        assert!(timer.practice);
+
+        // Leaving start is a genuine start: the taint goes with it.
+        p = player_at(150.0, 0.0, false);
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!(!timer.practice);
+    }
+
+    #[test]
+    fn restore_inside_start_does_not_cancel_the_run() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let snap = TimerSnapshot {
+            phase: TimerPhase::Running,
+            time_secs: 12.0,
+            current_stage: 1,
+            splits: Vec::new(),
+            next_cp: 0,
+        };
+        timer.restore(&snap, true);
+        // Loc sits inside the start box (prespeed practice) — the first tick
+        // must not read as voluntary re-entry.
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!(timer.time_secs > 12.0);
+    }
+
+    #[test]
+    fn restoring_inside_a_checkpoint_does_not_refire_its_split() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let snap = TimerSnapshot {
+            phase: TimerPhase::Running,
+            time_secs: 8.0,
+            current_stage: 1,
+            splits: Vec::new(),
+            next_cp: 0,
+        };
+        // Standing inside CP1 at the moment of the load.
+        let mut p = player_at(210.0, 0.0, false);
+        timer.restore(&snap, false);
+        timer.sync_checkpoints_after_restore(&zones, &p);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert!(timer.splits.is_empty());
+        assert!(timer.last_split.is_none());
+
+        // Leaving and re-entering does split.
+        p = player_at(300.0, 0.0, false);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        p = player_at(210.0, 0.0, false);
+        timer.tick(&zones, &mut p, 0.015, &[]);
+        assert_eq!(timer.splits.len(), 1);
+    }
+
+    #[test]
     fn format_time_basic() {
         assert_eq!(format_time(0.0), "0.000");
         assert_eq!(format_time(12.3456), "12.346");
@@ -552,7 +744,10 @@ mod tests {
         }
         assert_eq!(timer.current_stage, 2);
         let ev = timer.take_split_event().expect("stage split");
-        assert_eq!(format_split_line(ev, true), format!("S2 {}", format_time(ev.time_secs)));
+        assert_eq!(
+            format_split_line(ev, true),
+            format!("S2 {}", format_time(ev.time_secs))
+        );
     }
 
     #[test]

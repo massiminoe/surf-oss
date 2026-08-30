@@ -111,6 +111,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         base = v.color * light;
     } else {
         let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+        // Cutout test. surf-map forces alpha to 1 on every layer whose VMT did
+        // not declare $alphatest/$translucent, so this only bites foliage cards,
+        // grates and fences — the materials that mean it.
+        if (sample.a < 0.5) {
+            discard;
+        }
         base = sample.rgb * light * 2.0;
     }
     return vec4<f32>(apply_readability(base, v.world_pos), 1.0);
@@ -285,7 +291,7 @@ impl Renderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -296,8 +302,10 @@ impl Renderer {
 
         let depth_view = create_depth_view(&device, config.width, config.height);
         let hud = HudRenderer::new(&device, &queue, config.format);
-        let ghost = crate::ghost::GhostRenderer::new(&device, config.format, &camera_bind_group_layout);
-        let trail = crate::trail::TrailRenderer::new(&device, config.format, &camera_bind_group_layout);
+        let ghost =
+            crate::ghost::GhostRenderer::new(&device, config.format, &camera_bind_group_layout);
+        let trail =
+            crate::trail::TrailRenderer::new(&device, config.format, &camera_bind_group_layout);
 
         Self {
             device,
@@ -336,6 +344,28 @@ impl Renderer {
         trail: Option<&[crate::trail::TrailPoint]>,
         view: ViewParams,
     ) -> Result<(), wgpu::SurfaceError> {
+        self.update_frame(camera, ghost, trail, view);
+        let frame = surface.get_current_texture()?;
+        let view_tex = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = self.encode_frame(&view_tex, Some(hud), ghost.is_some(), trail.is_some());
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
+    /// Per-frame uniform / dynamic-buffer writes. Split out of `render` so the
+    /// offscreen path (`offscreen::Offscreen`) shares the exact same state as
+    /// the window path — a screenshot that diverged from the live frame would be
+    /// worthless as a check.
+    pub(crate) fn update_frame(
+        &mut self,
+        camera: &Camera,
+        ghost: Option<crate::ghost::GhostPose>,
+        trail: Option<&[crate::trail::TrailPoint]>,
+        view: ViewParams,
+    ) {
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
@@ -357,12 +387,17 @@ impl Renderer {
                 self.trail.update(&self.device, &self.queue, &[]);
             }
         }
+    }
 
-        let frame = surface.get_current_texture()?;
-        let view_tex = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+    /// Encode one frame into `view_tex`. `hud` is `None` for offscreen captures
+    /// that want the world only.
+    pub(crate) fn encode_frame(
+        &mut self,
+        view_tex: &wgpu::TextureView,
+        hud: Option<HudState>,
+        draw_ghost: bool,
+        draw_trail: bool,
+    ) -> wgpu::CommandEncoder {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -373,7 +408,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
+                    view: view_tex,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -388,7 +423,7 @@ impl Renderer {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -406,44 +441,44 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
             pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
-            if trail.is_some() {
+            if draw_trail {
                 self.trail.draw(&mut pass, &self.camera_bind_group);
             }
-            if ghost.is_some() {
+            if draw_ghost {
                 self.ghost.draw(&mut pass, &self.camera_bind_group);
             }
         }
 
-        self.hud.prepare(
-            &self.device,
-            &self.queue,
-            self.config.width,
-            self.config.height,
-            hud,
-        );
+        if let Some(hud) = hud {
+            self.hud.prepare(
+                &self.device,
+                &self.queue,
+                self.config.width,
+                self.config.height,
+                hud,
+            );
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("hud"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            self.hud.render(&mut pass);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("hud"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: view_tex,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                self.hud.render(&mut pass);
+            }
+            self.hud.trim();
         }
-        self.hud.trim();
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
-        Ok(())
+        encoder
     }
 }
 

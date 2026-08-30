@@ -106,17 +106,27 @@ impl MaterialBank {
         if let Some(&id) = self.by_material.get(&key) {
             return id;
         }
+        // The shader alpha-tests every layer uniformly, so a layer's alpha must
+        // mean "cutout" or nothing at all. Two materials can share one VTF while
+        // disagreeing about that, hence the flag in the dedupe key.
+        let get = |p: &str| self.get_bytes(p);
+        let alpha_tested = vmt::is_alpha_tested(&get, &key);
         let id = match self.load_albedo(&key) {
             Some(LoadedAlbedo::Real {
                 image,
                 texture_path,
             }) => {
-                if let Some(&id) = self.by_texture.get(&texture_path) {
+                let cache_key = format!("{texture_path}#{}", u8::from(alpha_tested));
+                if let Some(&id) = self.by_texture.get(&cache_key) {
                     id
                 } else {
                     let id = self.layers.len() as u32;
-                    self.layers.push(resize_layer(image));
-                    self.by_texture.insert(texture_path, id);
+                    let mut layer = resize_layer(image);
+                    if !alpha_tested {
+                        force_opaque(&mut layer);
+                    }
+                    self.layers.push(layer);
+                    self.by_texture.insert(cache_key, id);
                     self.textured_count += 1;
                     id
                 }
@@ -124,7 +134,9 @@ impl MaterialBank {
             Some(LoadedAlbedo::Placeholder(img)) => {
                 self.note_missing(&key);
                 let id = self.layers.len() as u32;
-                self.layers.push(resize_layer(img));
+                let mut layer = resize_layer(img);
+                force_opaque(&mut layer);
+                self.layers.push(layer);
                 id
             }
             None => {
@@ -161,12 +173,25 @@ impl MaterialBank {
                 texture_path,
             });
         }
-        if vmt::is_water_or_refract(&get, material_name)
-            || material_name.contains("water")
-            || material_name.contains("refract")
-        {
-            let water = RgbaImage::from_pixel(8, 8, image::Rgba([38, 82, 105, 255]));
-            return Some(LoadedAlbedo::Placeholder(DynamicImage::ImageRgba8(water)));
+        let kind = vmt::see_through_kind(&get, material_name).or_else(|| {
+            if material_name.contains("refract") {
+                Some(vmt::SeeThrough::Refract)
+            } else if material_name.contains("water") {
+                Some(vmt::SeeThrough::Water)
+            } else {
+                None
+            }
+        });
+        if let Some(kind) = kind {
+            let rgb = match kind {
+                vmt::SeeThrough::Water => image::Rgba([38, 82, 105, 255]),
+                // Props are unlit, and the shader doubles albedo to undo the
+                // lightmap scale — 196 here clipped to pure white. 120 lands
+                // just under 1.0 after that doubling.
+                vmt::SeeThrough::Refract => image::Rgba([120, 140, 152, 255]),
+            };
+            let px = RgbaImage::from_pixel(8, 8, rgb);
+            return Some(LoadedAlbedo::Placeholder(DynamicImage::ImageRgba8(px)));
         }
         None
     }
@@ -179,8 +204,7 @@ impl MaterialBank {
     pub fn into_atlas(self) -> MaterialAtlas {
         let layer_size = TEX_LAYER_SIZE;
         let layer_count = self.layers.len() as u32;
-        let mut rgba =
-            Vec::with_capacity((layer_size * layer_size * 4 * layer_count) as usize);
+        let mut rgba = Vec::with_capacity((layer_size * layer_size * 4 * layer_count) as usize);
         for layer in self.layers {
             rgba.extend_from_slice(layer.as_raw());
         }
@@ -202,6 +226,14 @@ fn material_key(path: &str) -> String {
         .or_else(|| key.strip_suffix(".vtf"))
         .unwrap_or(key)
         .to_string()
+}
+
+/// Blank the alpha channel so the shader's cutout test can never fire on a
+/// material that never asked for one.
+fn force_opaque(img: &mut RgbaImage) {
+    for px in img.pixels_mut() {
+        px.0[3] = 255;
+    }
 }
 
 fn resize_layer(img: DynamicImage) -> RgbaImage {

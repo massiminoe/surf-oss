@@ -5,7 +5,10 @@ use surf_map::LoadedMap;
 
 #[test]
 fn load_kitsune_has_collision_and_spawn() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_kitsune.bsp");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_kitsune.bsp"
+    );
     let map = LoadedMap::load_path(path).expect("load kitsune");
     assert!(
         map.world.brushes.len() > 100,
@@ -31,7 +34,10 @@ fn load_kitsune_has_collision_and_spawn() {
 
 #[test]
 fn summit_prefers_td_mapstart_over_lobby() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_summit.bsp");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_summit.bsp"
+    );
     let map = LoadedMap::load_path(path).expect("load summit");
     // Cosmetic T/CT lobby is ~(-224,-3152,11432); stage start is td_mapstart.
     assert!(
@@ -75,7 +81,10 @@ fn aesthetic_maps_spawn_in_start_zone_not_bonus() {
 
 #[test]
 fn summit_teleports_use_entity_origin() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_summit.bsp");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_summit.bsp"
+    );
     let map = LoadedMap::load_path(path).expect("load summit");
 
     // Early fail volume under first drop (entity origin 5536 0 10496; brushes
@@ -91,7 +100,8 @@ fn summit_teleports_use_entity_origin() {
 
     // Mid-map on the line (near cp2) must not hit a phantom origin-space net.
     assert!(
-        map.touch_teleport(Vec3::new(-1472.0, 0.0, 1377.0)).is_none(),
+        map.touch_teleport(Vec3::new(-1472.0, 0.0, 1377.0))
+            .is_none(),
         "cp2 should not soft-reset"
     );
     assert!(
@@ -102,7 +112,10 @@ fn summit_teleports_use_entity_origin() {
 
 #[test]
 fn cement_thin_stage2_teleport_fires_with_hull() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/maps/surf_cement.bsp");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_cement.bsp"
+    );
     let map = LoadedMap::load_path(path).expect("load cement");
     // Stage-1 end slab is ~2u thick at z≈7425. Point probes miss it; hull touch
     // must fire once feet enter the volume (WR falls through here → stage2).
@@ -121,5 +134,129 @@ fn cement_thin_stage2_teleport_fires_with_hull() {
         map.touch_teleport(Vec3::new(-14739.0, 12845.0, 7440.0))
             .is_none(),
         "hull above thin slab should not teleport early"
+    );
+}
+
+/// boreas' start platform is a `solid=Physics` static prop
+/// (`project_tendies/details/dek01.mdl`), not world brushes or a displacement.
+/// While prop collision was gated to model paths containing "ramp", the deck was
+/// dropped: the player spawned at z=14870 over open terrain and fell 235u onto a
+/// sloped displacement instead of landing on a flat deck at the start-zone floor
+/// (14736). Guard the landing, not the gate — any future prop filter that loses
+/// the deck fails here.
+#[test]
+fn boreas_spawns_onto_its_start_deck_not_the_terrain_below() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_boreas.bsp"
+    );
+    let map = LoadedMap::load_path(path).expect("load boreas");
+
+    let spawn = map.spawn_origin;
+    let hull_mins = Vec3::new(-16.0, -16.0, 0.0);
+    let hull_maxs = Vec3::new(16.0, 16.0, 62.0);
+    let down = spawn - Vec3::new(0.0, 0.0, 4096.0);
+    let tr = surf_core::trace::trace_box(&map.world, spawn, down, hull_mins, hull_maxs);
+
+    assert!(!tr.startsolid, "spawn is inside geometry");
+    assert!(tr.fraction < 1.0, "nothing at all under the boreas spawn");
+
+    let drop = spawn.z - tr.endpos.z;
+    assert!(
+        drop < 200.0,
+        "expected a platform just under the spawn, fell {drop:.1}u"
+    );
+
+    let normal = tr.hit.as_ref().expect("hit surface").normal;
+    assert!(
+        normal.z > 0.99,
+        "start deck should be flat, landed on normal {normal:?}"
+    );
+    // The zone's floor is 14736; landing on the deck puts the player on it.
+    assert!(
+        (tr.endpos.z - 14736.0).abs() < 8.0,
+        "landed at z={:.1}, expected the start-zone floor at 14736",
+        tr.endpos.z
+    );
+}
+
+/// Prop collision must come from the model's `.phy` hull, not its render mesh.
+///
+/// Two things this pins, both of which cost real speed when they were wrong:
+///   * the hull is used at all — boreas' `ramp_c1` is 684 render triangles but
+///     128 collision triangles, and the render mesh's decorative folds formed
+///     90° creases that dead-stopped a 3606 u/s graze at 15 u/s;
+///   * the whole ledge tree is walked. A node is a leaf when `offset_right == 0`;
+///     using `offset_ledge != 0` instead collapses the tree to one ledge (74 of
+///     128 triangles on this model) and silently loses most of the ramp.
+#[test]
+fn boreas_prop_collision_comes_from_phy_hulls() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_boreas.bsp"
+    );
+    let map = LoadedMap::load_path(path).expect("load boreas");
+
+    let prop_tris = map.world.tris.len() - map.prop_tri_start;
+    // 11 solid props: 1 deck (72 tris) + 10 ramps (80 or 128 each) = 1208.
+    assert!(
+        (1100..1350).contains(&prop_tris),
+        "expected ~1208 .phy collision tris for boreas' solid props, got {prop_tris} \
+         (the render-mesh fallback would give ~6098; a ledge tree collapsed by the \
+         wrong leaf test gives ~679)"
+    );
+}
+
+/// boreas' 3D skybox is a pine forest 26,000 units below the map, drawn at full
+/// scale because we have no skybox pass. Source renders that area scaled around
+/// the `sky_camera`; drawing it as world geometry cost **51% of the entire draw
+/// mesh** for something the player can never reach or correctly see.
+///
+/// Scope: this covers static props, which were all of the cost that mattered.
+/// The skybox's own brush faces and displacements are still drawn — 46k tris on
+/// boreas, ~3% of what is left — because culling those needs a face-to-leaf
+/// mapping the mesh builder does not carry yet.
+#[test]
+fn boreas_does_not_draw_its_3d_skybox_props_as_world_geometry() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_boreas.bsp"
+    );
+    let map = LoadedMap::load_path(path).expect("load boreas");
+
+    let drawn: Vec<_> = map
+        .props
+        .iter()
+        .filter(|p| p.origin.z < -5000.0 && !p.render_tris.is_empty())
+        .collect();
+    assert!(
+        drawn.is_empty(),
+        "{} skybox props are still drawn, e.g. {}",
+        drawn.len(),
+        drawn[0].model
+    );
+
+    // A solid skybox cloud or tree is a trap in the trace grid, not just cost.
+    let solid = map
+        .props
+        .iter()
+        .filter(|p| p.origin.z < -5000.0 && !p.tris.is_empty())
+        .count();
+    assert_eq!(solid, 0, "{solid} skybox props still have collision");
+
+    // The map's own area partition must have been read: boreas puts 640 of its
+    // 1587 props in the skybox area, and the census keeps every prop either way.
+    let culled = map.props.iter().filter(|p| p.skybox).count();
+    assert!(
+        culled >= 600,
+        "expected ~640 props culled as 3D skybox, got {culled} \u{2014} \
+         has the sky_camera leaf lookup stopped resolving?"
+    );
+
+    // Guard the win: before the cull boreas drew 2.75M triangles.
+    assert!(
+        map.mesh.tris.len() < 1_600_000,
+        "boreas mesh is {} tris, expected the skybox forest to be gone",
+        map.mesh.tris.len()
     );
 }

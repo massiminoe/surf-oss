@@ -2494,6 +2494,8 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glyphon",
+ "image",
+ "pollster",
  "surf-core",
  "surf-map",
  "wgpu",

@@ -64,7 +64,19 @@ fn view_proj(cam: &Camera, sky: bool) -> [[f32; 4]; 4] {
     let up = source_to_yup(Vec3::Z); // Source up → Y-up space
 
     let view = look_at_rh(eye, target, up);
-    let proj = perspective_rh(cam.fov_y_deg.to_radians(), cam.aspect, cam.z_near, cam.z_far);
+    // Reversed-Z: near maps to depth 1, far to depth 0. Float32 has its finest
+    // spacing near 0, which is where the *far* geometry now lands, so precision
+    // becomes near-uniform across the range instead of collapsing with distance.
+    // With the old forward mapping and z_near=1 / z_far=100000, one float step
+    // was ~5.8 world units at 10k out and ~26 at 20k — enough for boreas' props
+    // to punch through terrain. Depth compare is Greater and the buffer clears
+    // to 0.0 to match (see pipeline.rs / skybox.rs / ghost.rs / trail.rs).
+    let proj = perspective_rh(
+        cam.fov_y_deg.to_radians(),
+        cam.aspect,
+        cam.z_far,
+        cam.z_near,
+    );
     mat4_mul(proj, view)
 }
 
@@ -76,12 +88,7 @@ fn look_at_rh(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
         [s[0], u[0], -f[0], 0.0],
         [s[1], u[1], -f[1], 0.0],
         [s[2], u[2], -f[2], 0.0],
-        [
-            -dot(s, eye),
-            -dot(u, eye),
-            dot(f, eye),
-            1.0,
-        ],
+        [-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0],
     ]
 }
 

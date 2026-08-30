@@ -133,7 +133,7 @@ impl TrailRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -199,11 +199,7 @@ impl TrailRenderer {
         self.vertex_count = verts.len() as u32;
     }
 
-    pub fn draw<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        camera_bg: &'a wgpu::BindGroup,
-    ) {
+    pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, camera_bg: &'a wgpu::BindGroup) {
         if self.vertex_count < 2 {
             return;
         }
