@@ -7,6 +7,7 @@
 mod collision;
 mod disp;
 mod entities;
+pub mod fields;
 mod leaves;
 mod lightmap;
 mod materials;
@@ -22,9 +23,14 @@ use std::path::Path;
 
 use surf_core::graybox::GrayboxMesh;
 use surf_core::math::{Angle, Vec3};
+use surf_core::movement::PlayerState;
 use surf_core::{Aabb, Brush, World};
 
-pub use entities::{GravityTrigger, NamedPoint, PushTrigger, TeleportTrigger};
+pub use entities::{
+    FieldAction, FieldTrigger, GravityTrigger, NameFilter, NamedPoint, PushTrigger,
+    TeleportTrigger,
+};
+pub use fields::{FieldEffects, FieldState};
 pub use lightmap::LightmapAtlas;
 pub use materials::{MaterialAtlas, SkyboxAtlas};
 pub use models::PropInstance;
@@ -69,6 +75,8 @@ pub struct LoadedMap {
     pub teleports: Vec<TeleportTrigger>,
     pub pushes: Vec<PushTrigger>,
     pub gravities: Vec<GravityTrigger>,
+    /// Triggers whose `AddOutput` outputs act on the player (boosters, gates).
+    pub fields: Vec<FieldTrigger>,
     /// Index into `world.tris` where static-prop collision begins; everything
     /// before it is displacement. Lets tools attribute a snag to the right
     /// source — prop tris come from a render mesh, displacement tris do not.
@@ -167,6 +175,7 @@ impl LoadedMap {
             teleports: ents.teleports,
             pushes: ents.pushes,
             gravities: ents.gravities,
+            fields: ents.fields,
             prop_tri_start,
             props,
             kill_z: world_bounds.mins.z - 256.0,
@@ -198,35 +207,101 @@ impl LoadedMap {
         None
     }
 
-    /// Sum of continuous push velocities while the player is inside any push trigger.
+    /// Sum of continuous push velocities while the player touches a push volume.
+    ///
+    /// Hull overlap, like `touch_teleport` — Source tests trigger touch against
+    /// the player's bounding box, and a point probe leaves a volume 16u early.
+    /// On lovetunnel that is the difference between our 3500 u/s tunnel paying
+    /// out on the tick the WR does and two ticks before it.
     pub fn touch_push(&self, origin: Vec3) -> Vec3 {
-        let probe = origin + Vec3::new(0.0, 0.0, 36.0);
+        let hull = surf_core::movement::Hull::css_stand();
+        let mins = origin + hull.mins;
+        let maxs = origin + hull.maxs;
         let mut sum = Vec3::ZERO;
         for push in &self.pushes {
-            if !push.bounds.expand(64.0).contains_point(probe) {
+            let expanded = push.bounds.expand(1.0);
+            if !aabb_overlap(mins, maxs, expanded.mins, expanded.maxs) {
                 continue;
             }
-            for brush in &push.brushes {
-                if brush_contains_point_padded(brush, probe, 4.0) {
-                    sum = sum + push.velocity;
-                    break;
-                }
+            if push
+                .brushes
+                .iter()
+                .any(|b| brush_intersects_aabb(b, mins, maxs, fields::TOUCH_PAD))
+            {
+                sum = sum + push.velocity;
             }
         }
         sum
     }
 
+    /// Run the map's touch-driven effects for the tick that just finished.
+    ///
+    /// Call this **after** `tick`, on the post-move origin. That ordering is not
+    /// cosmetic: Source processes trigger touches at the end of a move, so a
+    /// booster's payout lands in the same tick you leave the volume, and the
+    /// basevelocity a volume asserts is carried by the *next* move. Evaluating
+    /// before the move instead puts every boost one tick late — measurably, on
+    /// tendies' start booster, against the recorded WR.
+    ///
+    /// It is the only place the three sources of basevelocity/gravity are
+    /// combined, so the app, the resim harness and the audit tools cannot drift
+    /// apart: continuous `trigger_push`, `trigger_gravity`, and the `AddOutput`
+    /// boosters and launch pads driven by `FieldState`.
+    ///
+    /// `OSX_SURF_NO_FIELDS=1` disables the `AddOutput` half for A/B runs.
+    pub fn apply_fields(&self, player: &mut PlayerState, state: &mut FieldState, dt: f32) {
+        let eff = self.field_effects(player.origin, state);
+        surf_core::apply_base_velocity_momentum(&mut player.velocity, eff.released, dt);
+        player.basevelocity = eff.basevelocity;
+        player.gravity_scale = eff.gravity_scale;
+    }
+
+    /// Same, for a tool stepping one tick from a *recorded* pose: advance the
+    /// touch state and arm the carry, but drop the payout — the recording
+    /// already has the boost in its velocity, so folding it again doubles it.
+    pub fn arm_fields_from_recording(&self, player: &mut PlayerState, state: &mut FieldState) {
+        let eff = self.field_effects(player.origin, state);
+        player.basevelocity = eff.basevelocity;
+        player.gravity_scale = eff.gravity_scale;
+    }
+
+    fn field_effects(&self, origin: Vec3, state: &mut FieldState) -> FieldEffects {
+        let push = self.touch_push(origin);
+        let fields: &[FieldTrigger] = if no_fields() { &[] } else { &self.fields };
+        let mut eff = state.update(fields, origin, push);
+        eff.gravity_scale *= self.touch_gravity(origin);
+        eff
+    }
+
+    /// Replay touch edges along a recorded path without simulating anything.
+    ///
+    /// A resim that starts mid-run has to inherit the gates and renames the real
+    /// run already tripped; starting from a blank `FieldState` would re-arm a
+    /// one-shot booster and fire it a second time.
+    pub fn field_state_at(&self, path: &[Vec3]) -> FieldState {
+        let mut state = FieldState::new();
+        let fields: &[FieldTrigger] = if no_fields() { &[] } else { &self.fields };
+        for origin in path {
+            state.update(fields, *origin, self.touch_push(*origin));
+        }
+        state
+    }
+
     /// Gravity scale from the first touching `trigger_gravity`, else 1.0.
     pub fn touch_gravity(&self, origin: Vec3) -> f32 {
-        let probe = origin + Vec3::new(0.0, 0.0, 36.0);
+        let hull = surf_core::movement::Hull::css_stand();
+        let mins = origin + hull.mins;
+        let maxs = origin + hull.maxs;
         for g in &self.gravities {
-            if !g.bounds.expand(64.0).contains_point(probe) {
+            let expanded = g.bounds.expand(1.0);
+            if !aabb_overlap(mins, maxs, expanded.mins, expanded.maxs) {
                 continue;
             }
-            for brush in &g.brushes {
-                if brush_contains_point_padded(brush, probe, 4.0) {
-                    return g.scale;
-                }
+            if g.brushes
+                .iter()
+                .any(|b| brush_intersects_aabb(b, mins, maxs, fields::TOUCH_PAD))
+            {
+                return g.scale;
             }
         }
         1.0
@@ -275,18 +350,15 @@ fn unstick(world: &World, origin: Vec3) -> Vec3 {
     origin
 }
 
-fn brush_contains_point_padded(brush: &Brush, p: Vec3, pad: f32) -> bool {
-    for plane in &brush.planes {
-        if plane.distance(p) > pad {
-            return false;
-        }
-    }
-    true
+/// `OSX_SURF_NO_FIELDS=1` — run without the map's `AddOutput` boosters, for
+/// A/B against recordings made before they existed.
+fn no_fields() -> bool {
+    std::env::var_os("OSX_SURF_NO_FIELDS").is_some()
 }
 
 /// True when the AABB is not entirely outside any brush plane (intersects or inside).
 /// Brush planes are outward-facing; inside ⇒ signed distance ≤ 0 on every plane.
-fn brush_intersects_aabb(brush: &Brush, mins: Vec3, maxs: Vec3, pad: f32) -> bool {
+pub(crate) fn brush_intersects_aabb(brush: &Brush, mins: Vec3, maxs: Vec3, pad: f32) -> bool {
     for plane in &brush.planes {
         let n = plane.normal;
         // AABB corner with the smallest signed distance (most "inside" along -n).
@@ -300,7 +372,7 @@ fn brush_intersects_aabb(brush: &Brush, mins: Vec3, maxs: Vec3, pad: f32) -> boo
     true
 }
 
-fn aabb_overlap(a_mins: Vec3, a_maxs: Vec3, b_mins: Vec3, b_maxs: Vec3) -> bool {
+pub(crate) fn aabb_overlap(a_mins: Vec3, a_maxs: Vec3, b_mins: Vec3, b_maxs: Vec3) -> bool {
     a_mins.x <= b_maxs.x
         && a_maxs.x >= b_mins.x
         && a_mins.y <= b_maxs.y

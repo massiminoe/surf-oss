@@ -105,8 +105,11 @@ fn main() {
         grounded: f.grounded,
         ..Default::default()
     };
-    p.basevelocity = map.touch_push(p.origin);
-    p.gravity_scale = map.touch_gravity(p.origin);
+    // Warm the touch state along the recorded path so a gate the run already
+    // tripped stays tripped at this tick.
+    let path: Vec<Vec3> = frames[..=tick].iter().map(|f| f.origin).collect();
+    let mut fields = map.field_state_at(&path);
+    map.arm_fields_from_recording(&mut p, &mut fields);
     let after = surf_core::tick(&map.world, &p, &f.to_usercmd(), &vars);
     println!(
         "  tick result: |v2d| {:.0} -> {:.0}, origin moved {:.2}u",

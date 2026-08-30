@@ -50,8 +50,9 @@ fn nyx_ghost_tick_979_does_not_speed_snag() {
         ..Default::default()
     };
     let before = p.velocity.length_2d();
-    p.basevelocity = map.touch_push(p.origin);
-    p.gravity_scale = map.touch_gravity(p.origin);
+    let path: Vec<_> = frames[..=979].iter().map(|f| f.origin).collect();
+    let mut fields = map.field_state_at(&path);
+    map.arm_fields_from_recording(&mut p, &mut fields);
     p = surf_core::tick(&map.world, &p, &f.to_usercmd(), &vars);
     let after = p.velocity.length_2d();
     assert!(

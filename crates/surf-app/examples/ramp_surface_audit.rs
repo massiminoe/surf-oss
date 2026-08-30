@@ -15,7 +15,7 @@ use surf_app::replay::{ksf_imported_dir, Replay};
 use surf_core::math::Angle;
 use surf_core::movement::{Hull, MoveVars, PlayerState};
 use surf_core::trace::trace_box;
-use surf_map::LoadedMap;
+use surf_map::{FieldState, LoadedMap};
 
 #[derive(Default, Clone)]
 struct Class {
@@ -101,6 +101,9 @@ fn main() {
         let mut disp = Class::default();
         let mut prop = Class::default();
         let mut airborne = 0usize;
+        // Advanced every tick, skips included, or the touch edges it tracks
+        // would be nonsense.
+        let mut fields = FieldState::new();
 
         for (i, f) in frames.iter().enumerate() {
             let mut p = PlayerState {
@@ -110,6 +113,7 @@ fn main() {
                 grounded: f.grounded,
                 ..Default::default()
             };
+            map.arm_fields_from_recording(&mut p, &mut fields);
             let before = p.velocity.length_2d();
             if before < 200.0 {
                 continue;
@@ -123,8 +127,6 @@ fn main() {
             }
             let idx = tr.hit.as_ref().unwrap().brush_index;
 
-            p.basevelocity = map.touch_push(p.origin);
-            p.gravity_scale = map.touch_gravity(p.origin);
             let after = surf_core::tick(&map.world, &p, &f.to_usercmd(), &vars)
                 .velocity
                 .length_2d();

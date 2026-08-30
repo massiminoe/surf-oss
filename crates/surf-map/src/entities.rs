@@ -52,12 +52,57 @@ pub struct GravityTrigger {
     pub scale: f32,
 }
 
+/// One `AddOutput` a trigger applies to the player on a touch edge.
+///
+/// Maps build boosters, anti-gravity zones and one-shot gates out of these —
+/// there is no dedicated entity for any of them. tendies' whole boost set is
+/// `AddOutput basevelocity`; lovetunnel's launch pads are `AddOutput gravity`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldAction {
+    /// `basevelocity X Y Z` — a pending impulse nothing re-asserts, so the sim
+    /// folds it straight into velocity (`apply_base_velocity_momentum`).
+    BaseVelocity(Vec3),
+    /// `gravity N` — multiplies sv_gravity until another output sets it back.
+    Gravity(f32),
+    /// `targetname NAME` — renames the player. The only reason maps do this is
+    /// to gate a trigger behind a `filter_activator_name`, which is how a boost
+    /// is made to fire once per run.
+    TargetName(String),
+}
+
+/// `filter_activator_name` — passes on the player's current `targetname`.
+#[derive(Clone, Debug)]
+pub struct NameFilter {
+    pub name: String,
+    pub negated: bool,
+}
+
+impl NameFilter {
+    pub fn passes(&self, activator: &str) -> bool {
+        (self.name == activator) != self.negated
+    }
+}
+
+/// A trigger that runs `AddOutput` actions on the player when they enter or
+/// leave it. Unlike push/gravity volumes this needs touch *edges*, so the
+/// runtime carries state for it (`crate::fields::FieldState`).
+#[derive(Clone, Debug)]
+pub struct FieldTrigger {
+    pub brushes: Vec<Brush>,
+    pub bounds: Aabb,
+    pub on_start: Vec<FieldAction>,
+    pub on_end: Vec<FieldAction>,
+    /// Resolved `filtername`; `None` means the trigger touches everyone.
+    pub filter: Option<NameFilter>,
+}
+
 pub struct ParsedEntities {
     /// Gameplay start (stage start / most-targeted teleport dest — not lobby T/CT).
     pub spawn: NamedPoint,
     pub teleports: Vec<TeleportTrigger>,
     pub pushes: Vec<PushTrigger>,
     pub gravities: Vec<GravityTrigger>,
+    pub fields: Vec<FieldTrigger>,
     /// Brush models to render in addition to world (func_illusionary / never-solid func_brush).
     /// `(model_index, entity origin)` — bmodel verts are local to origin.
     pub render_models: Vec<(usize, Vec3)>,
@@ -75,6 +120,9 @@ pub fn parse_entities(
     let mut pushes_raw: Vec<(usize, Vec3, Vec3)> = Vec::new();
     // (model, origin, gravity scale)
     let mut gravities_raw: Vec<(usize, Vec3, f32)> = Vec::new();
+    let mut fields_raw: Vec<RawField> = Vec::new();
+    // targetname -> filter_activator_name
+    let mut name_filters: HashMap<String, NameFilter> = HashMap::new();
     let mut named: HashMap<String, NamedEntity> = HashMap::new();
     let mut render_models = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
@@ -118,6 +166,42 @@ pub fn parse_entities(
                             is_brush: model_index.is_some(),
                         },
                     );
+                }
+            }
+        }
+
+        if class == "filter_activator_name" {
+            if let (Some(name), Some(filtername)) =
+                (ent.prop("targetname"), prop_ci(&ent, "filtername"))
+            {
+                // Hammer writes the *label* for the false case ("Allow entities
+                // that match criteria"), so only a literal 1 negates.
+                let negated = prop_ci(&ent, "Negated").unwrap_or("0").trim() == "1";
+                name_filters.insert(
+                    name.to_string(),
+                    NameFilter {
+                        name: filtername.to_string(),
+                        negated,
+                    },
+                );
+            }
+        }
+
+        // Any brush trigger can carry AddOutput boosts, so harvest outputs
+        // before the per-class arms below (a trigger_push with outputs is both).
+        if class.starts_with("trigger_") && !trigger_start_disabled(&ent) && touches_clients(&ent) {
+            let (on_start, on_end) = parse_trigger_outputs(&ent);
+            if !on_start.is_empty() || !on_end.is_empty() {
+                if let Some(model) = ent.prop("model").and_then(parse_model_index) {
+                    if model > 0 {
+                        fields_raw.push(RawField {
+                            model,
+                            origin,
+                            on_start,
+                            on_end,
+                            filtername: prop_ci(&ent, "filtername").unwrap_or("").to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -278,13 +362,138 @@ pub fn parse_entities(
         });
     }
 
+    let mut fields = Vec::new();
+    for RawField {
+        model,
+        origin,
+        on_start,
+        on_end,
+        filtername,
+    } in fields_raw
+    {
+        // An unresolvable filter means we cannot tell who the trigger touches;
+        // firing it unconditionally would hand out boosts the map gates.
+        let filter = if filtername.is_empty() {
+            None
+        } else {
+            match name_filters.get(&filtername) {
+                Some(f) => Some(f.clone()),
+                None => continue,
+            }
+        };
+        let Some((brushes, bounds)) =
+            harvest_trigger_brushes(bsp, leaf_ranges, world_bounds, model, origin)
+        else {
+            continue;
+        };
+        fields.push(FieldTrigger {
+            brushes,
+            bounds,
+            on_start,
+            on_end,
+            filter,
+        });
+    }
+
     Ok(ParsedEntities {
         spawn,
         teleports,
         pushes,
         gravities,
+        fields,
         render_models,
     })
+}
+
+/// Case-insensitive key lookup.
+///
+/// vbsp's `prop` compares keys literally, and these BSPs store them lowercased
+/// (`startdisabled`, `negated`) while the FGD spells them `StartDisabled`,
+/// `Negated`. Anything reading a mixed-case key must go through this.
+fn prop_ci<'a>(ent: &vbsp::RawEntity<'a>, key: &str) -> Option<&'a str> {
+    ent.properties()
+        .find_map(|(k, v)| k.eq_ignore_ascii_case(key).then_some(v))
+}
+
+/// `StartDisabled` — the trigger is off until an input enables it, which we
+/// don't model, so treat it as absent.
+fn trigger_start_disabled(ent: &vbsp::RawEntity<'_>) -> bool {
+    prop_ci(ent, "StartDisabled").map(|v| v.trim() == "1").unwrap_or(false)
+}
+
+/// Spawnflag 1 is "Clients". A trigger that doesn't list it never touches the
+/// player (physics-object-only triggers are common set dressing).
+fn touches_clients(ent: &vbsp::RawEntity<'_>) -> bool {
+    match prop_ci(ent, "spawnflags").and_then(|s| s.trim().parse::<u32>().ok()) {
+        Some(0) | None => true,
+        Some(f) => f & 1 != 0,
+    }
+}
+
+/// Collect `OnStartTouch` / `OnEndTouch` outputs we can act on.
+///
+/// Keys repeat (an entity may have several `OnStartTouch` lines), so this walks
+/// every property rather than using `prop`, which returns only the first.
+fn parse_trigger_outputs(ent: &vbsp::RawEntity<'_>) -> (Vec<FieldAction>, Vec<FieldAction>) {
+    let mut on_start = Vec::new();
+    let mut on_end = Vec::new();
+    for (key, value) in ent.properties() {
+        let dst = if key.eq_ignore_ascii_case("OnStartTouch") {
+            &mut on_start
+        } else if key.eq_ignore_ascii_case("OnEndTouch") {
+            &mut on_end
+        } else {
+            continue;
+        };
+        if let Some(action) = parse_addoutput(value) {
+            dst.push(action);
+        }
+    }
+    (on_start, on_end)
+}
+
+/// Parse one output value into an action we can apply to the player.
+///
+/// Format is `<target>,<input>,<parameter>,<delay>,<refire>`, separated by
+/// either `,` or the 0x1B escape newer compilers emit. We take only
+/// `!activator,AddOutput,<key> <value>` with no delay — everything else
+/// (sounds, doors, `SetDamageFilter`, relays) has no bearing on movement.
+fn parse_addoutput(value: &str) -> Option<FieldAction> {
+    let parts: Vec<&str> = value.split(['\u{1b}', ',']).map(str::trim).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    if !parts[0].eq_ignore_ascii_case("!activator") || !parts[1].eq_ignore_ascii_case("AddOutput") {
+        return None;
+    }
+    // A delayed output would need a scheduler; none of the corpus uses one.
+    if let Some(delay) = parts.get(3).and_then(|d| d.parse::<f32>().ok()) {
+        if delay > 0.0 {
+            return None;
+        }
+    }
+    let param = parts[2];
+    let (key, rest) = param.split_once(char::is_whitespace)?;
+    let rest = rest.trim();
+    if key.eq_ignore_ascii_case("basevelocity") {
+        return parse_vec3(rest).map(FieldAction::BaseVelocity);
+    }
+    if key.eq_ignore_ascii_case("gravity") {
+        return rest.parse().ok().map(FieldAction::Gravity);
+    }
+    if key.eq_ignore_ascii_case("targetname") {
+        return Some(FieldAction::TargetName(rest.to_string()));
+    }
+    None
+}
+
+/// A trigger with usable outputs, before its brushes are harvested.
+struct RawField {
+    model: usize,
+    origin: Vec3,
+    on_start: Vec<FieldAction>,
+    on_end: Vec<FieldAction>,
+    filtername: String,
 }
 
 /// Harvest brush planes for a trigger bmodel, shifted by entity `origin`.

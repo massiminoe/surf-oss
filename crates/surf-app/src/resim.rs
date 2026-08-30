@@ -12,7 +12,7 @@ use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState};
 use surf_core::tick;
 use surf_core::trace::{point_contents_box, trace_box, TraceHit};
-use surf_map::LoadedMap;
+use surf_map::{FieldState, LoadedMap};
 
 use crate::replay::ReplayFrame;
 use crate::zones::{MapZones, ZoneBox};
@@ -323,6 +323,7 @@ pub fn resim_map_run_named(
     }
 
     let mut player = player_from_frame(&frames[0]);
+    let mut fields = FieldState::new();
     let mut errs: Vec<f32> = Vec::with_capacity(frames.len() - 1);
     let mut sum_err = 0.0_f32;
     let mut max_origin_err = 0.0_f32;
@@ -332,9 +333,8 @@ pub fn resim_map_run_named(
     let mut reached_end = false;
 
     for (i, frame) in frames.iter().enumerate().skip(1) {
-        player.basevelocity = map.touch_push(player.origin);
-        player.gravity_scale = map.touch_gravity(player.origin);
         player = tick(&map.world, &player, &frame.to_usercmd(), vars);
+        map.apply_fields(&mut player, &mut fields, vars.tick_interval);
 
         if let Some((dest, angles)) = map.touch_teleport(player.origin) {
             player.origin = dest;
@@ -679,6 +679,10 @@ pub fn resim_window_trace(
     let hull = Hull::css_stand();
     let end = (start_tick + horizon + 1).min(frames.len());
     let mut player = player_from_frame(&frames[start_tick]);
+    // Inherit the one-shot gates the recorded run already tripped on its way
+    // here — a blank state would re-arm a booster mid-window.
+    let path: Vec<Vec3> = frames[..=start_tick].iter().map(|f| f.origin).collect();
+    let mut fields = map.field_state_at(&path);
     let mut sum_err = 0.0_f32;
     let mut max_origin_err = 0.0_f32;
     let mut final_origin_err = 0.0_f32;
@@ -700,9 +704,8 @@ pub fn resim_window_trace(
             hull.maxs,
         );
 
-        player.basevelocity = map.touch_push(player.origin);
-        player.gravity_scale = map.touch_gravity(player.origin);
         player = tick(&map.world, &player, &frame.to_usercmd(), vars);
+        map.apply_fields(&mut player, &mut fields, vars.tick_interval);
 
         let mut teleported = false;
         if let Some((dest, angles)) = map.touch_teleport(player.origin) {

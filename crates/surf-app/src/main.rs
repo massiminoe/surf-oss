@@ -49,7 +49,7 @@ use surf_core::graybox::{self, GrayboxMesh, GrayboxWorld};
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
 use surf_core::{air_strafe_sync, is_on_surf_ramp, tick, World};
-use surf_map::{LightmapAtlas, LoadedMap, MaterialAtlas, SkyboxAtlas};
+use surf_map::{FieldState, LightmapAtlas, LoadedMap, MaterialAtlas, SkyboxAtlas};
 use surf_render::{
     Camera, GhostPose, GpuMesh, HudState, HudTimerPhase, MenuHud, MenuLayout, MenuPanel,
     MenuRecentEntry, Renderer, ShowKeysState, TrailPoint, ViewParams,
@@ -300,17 +300,12 @@ impl Level {
         }
     }
 
-    fn touch_push(&self, origin: Vec3) -> Vec3 {
+    /// Feed the map's push / gravity / AddOutput effects into the player state
+    /// for this tick. Graybox has no entities, so nothing to apply.
+    fn apply_fields(&self, player: &mut PlayerState, state: &mut FieldState, dt: f32) {
         match self {
-            Level::Graybox(_) => Vec3::ZERO,
-            Level::Map(m) => m.touch_push(origin),
-        }
-    }
-
-    fn touch_gravity(&self, origin: Vec3) -> f32 {
-        match self {
-            Level::Graybox(_) => 1.0,
-            Level::Map(m) => m.touch_gravity(origin),
+            Level::Graybox(_) => {}
+            Level::Map(m) => m.apply_fields(player, state, dt),
         }
     }
 
@@ -385,6 +380,8 @@ struct App {
     /// works while this is on. Saveloc is always allowed. Off at every launch —
     /// a guard that remembers being disabled is not a guard.
     practice_mode: bool,
+    /// Touch state for the map's `AddOutput` triggers (boosters, name gates).
+    field_state: FieldState,
     /// Which panel the keyboard drives. Both panels are always visible.
     menu_focus: MenuFocus,
     /// Selected row in the locs panel (the settings panel uses `menu_selected`).
@@ -515,6 +512,7 @@ impl App {
             audio_on_ramp: false,
             locs,
             practice_mode: false,
+            field_state: FieldState::new(),
             menu_focus: MenuFocus::Settings,
             locs_selected: 0,
             cursor_px: (0.0, 0.0),
@@ -673,6 +671,10 @@ impl App {
         self.locs.set_selected(index);
 
         loc.apply(&mut self.player);
+        // A loc jump is a teleport: the recorded touch set belongs to wherever
+        // we were. Clearing it also re-arms the map's one-shot boosts, which is
+        // the point of practising with a loc saved before one.
+        self.field_state.reset();
         let snap = loc.timer_snapshot();
         self.run_timer.restore(&snap, self.player.grounded);
         self.run_timer.mark_practice();
@@ -1180,6 +1182,7 @@ impl App {
         self.accumulator = 0.0;
         self.sync_display = 0.0;
         self.run_timer.reset();
+        self.field_state.reset();
         self.pb_delta = None;
         self.finish_recorded = false;
         self.pb_flash_left = 0.0;
@@ -1399,15 +1402,19 @@ impl App {
             let prev_vel = self.player.velocity;
             let cmd = self.build_cmd();
             let wishing = cmd.forward_move.abs() + cmd.side_move.abs() > 0.0;
-            // Field triggers feed basevelocity / gravity_scale before physics.
-            self.player.basevelocity = self.level.touch_push(self.player.origin);
-            self.player.gravity_scale = self.level.touch_gravity(self.player.origin);
             self.player = tick(self.level.world(), &self.player, &cmd, &self.vars);
+            // Trigger touches are processed at the end of a move, so a booster
+            // pays out on the tick you leave it and the basevelocity a volume
+            // asserts is carried by the next one.
+            self.level
+                .apply_fields(&mut self.player, &mut self.field_state, tick_dt);
 
             let mut soft_respawned = false;
             if let Some((dest, angles)) = self.level.touch_teleport(self.player.origin) {
                 self.player.origin = dest;
                 self.player.viewangles = angles;
+                // Whatever volume we were standing in is not where we are now.
+                self.player.basevelocity = Vec3::ZERO;
                 soft_respawned = true;
             }
             if self.player.origin.z < self.level.kill_z() {
@@ -1432,6 +1439,8 @@ impl App {
                 self.player.basevelocity = Vec3::ZERO;
                 self.player.gravity_scale = 1.0;
                 self.player.grounded = true;
+                // A fresh life re-arms every one-shot the map gates by name.
+                self.field_state.reset();
                 soft_respawned = true;
             }
 

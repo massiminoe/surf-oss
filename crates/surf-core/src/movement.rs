@@ -214,6 +214,23 @@ impl PlayerState {
 // Pure helpers (unit-testable)
 // ---------------------------------------------------------------------------
 
+/// Fold a no-longer-asserted basevelocity into velocity ("apply momentum").
+///
+/// A touching trigger re-asserts basevelocity every tick; while it does, the sim
+/// only *carries* it (added before the move, subtracted after — see `tick`), so
+/// it buys displacement but no lasting speed. The tick nothing re-asserts it,
+/// the pending amount is added to velocity for good, scaled by `1 + dt/2`.
+/// That single rule is what makes both flavours of map booster work: a
+/// `trigger_push` you fly out of, and a `trigger_multiple` whose output does
+/// `AddOutput basevelocity` (which never asserts, so it folds immediately).
+///
+/// The `1 + dt/2` is not a guess. tendies' start booster is `basevelocity
+/// 1337 0 0`, and the KSF WR recording shows the player gaining exactly
+/// +1347.0 u/s in one tick: 1337 × (1 + 0.015/2) = 1347.03.
+pub fn apply_base_velocity_momentum(velocity: &mut Vec3, pending: Vec3, dt: f32) {
+    *velocity = *velocity + pending * (1.0 + dt * 0.5);
+}
+
 pub fn check_velocity(v: &mut Vec3, origin: &mut Vec3, maxvelocity: f32) {
     for c in [&mut v.x, &mut v.y, &mut v.z] {
         if c.is_nan() {
@@ -380,6 +397,15 @@ mod tests {
         check_velocity(&mut v, &mut o, 0.0);
         assert!((v.x - 4000.0).abs() < 1e-5);
         assert!((v.y + 4000.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn base_velocity_momentum_matches_the_tendies_wr_boost() {
+        // KSF WR tick 17: v.x 465.4 -> 1812.4, a gain of +1347.0 from the map's
+        // `AddOutput basevelocity 1337 0 0`.
+        let mut v = Vec3::new(465.4, 0.0, 0.0);
+        apply_base_velocity_momentum(&mut v, Vec3::new(1337.0, 0.0, 0.0), 0.015);
+        assert!((v.x - (465.4 + 1347.03)).abs() < 0.05, "got {}", v.x);
     }
 
     #[test]
