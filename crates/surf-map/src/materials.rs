@@ -328,8 +328,8 @@ fn flat_color_layer(linear: [f32; 3]) -> RgbaImage {
     )
 }
 
-/// A/B lever, same convention as `OSX_SURF_NO_PHY` / `OSX_SURF_NO_FIELDS`:
-/// `OSX_SURF_NO_VMT_SHADING=tint|additive|all`. Kept separable because the two
+/// A/B lever, same convention as `MX_SURF_NO_PHY` / `MX_SURF_NO_FIELDS`:
+/// `MX_SURF_NO_VMT_SHADING=tint|additive|all`. Kept separable because the two
 /// land on overlapping maps and a corpus diff that cannot tell them apart says
 /// nothing useful — nyx's cave darkens under `tint` (the mapper's own
 /// `$color [0.2 0.2 0.2]` on the rock) and its glow rails change under
@@ -342,7 +342,7 @@ struct Disabled {
 }
 
 fn disabled() -> Disabled {
-    let Some(v) = std::env::var_os("OSX_SURF_NO_VMT_SHADING") else {
+    let Some(v) = std::env::var_os("MX_SURF_NO_VMT_SHADING") else {
         return Disabled::default();
     };
     let v = v.to_string_lossy().to_ascii_lowercase();

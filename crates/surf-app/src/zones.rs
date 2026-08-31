@@ -142,7 +142,7 @@ pub fn zones_path_for_map(map_path: &Path) -> PathBuf {
             }
         }
     }
-    PathBuf::from("assets/zones").join(format!("{stem}.json"))
+    crate::assets::zones_dir().join(format!("{stem}.json"))
 }
 
 pub fn load_zones_file(path: &Path) -> Result<MapZones, ZoneError> {
@@ -307,5 +307,27 @@ mod tests {
         )
         .unwrap();
         assert!(!z.main.start_on_jump);
+    }
+}
+
+/// Load the zone file that belongs to a map, reporting what was found.
+/// `None` when the map has no zones — the timer is simply inactive.
+pub fn load_for_map(map_path: &Path) -> Option<MapZones> {
+    let zpath = zones_path_for_map(map_path);
+    match load_zones_file(&zpath) {
+        Ok(z) => {
+            println!(
+                "  zones={}  start_cap={:.0}  start_on_jump={}  cps={}",
+                zpath.display(),
+                z.main.limit_start_ground_speed,
+                z.main.start_on_jump,
+                z.main.checkpoints.len()
+            );
+            Some(z)
+        }
+        Err(e) => {
+            eprintln!("  zones unavailable ({}): {e}", zpath.display());
+            None
+        }
     }
 }

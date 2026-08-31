@@ -3,15 +3,15 @@ name = "surf-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "winit app loop for osx-surf"
-default-run = "osx-surf"
+description = "winit app loop for mx-surf"
+default-run = "mx-surf"
 
 [lib]
 name = "surf_app"
 path = "src/lib.rs"
 
 [[bin]]
-name = "osx-surf"
+name = "mx-surf"
 path = "src/main.rs"
 
 [[bin]]

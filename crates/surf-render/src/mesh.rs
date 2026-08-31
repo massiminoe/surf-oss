@@ -61,17 +61,90 @@ impl GpuMesh {
     }
 }
 
+/// One description of the world material bindings, so the layout used to build
+/// the pipeline and the layout used on a map reload cannot drift apart.
+const MAT_BGL_ENTRIES: [wgpu::BindGroupLayoutEntry; 4] = [
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        },
+        count: None,
+    },
+    wgpu::BindGroupLayoutEntry {
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    },
+    wgpu::BindGroupLayoutEntry {
+        binding: 2,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    },
+    wgpu::BindGroupLayoutEntry {
+        binding: 3,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    },
+];
+
+const MAT_BGL: wgpu::BindGroupLayoutDescriptor = wgpu::BindGroupLayoutDescriptor {
+    label: Some("mat_bgl"),
+    entries: &MAT_BGL_ENTRIES,
+};
+
 pub struct GpuMaterials {
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl GpuMaterials {
+    /// The layout the world pipeline is built against. A reload MUST reuse the
+    /// one already stored on `GpuMaterials` — a fresh layout is a different
+    /// object to wgpu, and the pipeline would stop accepting the bind group.
+    pub fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&MAT_BGL)
+    }
+
+    /// Rebuild just the bind group for a new map, against the existing layout.
+    /// Layer counts differ per map; a layout does not encode array length, so
+    /// the same layout serves every map.
+    pub fn reload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &MaterialAtlas,
+        lightmaps: &LightmapAtlas,
+    ) {
+        let rebuilt = Self::upload_with(device, queue, atlas, lightmaps, Some(&self.bind_group_layout));
+        self.bind_group = rebuilt.bind_group;
+    }
+
     pub fn upload(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         atlas: &MaterialAtlas,
         lightmaps: &LightmapAtlas,
+    ) -> Self {
+        Self::upload_with(device, queue, atlas, lightmaps, None)
+    }
+
+    fn upload_with(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &MaterialAtlas,
+        lightmaps: &LightmapAtlas,
+        reuse: Option<&wgpu::BindGroupLayout>,
     ) -> Self {
         let size = atlas.layer_size;
         let layers = atlas.layer_count.max(1);
@@ -168,43 +241,14 @@ impl GpuMaterials {
             ..Default::default()
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mat_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+        let owned_layout;
+        let bind_group_layout: &wgpu::BindGroupLayout = match reuse {
+            Some(l) => l,
+            None => {
+                owned_layout = device.create_bind_group_layout(&MAT_BGL);
+                &owned_layout
+            }
+        };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mat_bg"),
             layout: &bind_group_layout,
@@ -229,7 +273,10 @@ impl GpuMaterials {
         });
         Self {
             bind_group,
-            bind_group_layout,
+            bind_group_layout: match reuse {
+                Some(l) => l.clone(),
+                None => device.create_bind_group_layout(&MAT_BGL),
+            },
         }
     }
 }

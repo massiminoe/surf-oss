@@ -1,4 +1,4 @@
-//! osx-surf app: graybox (M0), real BSP (M1), timer/zones (M2).
+//! mx-surf app: graybox (M0), real BSP (M1), timer/zones (M2).
 //!
 //! Usage:
 //!   cargo run -p surf-app --release
@@ -35,24 +35,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use surf_app::locs::{self, Loc, LocStore, GRAYBOX_MAP};
+use surf_app::locs::{self, Loc, GRAYBOX_MAP};
 use surf_app::pb::PbStore;
-use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay, ReplayRecorder};
+use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay};
+use surf_app::session::{load_level, Level, Session};
 use surf_app::settings::{Settings, GHOST_AUTO, GHOST_OFF, GHOST_PB};
-use surf_app::timer::{format_split_line, format_time, RunTimer, TimerPhase};
-use surf_app::zones::{self, MapZones, TrackType};
+use surf_app::timer::{format_split_line, format_time, TimerPhase};
+use surf_app::zones::{MapZones, TrackType};
 use surf_audio::{
-    AudioEngine, AudioEvent, EventDetector, Levels as AudioLevels, Observation,
+    AudioEngine, AudioEvent, Levels as AudioLevels, Observation,
     Params as AudioParams, WipeStyle,
 };
-use surf_core::graybox::{self, GrayboxMesh, GrayboxWorld};
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
-use surf_core::{air_strafe_sync, is_on_surf_ramp, tick, World};
-use surf_map::{FieldState, LightmapAtlas, LoadedMap, MaterialAtlas, SkyboxAtlas};
+use surf_core::{air_strafe_sync, is_on_surf_ramp, tick};
 use surf_render::{
     Camera, GhostPose, GpuMesh, HudState, HudTimerPhase, MenuHud, MenuLayout, MenuPanel,
-    MenuRecentEntry, Renderer, ShowKeysState, TrailPoint, ViewParams,
+    MenuRecentEntry, Renderer, ShellHud, ShowKeysState, TrailPoint, ViewParams,
+    SHELL_ROWS_VISIBLE,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -67,7 +67,7 @@ const MOUSE_PITCH_SCALE: f32 = 0.022;
 
 /// Adjustable / action menu rows (not counting read-only recent footer).
 /// Must stay <= the renderer's `menu_bufs` pool or extra rows vanish.
-const MENU_ITEM_COUNT: usize = 18;
+const MENU_ITEM_COUNT: usize = 19;
 const MENU_SENS: usize = 0;
 const MENU_BRIGHTNESS: usize = 1;
 const MENU_SHADOW_LIFT: usize = 2;
@@ -85,7 +85,8 @@ const MENU_AUDIO_CORE: usize = 13;
 const MENU_AUDIO_AIR: usize = 14;
 const MENU_AUDIO_SUB: usize = 15;
 const MENU_WIPE: usize = 16;
-const MENU_QUIT: usize = 17;
+const MENU_MAPS: usize = 17;
+const MENU_QUIT: usize = 18;
 
 /// Which panel owns the keyboard. Both are always drawn; clicking a panel or
 /// pressing Tab moves focus.
@@ -209,8 +210,10 @@ impl FrameStats {
 }
 
 struct LaunchOpts {
-    level: Level,
-    zones: Option<MapZones>,
+    /// Map to open straight into. `None` = start on the menu.
+    map_path: Option<PathBuf>,
+    /// `--graybox`: skip the menu into the M0 arena.
+    graybox: bool,
     window_w: u32,
     window_h: u32,
     /// Exit after this many seconds of rendering (agent / CI sampling).
@@ -238,130 +241,55 @@ fn pct1_low_fps(dts: &[f32]) -> f32 {
 const PB_FLASH_SECS: f32 = 2.0;
 const SPLIT_FLASH_SECS: f32 = 2.5;
 
-enum Level {
-    Graybox(GrayboxWorld),
-    Map(LoadedMap),
+
+/// One row of the map picker.
+struct MapEntry {
+    label: String,
+    /// `None` = the generated graybox arena.
+    path: Option<PathBuf>,
+    pb: Option<f32>,
 }
 
-impl Level {
-    fn world(&self) -> &World {
-        match self {
-            Level::Graybox(g) => &g.world,
-            Level::Map(m) => &m.world,
-        }
-    }
-
-    fn mesh(&self) -> &GrayboxMesh {
-        match self {
-            Level::Graybox(g) => &g.mesh,
-            Level::Map(m) => &m.mesh,
-        }
-    }
-
-    fn materials(&self) -> MaterialAtlas {
-        match self {
-            Level::Graybox(_) => MaterialAtlas::solid_white(),
-            Level::Map(m) => m.materials.clone(),
-        }
-    }
-
-    fn skybox(&self) -> SkyboxAtlas {
-        match self {
-            Level::Graybox(_) => SkyboxAtlas::none(),
-            Level::Map(m) => m.skybox.clone(),
-        }
-    }
-
-    fn lightmaps(&self) -> LightmapAtlas {
-        match self {
-            Level::Graybox(_) => LightmapAtlas::white_1x1(),
-            Level::Map(m) => m.lightmaps.clone(),
-        }
-    }
-
-    fn spawn(&self) -> (Vec3, Angle) {
-        match self {
-            Level::Graybox(g) => (g.spawn_origin, Angle::new(0.0, g.spawn_yaw, 0.0)),
-            Level::Map(m) => (m.spawn_origin, m.spawn_angles),
-        }
-    }
-
-    fn kill_z(&self) -> f32 {
-        match self {
-            Level::Graybox(_) => -2048.0,
-            Level::Map(m) => m.kill_z,
-        }
-    }
-
-    fn touch_teleport(&self, origin: Vec3) -> Option<(Vec3, Angle)> {
-        match self {
-            Level::Graybox(_) => None,
-            Level::Map(m) => m.touch_teleport(origin),
-        }
-    }
-
-    /// Feed the map's push / gravity / AddOutput effects into the player state
-    /// for this tick. Graybox has no entities, so nothing to apply.
-    fn apply_fields(&self, player: &mut PlayerState, state: &mut FieldState, dt: f32) {
-        match self {
-            Level::Graybox(_) => {}
-            Level::Map(m) => m.apply_fields(player, state, dt),
-        }
-    }
-
-    fn title(&self) -> String {
-        match self {
-            Level::Graybox(_) => "osx-surf M0 — graybox".into(),
-            Level::Map(m) => format!("osx-surf — {}", m.name),
-        }
-    }
-
-    fn map_name(&self) -> Option<&str> {
-        match self {
-            Level::Graybox(_) => None,
-            Level::Map(m) => Some(m.name.as_str()),
-        }
-    }
+/// What the app is showing. A [`Session`] always exists underneath — the menus
+/// draw over a live world — so nothing here carries map state.
+enum Mode {
+    /// Title screen: Play / Settings / Quit.
+    MainMenu,
+    /// Map list.
+    MapPicker,
+    /// A map is loading on a worker thread. Loads run 1.3-7.5s on this corpus,
+    /// which is far too long to block the event loop.
+    Loading {
+        rx: std::sync::mpsc::Receiver<Result<(Level, Option<MapZones>), String>>,
+        name: String,
+        started: Instant,
+    },
+    /// In the world. `menu_open` layers the Esc pause panels over this.
+    Playing,
 }
 
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<wgpu::Surface<'static>>,
     renderer: Option<Renderer>,
-    level: Level,
-    title_base: String,
-    player: PlayerState,
-    vars: MoveVars,
+    /// The loaded map and everything belonging to it.
+    session: Session,
+    mode: Mode,
+    /// Map picker rows. PBs are cached here, not queried per frame.
+    map_list: Vec<MapEntry>,
+    picker_selected: usize,
+    shell_selected: usize,
+    /// Error from the last failed load, shown on the picker.
+    load_error: Option<String>,
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     menu_open: bool,
     menu_selected: usize,
     settings: Settings,
-    accumulator: f32,
     last_frame: Instant,
-    prev_origin: Vec3,
-    alpha: f32,
     hud_timer: f32,
-    sync_display: f32,
-    zones: Option<MapZones>,
-    run_timer: RunTimer,
     pb_store: Option<PbStore>,
-    pb_time: Option<f32>,
-    /// Live delta vs PB while running/finished; set on finish.
-    pb_delta: Option<f32>,
-    finish_recorded: bool,
-    pb_flash_left: f32,
-    recent_count: u32,
-    recent_runs: Vec<MenuRecentEntry>,
-    replay_rec: ReplayRecorder,
     frame_stats: FrameStats,
-    /// PB checkpoint splits (from pb.osxr header or derived).
-    pb_splits: Vec<f32>,
-    pb_ghost: Option<GhostPlayback>,
-    /// Cached Esc-menu ghost choices for the loaded map.
-    ghost_options: Vec<GhostOption>,
-    split_flash_left: f32,
-    split_flash_line: Option<String>,
     window_w: u32,
     window_h: u32,
     perf_secs: Option<f32>,
@@ -371,17 +299,6 @@ struct App {
     immediate_ok: bool,
     /// `None` when no output device was available — the game runs on silently.
     audio: Option<AudioEngine>,
-    audio_detect: EventDetector,
-    /// Last tick's ramp contact, fed to the audio thread each frame.
-    audio_on_ramp: bool,
-    /// Saved practice locations for this map (Mouse2 save / Mouse1 load).
-    locs: LocStore,
-    /// Guard against a stray Mouse1 yanking you out of a real run: loadloc only
-    /// works while this is on. Saveloc is always allowed. Off at every launch —
-    /// a guard that remembers being disabled is not a guard.
-    practice_mode: bool,
-    /// Touch state for the map's `AddOutput` triggers (boosters, name gates).
-    field_state: FieldState,
     /// Which panel the keyboard drives. Both panels are always visible.
     menu_focus: MenuFocus,
     /// Selected row in the locs panel (the settings panel uses `menu_selected`).
@@ -393,38 +310,15 @@ struct App {
 impl App {
     fn new(opts: LaunchOpts) -> Self {
         let LaunchOpts {
-            level,
-            zones,
+            map_path,
+            graybox,
             window_w,
             window_h,
             perf_secs,
             vsync,
             ghost_path,
         } = opts;
-        let title_base = level.title();
-        let (spawn_origin, spawn_angles) = level.spawn();
-        let mut player = PlayerState {
-            origin: spawn_origin,
-            viewangles: spawn_angles,
-            grounded: true,
-            ..PlayerState::default()
-        };
-        let mut vars = MoveVars::momentum_surf();
-        if let Some(mv) = zones.as_ref().and_then(|z| z.max_velocity) {
-            vars.maxvelocity = mv;
-            if mv <= 0.0 {
-                println!("  maxvelocity=uncapped (zone override)");
-            } else {
-                println!("  maxvelocity={mv:.0} (zone override)");
-            }
-        }
-        for _ in 0..10 {
-            player = tick(level.world(), &player, &UserCmd::default(), &vars);
-        }
-        let track_type = zones
-            .as_ref()
-            .map(|z| z.track_type)
-            .unwrap_or(TrackType::Linear);
+
         let pb_store = match PbStore::open_default() {
             Ok(s) => Some(s),
             Err(e) => {
@@ -432,14 +326,6 @@ impl App {
                 None
             }
         };
-        let pb_time = match (&pb_store, level.map_name()) {
-            (Some(store), Some(name)) => store.get(name).ok().flatten(),
-            _ => None,
-        };
-        let locs = LocStore::load_for_map(level.map_name().unwrap_or(GRAYBOX_MAP));
-        if !locs.is_empty() {
-            println!("  locs: {} saved", locs.len());
-        }
         let mut settings = Settings::load_default();
         if let Some(v) = vsync {
             settings.vsync = v;
@@ -467,76 +353,347 @@ impl App {
             }
         };
 
+        // A session always exists so the menus have a world to draw over and no
+        // caller has to unwrap. The graybox arena is generated, not loaded, so
+        // this costs nothing at startup.
+        let session = Session::graybox(pb_store.as_ref(), None);
+
         let mut app = Self {
             window: None,
             surface: None,
             renderer: None,
-            prev_origin: player.origin,
-            player,
-            level,
-            title_base,
-            vars,
+            session,
+            mode: Mode::MainMenu,
+            map_list: discover_maps(),
+            picker_selected: 0,
+            shell_selected: 0,
+            load_error: None,
             keys: HashSet::new(),
             mouse_captured: false,
             menu_open: false,
             menu_selected: 0,
             settings,
-            accumulator: 0.0,
             last_frame: Instant::now(),
-            alpha: 1.0,
             hud_timer: 0.0,
-            sync_display: 0.0,
-            zones,
-            run_timer: RunTimer::new(track_type),
             pb_store,
-            pb_time,
-            pb_delta: None,
-            finish_recorded: false,
-            pb_flash_left: 0.0,
-            recent_count: 0,
-            recent_runs: Vec::new(),
-            replay_rec: ReplayRecorder::default(),
             frame_stats: FrameStats::new(),
-            pb_splits: Vec::new(),
-            pb_ghost: None,
-            ghost_options: Vec::new(),
-            split_flash_left: 0.0,
-            split_flash_line: None,
             window_w,
             window_h,
             perf_secs,
             perf_started: None,
             immediate_ok: false,
             audio,
-            audio_detect: EventDetector::default(),
-            audio_on_ramp: false,
-            locs,
-            practice_mode: false,
-            field_state: FieldState::new(),
             menu_focus: MenuFocus::Settings,
             locs_selected: 0,
             cursor_px: (0.0, 0.0),
         };
-        app.refresh_ghost_options();
-        app.load_ghost();
-        app.refresh_recent_footer();
+
+        // `mx-surf <map>` and `--graybox` skip the shell, as they always have.
+        if graybox {
+            app.mode = Mode::Playing;
+            app.on_session_loaded();
+        } else if let Some(path) = map_path {
+            app.begin_load(path);
+        }
         app
     }
 
+    /// Kick a map load onto a worker thread. Loads run 1.3-7.5s on this corpus,
+    /// so doing it inline would freeze the window (and beachball on macOS).
+    fn begin_load(&mut self, path: PathBuf) {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("map")
+            .to_string();
+        if !path.is_file() {
+            self.load_error = Some(fetch_hint(&path));
+            eprintln!("{}", fetch_hint(&path));
+            self.mode = Mode::MapPicker;
+            return;
+        }
+        println!("Loading map {} …", path.display());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_level(&path));
+        });
+        self.load_error = None;
+        self.mode = Mode::Loading {
+            rx,
+            name,
+            started: Instant::now(),
+        };
+    }
+
+    /// Poll the loader. Returns once the session has been swapped in (or the
+    /// load failed and we bounced back to the picker).
+    fn poll_load(&mut self) {
+        let Mode::Loading { rx, .. } = &self.mode else {
+            return;
+        };
+        let msg = match rx.try_recv() {
+            Ok(m) => m,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("loader thread died".to_string())
+            }
+        };
+        let elapsed = match &self.mode {
+            Mode::Loading { started, .. } => started.elapsed().as_secs_f32(),
+            _ => 0.0,
+        };
+        match msg {
+            Ok((level, zones)) => {
+                println!("  loaded in {elapsed:.1}s");
+                self.enter_session(Session::new(
+                    level,
+                    zones,
+                    self.pb_store.as_ref(),
+                    Some(self.session.vars.airaccelerate),
+                ));
+            }
+            Err(e) => {
+                eprintln!("load failed: {e}");
+                self.load_error = Some(e);
+                self.mode = Mode::MapPicker;
+            }
+        }
+    }
+
+    /// Swap in a freshly built session and rebuild everything downstream of it:
+    /// GPU buffers, ghost catalogue, PB footer, window title, audio baseline.
+    fn enter_session(&mut self, session: Session) {
+        self.session = session;
+        self.mode = Mode::Playing;
+        self.menu_open = false;
+        self.menu_selected = 0;
+        self.locs_selected = 0;
+        self.on_session_loaded();
+    }
+
+    /// Shared tail of "a new session is live". Also runs at startup so the two
+    /// paths can't drift.
+    fn on_session_loaded(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.load_level(
+                self.session.level.mesh(),
+                &self.session.level.materials(),
+                &self.session.level.lightmaps(),
+                &self.session.level.skybox(),
+            );
+            println!("  mesh tris={}", r.mesh.index_count / 3);
+        }
+        self.refresh_ghost_options();
+        self.load_ghost();
+        self.refresh_recent_footer();
+        self.apply_audio_settings();
+        if let Some(audio) = self.audio.as_ref() {
+            audio.set_params(AudioParams::default());
+            audio.push(AudioEvent::Rearm);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&self.session.title_base);
+        }
+        if self.session.zones.is_some() {
+            println!("Timer: leave start zone to begin; touch end to finish. R clears run.");
+        }
+    }
+
+
+    /// Selection index for the page that is up.
+    fn shell_sel(&mut self) -> &mut usize {
+        match self.mode {
+            Mode::MapPicker => &mut self.picker_selected,
+            _ => &mut self.shell_selected,
+        }
+    }
+
+    fn shell_rows(&self) -> Vec<(String, String)> {
+        match self.mode {
+            Mode::MainMenu => vec![
+                ("Play".into(), String::new()),
+                ("Back to maps".into(), String::new()),
+            ("Quit".into(), String::new()),
+            ],
+            Mode::MapPicker => self
+                .map_list
+                .iter()
+                .map(|m| {
+                    let pb = m.pb.map(format_time).unwrap_or_else(|| "—".into());
+                    (m.label.clone(), pb)
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Refresh cached PBs — cheap, but only worth doing on entering the picker.
+    fn refresh_map_pbs(&mut self) {
+        let Some(store) = self.pb_store.as_ref() else {
+            return;
+        };
+        for m in self.map_list.iter_mut() {
+            let name = match m.path.as_ref() {
+                Some(p) => p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                None => GRAYBOX_MAP.to_string(),
+            };
+            m.pb = store.get(&name).ok().flatten();
+        }
+    }
+
+    fn build_shell(&self) -> Option<ShellHud> {
+        let rows = self.shell_rows();
+        let (title, subtitle, hint) = match &self.mode {
+            Mode::MainMenu => (
+                "MX-SURF".to_string(),
+                "source-faithful surf".to_string(),
+                "↑↓ select   enter choose   esc quit".to_string(),
+            ),
+            Mode::MapPicker => (
+                "SELECT MAP".to_string(),
+                format!("{} available", self.map_list.len()),
+                "↑↓ select   enter load   esc back".to_string(),
+            ),
+            Mode::Loading { name, started, .. } => (
+                "LOADING".to_string(),
+                name.clone(),
+                format!("{:.1}s", started.elapsed().as_secs_f32()),
+            ),
+            Mode::Playing => return None,
+        };
+        let selected = match self.mode {
+            Mode::MapPicker => self.picker_selected,
+            _ => self.shell_selected,
+        };
+        let scroll = locs::scroll_window_start(rows.len(), SHELL_ROWS_VISIBLE, selected);
+        let drawn = rows.len().min(SHELL_ROWS_VISIBLE);
+        let hovered = if matches!(self.mode, Mode::Loading { .. }) {
+            None
+        } else {
+            surf_render::shell_layout(self.window_w as f32, self.window_h as f32, drawn)
+                .row_at(self.cursor_px.0, self.cursor_px.1)
+                .map(|r| r + scroll)
+                .filter(|r| *r < rows.len())
+        };
+        Some(ShellHud {
+            title,
+            subtitle,
+            items: rows,
+            selected,
+            hovered,
+            hint,
+            message: self.load_error.clone(),
+            scroll,
+        })
+    }
+
+    fn shell_move(&mut self, d: i32) {
+        let n = self.shell_rows().len();
+        if n == 0 {
+            return;
+        }
+        let sel = self.shell_sel();
+        *sel = ((*sel as i32 + d).rem_euclid(n as i32)) as usize;
+    }
+
+    fn shell_activate(&mut self, event_loop: &ActiveEventLoop) {
+        match self.mode {
+            Mode::MainMenu => match self.shell_selected {
+                0 => {
+                    self.refresh_map_pbs();
+                    self.load_error = None;
+                    self.mode = Mode::MapPicker;
+                }
+                _ => event_loop.exit(),
+            },
+            Mode::MapPicker => {
+                let Some(entry) = self.map_list.get(self.picker_selected) else {
+                    return;
+                };
+                match entry.path.clone() {
+                    Some(p) => self.begin_load(p),
+                    None => {
+                        let s = Session::graybox(
+                            self.pb_store.as_ref(),
+                            Some(self.session.vars.airaccelerate),
+                        );
+                        self.enter_session(s);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn shell_back(&mut self, event_loop: &ActiveEventLoop) {
+        match self.mode {
+            Mode::MainMenu => event_loop.exit(),
+            Mode::MapPicker => {
+                self.load_error = None;
+                self.mode = Mode::MainMenu;
+            }
+            _ => {}
+        }
+    }
+
+    fn shell_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        match code {
+            KeyCode::ArrowUp | KeyCode::KeyW => self.shell_move(-1),
+            KeyCode::ArrowDown | KeyCode::KeyS => self.shell_move(1),
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
+                self.shell_activate(event_loop)
+            }
+            KeyCode::Escape => self.shell_back(event_loop),
+            _ => {}
+        }
+    }
+
+    /// Click on a shell row: select it, then act on it — the same row the
+    /// renderer drew, via the shared layout.
+    fn shell_click(&mut self, event_loop: &ActiveEventLoop) {
+        let rows = self.shell_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let selected = match self.mode {
+            Mode::MapPicker => self.picker_selected,
+            _ => self.shell_selected,
+        };
+        let scroll = locs::scroll_window_start(rows.len(), SHELL_ROWS_VISIBLE, selected);
+        let drawn = rows.len().min(SHELL_ROWS_VISIBLE);
+        let layout =
+            surf_render::shell_layout(self.window_w as f32, self.window_h as f32, drawn);
+        if let Some(r) = layout.row_at(self.cursor_px.0, self.cursor_px.1) {
+            let logical = r + scroll;
+            if logical < rows.len() {
+                *self.shell_sel() = logical;
+                self.shell_activate(event_loop);
+            }
+        }
+    }
+
+    /// Back out of the world to the map list, dropping mouse capture.
+    fn leave_to_picker(&mut self) {
+        self.menu_open = false;
+        self.set_capture(false);
+        self.mode = Mode::MapPicker;
+    }
+
+
     fn refresh_ghost_options(&mut self) {
-        let Some(name) = self.level.map_name().map(|s| s.to_string()) else {
-            self.ghost_options = vec![GhostOption {
+        let Some(name) = self.session.level.map_name().map(|s| s.to_string()) else {
+            self.session.ghost_options = vec![GhostOption {
                 id: GHOST_OFF.into(),
                 label: "Off".into(),
                 path: None,
             }];
             return;
         };
-        self.ghost_options = replay::ghost_catalog(&name, &self.settings.ghost);
+        self.session.ghost_options = replay::ghost_catalog(&name, &self.settings.ghost);
     }
 
     fn ghost_label(&self) -> String {
-        self.ghost_options
+        self.session.ghost_options
             .iter()
             .find(|o| o.id == self.settings.ghost)
             .map(|o| o.label.clone())
@@ -545,35 +702,35 @@ impl App {
 
     fn cycle_ghost(&mut self, dir: i32) {
         self.refresh_ghost_options();
-        if self.ghost_options.is_empty() {
+        if self.session.ghost_options.is_empty() {
             return;
         }
-        let cur = self
+        let cur = self.session
             .ghost_options
             .iter()
             .position(|o| o.id == self.settings.ghost)
             .unwrap_or(0);
-        let n = self.ghost_options.len() as i32;
+        let n = self.session.ghost_options.len() as i32;
         let next = (cur as i32 + dir).rem_euclid(n) as usize;
-        self.settings.ghost = self.ghost_options[next].id.clone();
+        self.settings.ghost = self.session.ghost_options[next].id.clone();
         self.load_ghost();
     }
 
     fn load_ghost(&mut self) {
-        let Some(name) = self.level.map_name().map(|s| s.to_string()) else {
-            self.pb_ghost = None;
-            self.pb_splits.clear();
+        let Some(name) = self.session.level.map_name().map(|s| s.to_string()) else {
+            self.session.pb_ghost = None;
+            self.session.pb_splits.clear();
             return;
         };
         if self.settings.ghost == GHOST_OFF {
-            self.pb_ghost = None;
-            self.pb_splits.clear();
+            self.session.pb_ghost = None;
+            self.session.pb_splits.clear();
             println!("  ghost off");
             return;
         }
         let Some(path) = replay::resolve_ghost_path(&name, &self.settings.ghost) else {
-            self.pb_ghost = None;
-            self.pb_splits.clear();
+            self.session.pb_ghost = None;
+            self.session.pb_splits.clear();
             return;
         };
         let kind = match self.settings.ghost.as_str() {
@@ -584,7 +741,7 @@ impl App {
         match Replay::load(&path) {
             Ok(mut replay) => {
                 if replay.header.splits.is_empty() {
-                    if let Some(zones) = self.zones.as_ref() {
+                    if let Some(zones) = self.session.zones.as_ref() {
                         replay.header.splits = derive_splits(
                             &replay.frames,
                             &zones.main.checkpoints,
@@ -593,18 +750,18 @@ impl App {
                         );
                     }
                 }
-                self.pb_splits = replay.header.splits.clone();
+                self.session.pb_splits = replay.header.splits.clone();
                 println!(
                     "  {} ghost loaded ({} frames, {} splits, style={}) from {}",
                     kind,
                     replay.header.frame_count,
-                    self.pb_splits.len(),
+                    self.session.pb_splits.len(),
                     replay.header.style,
                     path.display()
                 );
                 let mut ghost = GhostPlayback::from_replay(replay);
-                ghost.classify_ramp_contact(self.level.world());
-                self.pb_ghost = Some(ghost);
+                ghost.classify_ramp_contact(self.session.level.world());
+                self.session.pb_ghost = Some(ghost);
             }
             Err(e) => {
                 if self.settings.ghost != GHOST_PB && self.settings.ghost != GHOST_AUTO {
@@ -612,16 +769,16 @@ impl App {
                 } else if self.settings.ghost == GHOST_AUTO {
                     eprintln!("  auto ghost load failed ({}): {e}", path.display());
                 }
-                self.pb_ghost = None;
-                self.pb_splits.clear();
+                self.session.pb_ghost = None;
+                self.session.pb_splits.clear();
             }
         }
     }
 
     fn refresh_recent_footer(&mut self) {
-        self.recent_runs.clear();
-        self.recent_count = 0;
-        let Some(name) = self.level.map_name() else {
+        self.session.recent_runs.clear();
+        self.session.recent_count = 0;
+        let Some(name) = self.session.level.map_name() else {
             return;
         };
         let Some(store) = self.pb_store.as_ref() else {
@@ -633,9 +790,9 @@ impl App {
         let Ok(count) = store.count_completions(name) else {
             return;
         };
-        self.recent_count = count as u32;
+        self.session.recent_count = count as u32;
         for r in recent {
-            self.recent_runs.push(MenuRecentEntry {
+            self.session.recent_runs.push(MenuRecentEntry {
                 time: format_time(r.time_secs),
                 is_pb: r.is_pb,
             });
@@ -644,10 +801,10 @@ impl App {
 
     /// Freeze pose + velocity + run clock into a new numbered loc.
     fn save_loc(&mut self) {
-        let loc = Loc::capture(&self.player, &self.run_timer.snapshot());
+        let loc = Loc::capture(&self.session.player, &self.session.run_timer.snapshot());
         let speed = loc.speed_2d();
         let time = loc.time_secs;
-        match self.locs.push(loc) {
+        match self.session.locs.push(loc) {
             Ok(index) => {
                 self.persist_locs();
                 println!(
@@ -664,46 +821,46 @@ impl App {
     /// Restore the selected loc. The clock keeps its restored value and keeps
     /// running, but the attempt is practice from here: no PB, no replay.
     fn load_loc(&mut self, index: usize) {
-        let Some(loc) = self.locs.get(index).cloned() else {
+        let Some(loc) = self.session.locs.get(index).cloned() else {
             println!("loadloc: no loc saved");
             return;
         };
-        self.locs.set_selected(index);
+        self.session.locs.set_selected(index);
 
-        loc.apply(&mut self.player);
+        loc.apply(&mut self.session.player);
         // A loc jump is a teleport: the recorded touch set belongs to wherever
         // we were. Clearing it also re-arms the map's one-shot boosts, which is
         // the point of practising with a loc saved before one.
-        self.field_state.reset();
+        self.session.field_state.reset();
         let snap = loc.timer_snapshot();
-        self.run_timer.restore(&snap, self.player.grounded);
-        self.run_timer.mark_practice();
-        if let Some(zones) = self.zones.as_ref() {
-            self.run_timer
-                .sync_checkpoints_after_restore(zones, &self.player);
+        self.session.run_timer.restore(&snap, self.session.player.grounded);
+        self.session.run_timer.mark_practice();
+        if let Some(zones) = self.session.zones.as_ref() {
+            self.session.run_timer
+                .sync_checkpoints_after_restore(zones, &self.session.player);
         }
 
         // Collapse the interpolation span — otherwise the camera smears from
         // wherever we were to wherever the loc is.
-        self.prev_origin = self.player.origin;
-        self.accumulator = 0.0;
-        self.sync_display = 0.0;
+        self.session.prev_origin = self.session.player.origin;
+        self.session.accumulator = 0.0;
+        self.session.sync_display = 0.0;
 
-        self.finish_recorded = false;
-        self.pb_delta = self
+        self.session.finish_recorded = false;
+        self.session.pb_delta = self.session
             .pb_time
-            .filter(|_| self.run_timer.phase == TimerPhase::Running)
-            .map(|pb| self.run_timer.time_secs - pb);
-        self.pb_flash_left = 0.0;
-        self.split_flash_left = 0.0;
-        self.split_flash_line = None;
+            .filter(|_| self.session.run_timer.phase == TimerPhase::Running)
+            .map(|pb| self.session.run_timer.time_secs - pb);
+        self.session.pb_flash_left = 0.0;
+        self.session.split_flash_left = 0.0;
+        self.session.split_flash_line = None;
         // A practice attempt is never a saved run; drop whatever was captured.
-        self.replay_rec.clear();
+        self.session.replay_rec.clear();
 
         // Move the ghost with the clock, or every delta on screen would be wrong.
-        let running = self.run_timer.phase == TimerPhase::Running;
-        let t = self.run_timer.time_secs;
-        if let Some(g) = self.pb_ghost.as_mut() {
+        let running = self.session.run_timer.phase == TimerPhase::Running;
+        let t = self.session.run_timer.time_secs;
+        if let Some(g) = self.session.pb_ghost.as_mut() {
             if running {
                 g.seek_secs(t);
             } else {
@@ -714,8 +871,8 @@ impl App {
         // Same treatment as a reset: re-baseline the detector so the jump can't
         // fire a phantom landing, and re-arm rather than wipe — a loadloc is not
         // a failure.
-        self.audio_on_ramp = false;
-        self.audio_detect.resync(false, self.player.grounded);
+        self.session.audio_on_ramp = false;
+        self.session.audio_detect.resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
@@ -724,29 +881,29 @@ impl App {
         println!(
             "loadloc #{}  {:.0} u/s  t {}  (practice)",
             index + 1,
-            self.player.velocity.length_2d(),
-            format_time(self.run_timer.time_secs)
+            self.session.player.velocity.length_2d(),
+            format_time(self.session.run_timer.time_secs)
         );
     }
 
     /// Mouse1 / bind path — refuses unless practice mode is armed.
     fn load_selected_loc(&mut self) {
-        if !self.practice_mode {
+        if !self.session.practice_mode {
             self.flash_notice("PRACTICE MODE OFF · LOADLOC LOCKED");
             println!("loadloc blocked: practice mode off (P to toggle)");
             return;
         }
-        match self.locs.selected() {
+        match self.session.locs.selected() {
             Some(i) => self.load_loc(i),
             None => println!("loadloc: no loc saved"),
         }
     }
 
     fn set_practice_mode(&mut self, on: bool) {
-        if self.practice_mode == on {
+        if self.session.practice_mode == on {
             return;
         }
-        self.practice_mode = on;
+        self.session.practice_mode = on;
         if on {
             self.flash_notice("PRACTICE MODE ON");
             println!("practice mode ON — Mouse1 loadloc armed");
@@ -758,12 +915,12 @@ impl App {
 
     /// Brief centre-screen message, reusing the checkpoint-split flash slot.
     fn flash_notice(&mut self, msg: &str) {
-        self.split_flash_line = Some(msg.to_string());
-        self.split_flash_left = SPLIT_FLASH_SECS;
+        self.session.split_flash_line = Some(msg.to_string());
+        self.session.split_flash_left = SPLIT_FLASH_SECS;
     }
 
     fn persist_locs(&self) {
-        if let Err(e) = self.locs.save() {
+        if let Err(e) = self.session.locs.save() {
             eprintln!("locs save failed: {e}");
         }
     }
@@ -791,7 +948,7 @@ impl App {
         self.menu_selected = 0;
         // Land the locs panel on the active loc so it reads as "this is the one
         // Mouse1 will load".
-        self.locs_selected = match self.locs.selected() {
+        self.locs_selected = match self.session.locs.selected() {
             Some(i) => i + 1,
             None => LOC_ROW_PRACTICE,
         };
@@ -816,7 +973,7 @@ impl App {
     fn menu_adjust(&mut self, dir: i32) {
         if self.menu_focus == MenuFocus::Locs {
             if self.locs_selected == LOC_ROW_PRACTICE {
-                self.set_practice_mode(!self.practice_mode);
+                self.set_practice_mode(!self.session.practice_mode);
             }
             return;
         }
@@ -864,9 +1021,9 @@ impl App {
             }
             MENU_AA => {
                 if dir > 0 {
-                    self.vars.airaccelerate = (self.vars.airaccelerate * 1.5).min(1000.0);
+                    self.session.vars.airaccelerate = (self.session.vars.airaccelerate * 1.5).min(1000.0);
                 } else {
-                    self.vars.airaccelerate = (self.vars.airaccelerate / 1.5).max(1.0);
+                    self.session.vars.airaccelerate = (self.session.vars.airaccelerate / 1.5).max(1.0);
                 }
             }
             MENU_AUDIO => {
@@ -901,7 +1058,7 @@ impl App {
                     audio.push(AudioEvent::Wipe);
                 }
             }
-            MENU_QUIT => {}
+            MENU_MAPS | MENU_QUIT => {}
             _ => {}
         }
         self.apply_audio_settings();
@@ -961,7 +1118,7 @@ impl App {
             ("VSync".into(), vsync_label),
             (
                 "Airaccelerate".into(),
-                format!("{:.0}", self.vars.airaccelerate),
+                format!("{:.0}", self.session.vars.airaccelerate),
             ),
             (
                 "Audio".into(),
@@ -1008,38 +1165,38 @@ impl App {
 
     /// Rows on the locs panel: practice toggle + one row per loc + load + clear.
     fn locs_menu_len(&self) -> usize {
-        locs::locs_page_len(self.locs.len())
+        locs::locs_page_len(self.session.locs.len())
     }
 
     fn loc_row_load(&self) -> usize {
-        self.locs.len() + 1
+        self.session.locs.len() + 1
     }
 
     fn loc_row_clear(&self) -> usize {
-        self.locs.len() + 2
+        self.session.locs.len() + 2
     }
 
     /// The loc index a locs-panel row points at, if it is a loc row.
     fn loc_index_for_row(&self, row: usize) -> Option<usize> {
-        locs::loc_index_for_row(self.locs.len(), row)
+        locs::loc_index_for_row(self.session.locs.len(), row)
     }
 
     /// Rows actually drawn in the locs panel (the list scrolls past
     /// [`LOC_ROWS_VISIBLE`], so this is not the logical row count).
     fn locs_drawn_rows(&self) -> usize {
-        self.locs.len().min(LOC_ROWS_VISIBLE) + 3
+        self.session.locs.len().min(LOC_ROWS_VISIBLE) + 3
     }
 
     /// The Locs box. Long lists scroll: only [`LOC_ROWS_VISIBLE`] loc rows are
     /// emitted, windowed around the selection, and `selected` is remapped to the
     /// emitted list so the highlight lands on the right line.
     fn build_locs_panel(&self) -> MenuPanel {
-        let n = self.locs.len();
+        let n = self.session.locs.len();
         let sel = self.locs_selected.min(self.locs_menu_len() - 1);
         let mut items: Vec<(String, String)> = Vec::with_capacity(self.locs_drawn_rows());
         items.push((
             "Practice mode".into(),
-            if self.practice_mode {
+            if self.session.practice_mode {
                 "On".into()
             } else {
                 "Off".into()
@@ -1051,11 +1208,11 @@ impl App {
         let visible = n.min(LOC_ROWS_VISIBLE);
         let first = locs::scroll_window_start(n, LOC_ROWS_VISIBLE, focus);
         for i in first..first + visible {
-            let loc = match self.locs.get(i) {
+            let loc = match self.session.locs.get(i) {
                 Some(l) => l,
                 None => continue,
             };
-            let active = self.locs.selected() == Some(i);
+            let active = self.session.locs.selected() == Some(i);
             items.push((
                 format!("{} #{}", if active { "▸" } else { " " }, i + 1),
                 format!("{:.0} u/s  {}", loc.speed_2d(), format_time(loc.time_secs)),
@@ -1092,8 +1249,8 @@ impl App {
         MenuHud {
             main: self.build_menu_hud(),
             locs: self.build_locs_panel(),
-            recent_count: self.recent_count,
-            recent: self.recent_runs.clone(),
+            recent_count: self.session.recent_count,
+            recent: self.session.recent_runs.clone(),
         }
     }
 
@@ -1107,10 +1264,10 @@ impl App {
             .unwrap_or((self.window_w as f32, self.window_h as f32));
         // Mirror the renderer: an empty list still draws one "no finishes yet"
         // row, and the pool caps it at 6.
-        let recent_rows = if self.recent_runs.is_empty() {
+        let recent_rows = if self.session.recent_runs.is_empty() {
             1
         } else {
-            self.recent_runs.len().min(6)
+            self.session.recent_runs.len().min(6)
         };
         surf_render::menu_layout(w, h, MENU_ITEM_COUNT, self.locs_drawn_rows(), recent_rows)
     }
@@ -1130,7 +1287,7 @@ impl App {
 
     /// Invert the scroll window: drawn row → logical locs-panel row.
     fn locs_logical_row(&self, drawn: usize) -> usize {
-        let n = self.locs.len();
+        let n = self.session.locs.len();
         let visible = n.min(LOC_ROWS_VISIBLE);
         if drawn == 0 {
             return LOC_ROW_PRACTICE;
@@ -1163,40 +1320,40 @@ impl App {
     }
 
     fn reset(&mut self) {
-        let (spawn_origin, spawn_angles) = self.level.spawn();
-        self.player = PlayerState {
+        let (spawn_origin, spawn_angles) = self.session.level.spawn();
+        self.session.player = PlayerState {
             origin: spawn_origin,
             viewangles: spawn_angles,
             grounded: true,
             ..PlayerState::default()
         };
         for _ in 0..10 {
-            self.player = tick(
-                self.level.world(),
-                &self.player,
+            self.session.player = tick(
+                self.session.level.world(),
+                &self.session.player,
                 &UserCmd::default(),
-                &self.vars,
+                &self.session.vars,
             );
         }
-        self.prev_origin = self.player.origin;
-        self.accumulator = 0.0;
-        self.sync_display = 0.0;
-        self.run_timer.reset();
-        self.field_state.reset();
-        self.pb_delta = None;
-        self.finish_recorded = false;
-        self.pb_flash_left = 0.0;
-        self.split_flash_left = 0.0;
-        self.split_flash_line = None;
-        self.replay_rec.clear();
-        if let Some(g) = self.pb_ghost.as_mut() {
+        self.session.prev_origin = self.session.player.origin;
+        self.session.accumulator = 0.0;
+        self.session.sync_display = 0.0;
+        self.session.run_timer.reset();
+        self.session.field_state.reset();
+        self.session.pb_delta = None;
+        self.session.finish_recorded = false;
+        self.session.pb_flash_left = 0.0;
+        self.session.split_flash_left = 0.0;
+        self.session.split_flash_line = None;
+        self.session.replay_rec.clear();
+        if let Some(g) = self.session.pb_ghost.as_mut() {
             g.stop();
         }
         // Re-baseline the edge detector so respawning can't fire a phantom
         // landing, and mark the restart with the same quiet tick the start zone
         // uses. A manual reset is not a failure and doesn't get a wipe.
-        self.audio_on_ramp = false;
-        self.audio_detect.resync(false, self.player.grounded);
+        self.session.audio_on_ramp = false;
+        self.session.audio_detect.resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
@@ -1206,40 +1363,40 @@ impl App {
     /// Snap to the current stage start without clearing the run clock / splits.
     /// Linear maps fall back to a full [`Self::reset`].
     fn reset_stage(&mut self) {
-        if self.zones.is_none() || self.run_timer.track_type != TrackType::Staged {
+        if self.session.zones.is_none() || self.session.run_timer.track_type != TrackType::Staged {
             self.reset();
             return;
         }
-        let stage = self.run_timer.current_stage;
-        let angles = self.player.viewangles;
+        let stage = self.session.run_timer.current_stage;
+        let angles = self.session.player.viewangles;
         let (spawn_origin, spawn_angles) = {
-            let zones = self.zones.as_ref().unwrap();
-            stage_respawn_pose(zones, &self.level, stage, angles)
+            let zones = self.session.zones.as_ref().unwrap();
+            stage_respawn_pose(zones, &self.session.level, stage, angles)
         };
-        self.player = PlayerState {
+        self.session.player = PlayerState {
             origin: spawn_origin,
             viewangles: spawn_angles,
             grounded: true,
             ..PlayerState::default()
         };
         for _ in 0..10 {
-            self.player = tick(
-                self.level.world(),
-                &self.player,
+            self.session.player = tick(
+                self.session.level.world(),
+                &self.session.player,
                 &UserCmd::default(),
-                &self.vars,
+                &self.session.vars,
             );
         }
-        self.prev_origin = self.player.origin;
-        self.accumulator = 0.0;
+        self.session.prev_origin = self.session.player.origin;
+        self.session.accumulator = 0.0;
         // Keep phase / time / splits / current_stage; soft-enter so landing
         // inside a stage start doesn't cancel or double-split.
-        self.run_timer.notify_soft_respawn();
-        if let Some(zones) = self.zones.as_ref() {
-            self.run_timer.sync_stage_after_respawn(zones, &self.player);
+        self.session.run_timer.notify_soft_respawn();
+        if let Some(zones) = self.session.zones.as_ref() {
+            self.session.run_timer.sync_stage_after_respawn(zones, &self.session.player);
         }
-        self.audio_on_ramp = false;
-        self.audio_detect.resync(false, self.player.grounded);
+        self.session.audio_on_ramp = false;
+        self.session.audio_detect.resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
@@ -1251,7 +1408,7 @@ impl App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title(&self.title_base)
+                        .with_title(&self.session.title_base)
                         .with_inner_size(PhysicalSize::new(self.window_w, self.window_h)),
                 )
                 .expect("window"),
@@ -1276,7 +1433,7 @@ impl App {
         // this adapter actually supports; on Apple Silicon that is far higher.
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("osx-surf"),
+                label: Some("mx-surf"),
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
                 memory_hints: Default::default(),
@@ -1329,10 +1486,10 @@ impl App {
             config.width, config.height, config.alpha_mode
         );
 
-        let mesh = GpuMesh::from_graybox(&device, self.level.mesh());
-        let atlas = self.level.materials();
-        let lightmaps = self.level.lightmaps();
-        let sky = self.level.skybox();
+        let mesh = GpuMesh::from_graybox(&device, self.session.level.mesh());
+        let atlas = self.session.level.materials();
+        let lightmaps = self.session.level.lightmaps();
+        let sky = self.session.level.skybox();
         let renderer = Renderer::new(device, queue, config, mesh, &atlas, &lightmaps, &sky);
         println!(
             "  mesh tris={}  lightmap={}x{}",
@@ -1379,7 +1536,7 @@ impl App {
             side -= 1.0;
         }
         UserCmd {
-            viewangles: self.player.viewangles,
+            viewangles: self.session.player.viewangles,
             forward_move: forward,
             side_move: side,
             jump: self.keys.contains(&KeyCode::Space),
@@ -1389,65 +1546,65 @@ impl App {
     }
 
     fn simulate(&mut self, dt_real: f32) {
-        if self.menu_open {
+        if self.menu_open || !matches!(self.mode, Mode::Playing) {
             return;
         }
-        let tick_dt = self.vars.tick_interval;
-        self.accumulator += dt_real;
-        if self.accumulator > 0.25 {
-            self.accumulator = 0.25;
+        let tick_dt = self.session.vars.tick_interval;
+        self.session.accumulator += dt_real;
+        if self.session.accumulator > 0.25 {
+            self.session.accumulator = 0.25;
         }
-        while self.accumulator >= tick_dt {
-            self.prev_origin = self.player.origin;
-            let prev_vel = self.player.velocity;
+        while self.session.accumulator >= tick_dt {
+            self.session.prev_origin = self.session.player.origin;
+            let prev_vel = self.session.player.velocity;
             let cmd = self.build_cmd();
             let wishing = cmd.forward_move.abs() + cmd.side_move.abs() > 0.0;
-            self.player = tick(self.level.world(), &self.player, &cmd, &self.vars);
+            self.session.player = tick(self.session.level.world(), &self.session.player, &cmd, &self.session.vars);
             // Trigger touches are processed at the end of a move, so a booster
             // pays out on the tick you leave it and the basevelocity a volume
             // asserts is carried by the next one.
-            self.level
-                .apply_fields(&mut self.player, &mut self.field_state, tick_dt);
+            self.session.level
+                .apply_fields(&mut self.session.player, &mut self.session.field_state, tick_dt);
 
             let mut soft_respawned = false;
-            if let Some((dest, angles)) = self.level.touch_teleport(self.player.origin) {
-                self.player.origin = dest;
-                self.player.viewangles = angles;
+            if let Some((dest, angles)) = self.session.level.touch_teleport(self.session.player.origin) {
+                self.session.player.origin = dest;
+                self.session.player.viewangles = angles;
                 // Whatever volume we were standing in is not where we are now.
-                self.player.basevelocity = Vec3::ZERO;
+                self.session.player.basevelocity = Vec3::ZERO;
                 soft_respawned = true;
             }
-            if self.player.origin.z < self.level.kill_z() {
-                let (spawn_origin, spawn_angles) = if self.run_timer.track_type == TrackType::Staged
+            if self.session.player.origin.z < self.session.level.kill_z() {
+                let (spawn_origin, spawn_angles) = if self.session.run_timer.track_type == TrackType::Staged
                 {
-                    if let Some(zones) = self.zones.as_ref() {
+                    if let Some(zones) = self.session.zones.as_ref() {
                         stage_respawn_pose(
                             zones,
-                            &self.level,
-                            self.run_timer.current_stage,
-                            self.player.viewangles,
+                            &self.session.level,
+                            self.session.run_timer.current_stage,
+                            self.session.player.viewangles,
                         )
                     } else {
-                        self.level.spawn()
+                        self.session.level.spawn()
                     }
                 } else {
-                    self.level.spawn()
+                    self.session.level.spawn()
                 };
-                self.player.origin = spawn_origin;
-                self.player.viewangles = spawn_angles;
-                self.player.velocity = Vec3::ZERO;
-                self.player.basevelocity = Vec3::ZERO;
-                self.player.gravity_scale = 1.0;
-                self.player.grounded = true;
+                self.session.player.origin = spawn_origin;
+                self.session.player.viewangles = spawn_angles;
+                self.session.player.velocity = Vec3::ZERO;
+                self.session.player.basevelocity = Vec3::ZERO;
+                self.session.player.gravity_scale = 1.0;
+                self.session.player.grounded = true;
                 // A fresh life re-arms every one-shot the map gates by name.
-                self.field_state.reset();
+                self.session.field_state.reset();
                 soft_respawned = true;
             }
 
             if soft_respawned {
-                self.run_timer.notify_soft_respawn();
-                if let Some(zones) = self.zones.as_ref() {
-                    self.run_timer.sync_stage_after_respawn(zones, &self.player);
+                self.session.run_timer.notify_soft_respawn();
+                if let Some(zones) = self.session.zones.as_ref() {
+                    self.session.run_timer.sync_stage_after_respawn(zones, &self.session.player);
                 }
             }
 
@@ -1455,75 +1612,75 @@ impl App {
             // contact can't come from `grounded` — `is_on_surf_ramp` is the same
             // probe the ghost trail already uses, so the two agree.
             if self.audio.is_some() && self.settings.audio {
-                let hull = self.player.hull();
-                let on_ramp = is_on_surf_ramp(self.level.world(), self.player.origin, &hull);
-                self.audio_on_ramp = on_ramp;
+                let hull = self.session.player.hull();
+                let on_ramp = is_on_surf_ramp(self.session.level.world(), self.session.player.origin, &hull);
+                self.session.audio_on_ramp = on_ramp;
                 let obs = Observation {
                     dt: tick_dt,
-                    speed: self.player.velocity.length_2d(),
+                    speed: self.session.player.velocity.length_2d(),
                     on_ramp,
-                    grounded: self.player.grounded,
+                    grounded: self.session.player.grounded,
                     wiped: soft_respawned,
                 };
-                let emitted = self.audio_detect.observe(obs);
+                let emitted = self.session.audio_detect.observe(obs);
                 if let Some(audio) = self.audio.as_ref() {
                     for ev in emitted.iter() {
                         audio.push(ev);
                     }
                 }
             }
-            if let Some(zones) = self.zones.as_ref() {
-                let phase_before = self.run_timer.phase;
-                let was_finished = self.run_timer.is_finished();
-                let pb_splits = self.pb_splits.clone();
-                self.run_timer
-                    .tick(zones, &mut self.player, tick_dt, &pb_splits);
-                if let Some(ev) = self.run_timer.take_split_event() {
-                    let staged = self.run_timer.track_type == TrackType::Staged;
+            if let Some(zones) = self.session.zones.as_ref() {
+                let phase_before = self.session.run_timer.phase;
+                let was_finished = self.session.run_timer.is_finished();
+                let pb_splits = self.session.pb_splits.clone();
+                self.session.run_timer
+                    .tick(zones, &mut self.session.player, tick_dt, &pb_splits);
+                if let Some(ev) = self.session.run_timer.take_split_event() {
+                    let staged = self.session.run_timer.track_type == TrackType::Staged;
                     let line = format_split_line(ev, staged);
                     println!("{line}");
-                    self.split_flash_line = Some(line);
-                    self.split_flash_left = SPLIT_FLASH_SECS;
+                    self.session.split_flash_line = Some(line);
+                    self.session.split_flash_left = SPLIT_FLASH_SECS;
                 }
                 self.record_replay_tick(phase_before, &cmd);
-                if self.run_timer.is_finished() && !was_finished && !self.finish_recorded {
+                if self.session.run_timer.is_finished() && !was_finished && !self.session.finish_recorded {
                     self.on_finish();
                 }
-                if self.run_timer.phase == TimerPhase::Running {
-                    if let Some(pb) = self.pb_time {
-                        self.pb_delta = Some(self.run_timer.time_secs - pb);
+                if self.session.run_timer.phase == TimerPhase::Running {
+                    if let Some(pb) = self.session.pb_time {
+                        self.session.pb_delta = Some(self.session.run_timer.time_secs - pb);
                     }
                 }
             }
 
             let sample = air_strafe_sync(
                 prev_vel,
-                self.player.velocity,
+                self.session.player.velocity,
                 wishing,
-                !self.player.grounded,
+                !self.session.player.grounded,
             );
-            if sample > self.sync_display {
-                self.sync_display = self.sync_display * 0.5 + sample * 0.5;
+            if sample > self.session.sync_display {
+                self.session.sync_display = self.session.sync_display * 0.5 + sample * 0.5;
             } else {
-                self.sync_display = self.sync_display * 0.85 + sample * 0.15;
+                self.session.sync_display = self.session.sync_display * 0.85 + sample * 0.15;
             }
-            self.accumulator -= tick_dt;
+            self.session.accumulator -= tick_dt;
         }
-        self.alpha = self.accumulator / tick_dt;
+        self.session.alpha = self.session.accumulator / tick_dt;
 
         // One parameter push per frame. Everything is smoothed per sample on
         // the audio thread, so this rate only has to beat the smoothing.
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams {
-                speed: self.player.velocity.length_2d(),
-                sync: self.sync_display,
-                contact: if self.audio_on_ramp { 1.0 } else { 0.0 },
+                speed: self.session.player.velocity.length_2d(),
+                sync: self.session.sync_display,
+                contact: if self.session.audio_on_ramp { 1.0 } else { 0.0 },
             });
         }
     }
 
     fn hud_timer_phase(&self) -> HudTimerPhase {
-        match self.run_timer.phase {
+        match self.session.run_timer.phase {
             TimerPhase::Idle => HudTimerPhase::Idle,
             TimerPhase::Armed => HudTimerPhase::Armed,
             TimerPhase::Running => HudTimerPhase::Running,
@@ -1536,9 +1693,9 @@ impl App {
             return;
         }
 
-        let origin = self.prev_origin.lerp(self.player.origin, self.alpha);
-        let eye = origin + Vec3::new(0.0, 0.0, self.player.hull().eye_height);
-        let speed = self.player.velocity.length_2d();
+        let origin = self.session.prev_origin.lerp(self.session.player.origin, self.session.alpha);
+        let eye = origin + Vec3::new(0.0, 0.0, self.session.player.hull().eye_height);
+        let speed = self.session.player.velocity.length_2d();
         let show_keys = if self.settings.show_keys && !self.menu_open {
             Some(ShowKeysState {
                 forward: self.keys.contains(&KeyCode::KeyW),
@@ -1557,14 +1714,14 @@ impl App {
         };
         let timer_phase = self.hud_timer_phase();
         let perf_line = self.frame_stats.line();
-        let racing = self.run_timer.phase == TimerPhase::Running
-            && self.pb_ghost.as_ref().map(|g| g.active).unwrap_or(false);
+        let racing = self.session.run_timer.phase == TimerPhase::Running
+            && self.session.pb_ghost.as_ref().map(|g| g.active).unwrap_or(false);
         let (ghost_time_delta, ghost_speed_delta, ghost_pose, trail_pts) = if racing {
-            let g = self.pb_ghost.as_ref().unwrap();
-            let td = Some(self.run_timer.time_secs - g.current_time());
+            let g = self.session.pb_ghost.as_ref().unwrap();
+            let td = Some(self.session.run_timer.time_secs - g.current_time());
             let sd = g.current_speed_2d().map(|gs| speed - gs);
             let pose = g
-                .sample(self.alpha)
+                .sample(self.session.alpha)
                 .map(|(o, _, ducked)| GhostPose { origin: o, ducked });
             let trail = if self.settings.ghost_trail {
                 g.trail_to_current()
@@ -1578,42 +1735,43 @@ impl App {
         } else {
             (None, None, None, Vec::new())
         };
-        let split_line = if self.split_flash_left > 0.0 {
-            self.split_flash_line.clone()
+        let split_line = if self.session.split_flash_left > 0.0 {
+            self.session.split_flash_line.clone()
         } else {
             None
         };
-        let stage_line = self
+        let stage_line = self.session
             .zones
             .as_ref()
-            .and_then(|z| self.run_timer.stage_hud_label(z));
+            .and_then(|z| self.session.run_timer.stage_hud_label(z));
         let hud = HudState {
             speed,
-            sync: self.sync_display,
-            grounded: self.player.grounded,
+            sync: self.session.sync_display,
+            grounded: self.session.player.grounded,
             speed_scale: 3500.0,
-            time_secs: self.run_timer.display_time(),
-            pb_time_secs: self.pb_time,
-            pb_delta_secs: self.pb_delta,
+            time_secs: self.session.run_timer.display_time(),
+            pb_time_secs: self.session.pb_time,
+            pb_delta_secs: self.session.pb_delta,
             timer_phase,
             show_sync_bar: self.settings.show_sync_bar,
             show_keys,
-            pb_flash: self.pb_flash_left > 0.0,
+            pb_flash: self.session.pb_flash_left > 0.0,
             split_line,
             stage_line,
-            practice: self.run_timer.practice,
-            practice_mode: self.practice_mode,
+            practice: self.session.run_timer.practice,
+            practice_mode: self.session.practice_mode,
             ghost_time_delta,
             ghost_speed_delta,
             menu,
+            shell: self.build_shell(),
             perf_line,
         };
-        let viewangles = self.player.viewangles;
-        let title_base = self.title_base.clone();
+        let viewangles = self.session.player.viewangles;
+        let title_base = self.session.title_base.clone();
         let menu_open = self.menu_open;
-        let grounded = self.player.grounded;
-        let time_label = self.run_timer.display_time().map(format_time);
-        let aa = self.vars.airaccelerate;
+        let grounded = self.session.player.grounded;
+        let time_label = self.session.run_timer.display_time().map(format_time);
+        let aa = self.session.vars.airaccelerate;
         let sens = self.settings.mouse_sens;
 
         let surface = self.surface.as_ref().unwrap();
@@ -1665,16 +1823,16 @@ impl App {
 
     /// Capture / discard frames based on timer phase transitions.
     fn record_replay_tick(&mut self, phase_before: TimerPhase, cmd: &UserCmd) {
-        let phase = self.run_timer.phase;
+        let phase = self.session.run_timer.phase;
         // A practice attempt is never saved — recording it would bake a position
         // discontinuity into the frame stream and break re-simulation. The ghost
         // still runs, because practising against it is the whole point.
-        if self.run_timer.practice {
-            if self.replay_rec.is_active() {
-                self.replay_rec.clear();
+        if self.session.run_timer.practice {
+            if self.session.replay_rec.is_active() {
+                self.session.replay_rec.clear();
             }
             if phase == TimerPhase::Running {
-                if let Some(g) = self.pb_ghost.as_mut() {
+                if let Some(g) = self.session.pb_ghost.as_mut() {
                     g.advance();
                 }
             }
@@ -1683,26 +1841,26 @@ impl App {
         match phase {
             TimerPhase::Running => {
                 if phase_before != TimerPhase::Running {
-                    self.replay_rec.begin();
-                    if let Some(g) = self.pb_ghost.as_mut() {
+                    self.session.replay_rec.begin();
+                    if let Some(g) = self.session.pb_ghost.as_mut() {
                         g.begin();
                     }
-                } else if let Some(g) = self.pb_ghost.as_mut() {
+                } else if let Some(g) = self.session.pb_ghost.as_mut() {
                     g.advance();
                 }
-                self.replay_rec.push(cmd, &self.player);
+                self.session.replay_rec.push(cmd, &self.session.player);
             }
             TimerPhase::Finished => {
                 if phase_before == TimerPhase::Running {
-                    self.replay_rec.push(cmd, &self.player);
+                    self.session.replay_rec.push(cmd, &self.session.player);
                 }
             }
             TimerPhase::Armed | TimerPhase::Idle => {
                 if matches!(phase_before, TimerPhase::Running | TimerPhase::Finished) {
-                    if self.replay_rec.is_active() {
-                        self.replay_rec.clear();
+                    if self.session.replay_rec.is_active() {
+                        self.session.replay_rec.clear();
                     }
-                    if let Some(g) = self.pb_ghost.as_mut() {
+                    if let Some(g) = self.session.pb_ghost.as_mut() {
                         g.stop();
                     }
                 }
@@ -1711,31 +1869,31 @@ impl App {
     }
 
     fn on_finish(&mut self) {
-        self.finish_recorded = true;
-        let time = self.run_timer.time_secs;
-        let splits = self.run_timer.splits.clone();
-        if let Some(pb) = self.pb_time {
-            self.pb_delta = Some(time - pb);
+        self.session.finish_recorded = true;
+        let time = self.session.run_timer.time_secs;
+        let splits = self.session.run_timer.splits.clone();
+        if let Some(pb) = self.session.pb_time {
+            self.session.pb_delta = Some(time - pb);
         } else {
-            self.pb_delta = Some(0.0);
+            self.session.pb_delta = Some(0.0);
         }
-        if self.run_timer.practice {
+        if self.session.run_timer.practice {
             // Theoretical time only: shown and frozen, but not a result.
-            self.replay_rec.clear();
+            self.session.replay_rec.clear();
             println!(
                 "Finished in {} — PRACTICE (loc load), not recorded",
                 format_time(time)
             );
             return;
         }
-        let Some(name) = self.level.map_name().map(|s| s.to_string()) else {
-            self.replay_rec.clear();
+        let Some(name) = self.session.level.map_name().map(|s| s.to_string()) else {
+            self.session.replay_rec.clear();
             return;
         };
 
-        let saved_path = self
+        let saved_path = self.session
             .replay_rec
-            .finish(&name, time, &self.vars, &splits)
+            .finish(&name, time, &self.session.vars, &splits)
             .and_then(|replay| {
                 let path = replay::new_run_replay_path(&name, time);
                 match replay.save(&path) {
@@ -1756,9 +1914,9 @@ impl App {
                 .map(|p| p.to_string_lossy().into_owned());
             match store.record_finish(&name, time, path_str.as_deref()) {
                 Ok(Some(new_pb)) => {
-                    self.pb_time = Some(new_pb);
-                    self.pb_delta = Some(0.0);
-                    self.pb_flash_left = PB_FLASH_SECS;
+                    self.session.pb_time = Some(new_pb);
+                    self.session.pb_delta = Some(0.0);
+                    self.session.pb_flash_left = PB_FLASH_SECS;
                     if let Some(src) = saved_path.as_ref() {
                         let pb_path = replay::pb_replay_path(&name);
                         if let Err(e) = std::fs::copy(src, &pb_path) {
@@ -1767,7 +1925,7 @@ impl App {
                             println!("PB replay {}", pb_path.display());
                         }
                     }
-                    self.pb_splits = splits;
+                    self.session.pb_splits = splits;
                     if self.settings.ghost == GHOST_PB {
                         self.load_ghost();
                     }
@@ -1779,7 +1937,7 @@ impl App {
                         "Finished {} in {} (PB {})",
                         name,
                         format_time(time),
-                        self.pb_time.map(format_time).unwrap_or_else(|| "-".into())
+                        self.session.pb_time.map(format_time).unwrap_or_else(|| "-".into())
                     );
                 }
                 Err(e) => eprintln!("PB write failed: {e}"),
@@ -1811,7 +1969,7 @@ impl App {
                 // Highlighting a loc row *is* selecting it, so Mouse1 in game
                 // afterwards loads the one you were last looking at.
                 if let Some(i) = self.loc_index_for_row(row) {
-                    self.locs.set_selected(i);
+                    self.session.locs.set_selected(i);
                 }
             }
         }
@@ -1863,12 +2021,12 @@ impl App {
         let Some(i) = self.loc_index_for_row(row) else {
             return;
         };
-        self.locs.remove(i);
+        self.session.locs.remove(i);
         self.persist_locs();
-        println!("deleted loc #{} ({} left)", i + 1, self.locs.len());
+        println!("deleted loc #{} ({} left)", i + 1, self.session.locs.len());
         self.locs_selected = self.locs_selected.min(self.locs_menu_len() - 1);
         if let Some(j) = self.loc_index_for_row(self.locs_selected) {
-            self.locs.set_selected(j);
+            self.session.locs.set_selected(j);
         }
     }
 
@@ -1876,19 +2034,19 @@ impl App {
     fn menu_activate(&mut self, panel: MenuFocus, row: usize, event_loop: &ActiveEventLoop) {
         if panel == MenuFocus::Locs {
             if row == LOC_ROW_PRACTICE {
-                self.set_practice_mode(!self.practice_mode);
+                self.set_practice_mode(!self.session.practice_mode);
             } else if self.loc_index_for_row(row).is_some() || row == self.loc_row_load() {
                 // Picking a loc here is deliberate, so it arms practice mode for
                 // you rather than refusing — the guard exists for stray clicks.
-                let index = self.loc_index_for_row(row).or_else(|| self.locs.selected());
+                let index = self.loc_index_for_row(row).or_else(|| self.session.locs.selected());
                 if let Some(i) = index {
                     self.set_practice_mode(true);
                     self.close_menu(true);
                     self.load_loc(i);
                 }
-            } else if row == self.loc_row_clear() && !self.locs.is_empty() {
-                let n = self.locs.len();
-                self.locs.clear();
+            } else if row == self.loc_row_clear() && !self.session.locs.is_empty() {
+                let n = self.session.locs.len();
+                self.session.locs.clear();
                 self.persist_locs();
                 self.locs_selected = LOC_ROW_PRACTICE;
                 println!("cleared {n} locs");
@@ -1896,6 +2054,10 @@ impl App {
             return;
         }
         match row {
+            MENU_MAPS => {
+                self.leave_to_picker();
+                return;
+            }
             MENU_QUIT => {
                 self.persist_settings();
                 event_loop.exit();
@@ -2018,6 +2180,14 @@ impl ApplicationHandler for App {
                 ..
             } => match state {
                 ElementState::Pressed => {
+                    // Shell pages own input entirely: no capture, no loc binds,
+                    // no player keys.
+                    if !matches!(self.mode, Mode::Playing) {
+                        if !repeat || matches!(code, KeyCode::ArrowUp | KeyCode::ArrowDown) {
+                            self.shell_key(code, event_loop);
+                        }
+                        return;
+                    }
                     if self.menu_open {
                         if !repeat {
                             self.handle_menu_key(code, event_loop);
@@ -2046,7 +2216,7 @@ impl ApplicationHandler for App {
                         KeyCode::KeyT => self.reset_stage(),
                         KeyCode::KeyP => {
                             if !repeat {
-                                let on = !self.practice_mode;
+                                let on = !self.session.practice_mode;
                                 self.set_practice_mode(on);
                             }
                         }
@@ -2061,10 +2231,10 @@ impl ApplicationHandler for App {
                             self.persist_settings();
                         }
                         KeyCode::Minus => {
-                            self.vars.airaccelerate = (self.vars.airaccelerate / 1.5).max(1.0);
+                            self.session.vars.airaccelerate = (self.session.vars.airaccelerate / 1.5).max(1.0);
                         }
                         KeyCode::Equal => {
-                            self.vars.airaccelerate = (self.vars.airaccelerate * 1.5).min(1000.0);
+                            self.session.vars.airaccelerate = (self.session.vars.airaccelerate * 1.5).min(1000.0);
                         }
                         _ => {}
                     }
@@ -2077,7 +2247,15 @@ impl ApplicationHandler for App {
                 self.cursor_px = (position.x as f32, position.y as f32);
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if self.menu_open {
+                if !matches!(self.mode, Mode::Playing) {
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    if dy.abs() > 0.01 {
+                        self.shell_move(if dy > 0.0 { -1 } else { 1 });
+                    }
+                } else if self.menu_open {
                     let dy = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y,
                         winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
@@ -2093,7 +2271,13 @@ impl ApplicationHandler for App {
                 // Loc binds are live only during actual play. In the menu the
                 // same clicks drive the panels, so a click on the UI can never
                 // move the player.
-                if self.menu_open {
+                if !matches!(self.mode, Mode::Playing) {
+                    match button {
+                        MouseButton::Left => self.shell_click(event_loop),
+                        MouseButton::Right => self.shell_back(event_loop),
+                        _ => {}
+                    }
+                } else if self.menu_open {
                     match button {
                         MouseButton::Left => self.menu_click(event_loop),
                         MouseButton::Right => self.menu_right_click(),
@@ -2112,14 +2296,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.poll_load();
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame).as_secs_f32();
                 self.last_frame = now;
-                if self.pb_flash_left > 0.0 {
-                    self.pb_flash_left = (self.pb_flash_left - dt).max(0.0);
+                if self.session.pb_flash_left > 0.0 {
+                    self.session.pb_flash_left = (self.session.pb_flash_left - dt).max(0.0);
                 }
-                if self.split_flash_left > 0.0 {
-                    self.split_flash_left = (self.split_flash_left - dt).max(0.0);
+                if self.session.split_flash_left > 0.0 {
+                    self.session.split_flash_left = (self.session.split_flash_left - dt).max(0.0);
                 }
                 let t0 = Instant::now();
                 self.simulate(dt);
@@ -2177,14 +2362,14 @@ impl ApplicationHandler for App {
             }
             let yaw_scale = self.settings.mouse_sens * MOUSE_YAW_SCALE;
             let pitch_scale = self.settings.mouse_sens * MOUSE_PITCH_SCALE;
-            self.player.viewangles.yaw -= dx as f32 * yaw_scale;
-            self.player.viewangles.pitch += dy as f32 * pitch_scale;
-            self.player.viewangles.pitch = self.player.viewangles.pitch.clamp(-89.0, 89.0);
-            if self.player.viewangles.yaw > 180.0 {
-                self.player.viewangles.yaw -= 360.0;
+            self.session.player.viewangles.yaw -= dx as f32 * yaw_scale;
+            self.session.player.viewangles.pitch += dy as f32 * pitch_scale;
+            self.session.player.viewangles.pitch = self.session.player.viewangles.pitch.clamp(-89.0, 89.0);
+            if self.session.player.viewangles.yaw > 180.0 {
+                self.session.player.viewangles.yaw -= 360.0;
             }
-            if self.player.viewangles.yaw < -180.0 {
-                self.player.viewangles.yaw += 360.0;
+            if self.session.player.viewangles.yaw < -180.0 {
+                self.session.player.viewangles.yaw += 360.0;
             }
         }
     }
@@ -2225,24 +2410,46 @@ fn stage_respawn_pose(
     (zones.main.stage_spawn(stage), fallback_angles)
 }
 
-fn load_zones_for(map_path: &std::path::Path) -> Option<MapZones> {
-    let zpath = zones::zones_path_for_map(map_path);
-    match zones::load_zones_file(&zpath) {
-        Ok(z) => {
-            println!(
-                "  zones={}  start_cap={:.0}  start_on_jump={}  cps={}",
-                zpath.display(),
-                z.main.limit_start_ground_speed,
-                z.main.start_on_jump,
-                z.main.checkpoints.len()
-            );
-            Some(z)
-        }
-        Err(e) => {
-            eprintln!("  zones unavailable ({}): {e}", zpath.display());
-            None
-        }
-    }
+/// BSPs are not in the repo (too large); point the user at the fetcher.
+fn fetch_hint(path: &std::path::Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("surf_summit");
+    format!(
+        "map file not found. BSPs are not committed — fetch it with:\n  \
+         python3 tools/fetch_maps.py {stem}\n(or `--batch tests` for the \
+         test corpus, `--all` for everything)"
+    )
+}
+
+/// Maps offered by the picker: every `.bsp` under `assets/maps`, alphabetical,
+/// with the generated graybox arena last so it is always available even on a
+/// checkout with no maps fetched.
+fn discover_maps() -> Vec<MapEntry> {
+    let mut out: Vec<MapEntry> = std::fs::read_dir(surf_app::assets::maps_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("bsp"))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.to_string();
+            let label = stem.strip_prefix("surf_").unwrap_or(&stem).to_string();
+            Some(MapEntry {
+                label,
+                path: Some(p),
+                pb: None,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out.push(MapEntry {
+        label: "graybox arena".into(),
+        path: None,
+        pb: None,
+    });
+    out
 }
 
 fn parse_args() -> LaunchOpts {
@@ -2307,69 +2514,21 @@ fn parse_args() -> LaunchOpts {
                 std::process::exit(2);
             }
             s => {
-                map_path = Some(PathBuf::from(s));
+                // Bare argument: a map path, or a short name like `summit`.
+                map_path = Some(surf_app::assets::resolve_map_arg(s));
                 i += 1;
             }
         }
     }
 
-    /// BSPs are not in the repo (too large); point the user at the fetcher.
-    fn fetch_hint(path: &std::path::Path) -> String {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("surf_summit");
-        format!(
-            "map file not found. BSPs are not committed — fetch it with:\n  \
-             python3 tools/fetch_maps.py {stem}\n(or `--batch tests` for the \
-             test corpus, `--all` for everything)"
-        )
-    }
-
-    let (level, zones) = if graybox {
-        (Level::Graybox(graybox::surf_ramp_arena()), None)
-    } else if let Some(path) = map_path {
-        println!("Loading map {} …", path.display());
-        let map = LoadedMap::load_path(&path).unwrap_or_else(|e| {
-            eprintln!("failed to load {}: {e}", path.display());
-            if !path.is_file() {
-                eprintln!("{}", fetch_hint(&path));
-            }
-            std::process::exit(1);
-        });
-        print_map_stats(&map);
-        let zones = load_zones_for(&path);
-        (Level::Map(map), zones)
-    } else {
-        let summit = PathBuf::from("assets/maps/surf_summit.bsp");
-        if summit.is_file() {
-            println!("Loading default map {} …", summit.display());
-            match LoadedMap::load_path(&summit) {
-                Ok(map) => {
-                    print_map_stats(&map);
-                    let zones = load_zones_for(&summit);
-                    (Level::Map(map), zones)
-                }
-                Err(e) => {
-                    eprintln!("summit load failed ({e}); falling back to graybox");
-                    (Level::Graybox(graybox::surf_ramp_arena()), None)
-                }
-            }
-        } else {
-            eprintln!("{}", fetch_hint(&summit));
-            eprintln!("falling back to the graybox arena.\n");
-            (Level::Graybox(graybox::surf_ramp_arena()), None)
-        }
-    };
-
     LaunchOpts {
-        level,
-        zones,
-        ghost_path,
+        map_path,
+        graybox,
         window_w,
         window_h,
         perf_secs,
         vsync,
+        ghost_path,
     }
 }
 
@@ -2378,22 +2537,10 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-fn print_map_stats(map: &LoadedMap) {
-    println!(
-        "  brushes={}  tris={}  teleports={}  spawn=({:.0},{:.0},{:.0})",
-        map.world.brushes.len(),
-        map.mesh.tris.len(),
-        map.teleports.len(),
-        map.spawn_origin.x,
-        map.spawn_origin.y,
-        map.spawn_origin.z,
-    );
-}
-
 fn main() {
     let opts = parse_args();
-    let title = opts.level.title();
-    println!("{title}");
+    println!("mx-surf");
+    println!("Assets: {}", surf_app::assets::root().display());
     println!("Click to capture. WASD, Space, R reset, T stage, Esc menu, [ ] sens, - = airaccel.");
     println!(
         "Movevars: aa={} accel={} friction={} tick={:.0}Hz autobhop={} (Momentum surf defaults).",
@@ -2403,9 +2550,6 @@ fn main() {
         1.0 / MoveVars::momentum_surf().tick_interval,
         MoveVars::momentum_surf().autobhop,
     );
-    if opts.zones.is_some() {
-        println!("Timer: leave start zone to begin; touch end to finish. R clears run.");
-    }
     println!(
         "macOS: disable pointer acceleration for fair mouse feel \
          (System Settings → Mouse → Pointer acceleration)."

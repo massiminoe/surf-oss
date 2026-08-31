@@ -145,7 +145,7 @@ pub fn default_settings_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/osx-surf/settings.json")
+    home.join("Library/Application Support/mx-surf/settings.json")
 }
 
 #[cfg(test)]
@@ -159,7 +159,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-settings-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("mx-surf-settings-{stamp}.json"));
         let s = Settings {
             mouse_sens: 7.5,
             show_sync_bar: true,
@@ -205,7 +205,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-settings-old-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("mx-surf-settings-old-{stamp}.json"));
         fs::write(&path, r#"{"mouse_sens":5.0}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
         assert_eq!(loaded.ghost, GHOST_AUTO);
@@ -225,7 +225,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-settings-bad-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("mx-surf-settings-bad-{stamp}.json"));
         fs::write(
             &path,
             r#"{"audio_volume":9.0,"audio_core":-3.0,"audio_air":99.0,"audio_sub":2.5}"#,
@@ -247,7 +247,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-settings-inf-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("mx-surf-settings-inf-{stamp}.json"));
         fs::write(&path, r#"{"audio_volume":1e40,"audio_core":1e40}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
         assert!((loaded.audio_volume - 0.7).abs() < 1e-5);

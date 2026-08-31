@@ -34,7 +34,7 @@ except ImportError:
     SSL_CONTEXT = ssl.create_default_context()
 
 BASE = "https://ksf.surf"
-UA = "osx-surf-research/1.0 (+local-dev; KSF replay acquisition; 1 req/s)"
+UA = "mx-surf-research/1.0 (+local-dev; KSF replay acquisition; 1 req/s)"
 MIN_DELAY_S = 1.0
 MAX_RETRIES = 6
 

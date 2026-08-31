@@ -5,7 +5,7 @@
 //! splits, stage). Loading one puts all of it back, which is why a loaded run
 //! is marked practice by the caller: the clock is real, the run is not.
 //!
-//! Stored per map at `~/Library/Application Support/osx-surf/locs/<map>.json`.
+//! Stored per map at `~/Library/Application Support/mx-surf/locs/<map>.json`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -307,7 +307,7 @@ pub fn locs_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/osx-surf/locs")
+    home.join("Library/Application Support/mx-surf/locs")
 }
 
 pub fn locs_path_for_map(map: &str) -> PathBuf {

@@ -31,7 +31,7 @@ ZONE_CHECKPOINT = 4
 
 
 def fetch(url: str) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "osx-surf-research/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "mx-surf-research/1.0"})
     with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as resp:
         return resp.read().decode("utf-8", "replace")
 

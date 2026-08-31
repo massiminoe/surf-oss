@@ -217,7 +217,7 @@ fn default_db_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/osx-surf/pbs.sqlite")
+    home.join("Library/Application Support/mx-surf/pbs.sqlite")
 }
 
 #[cfg(test)]
@@ -230,7 +230,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-pb-{stamp}.sqlite"));
+        let path = std::env::temp_dir().join(format!("mx-surf-pb-{stamp}.sqlite"));
         let store = PbStore::open_path(&path).expect("open");
         (store, path)
     }

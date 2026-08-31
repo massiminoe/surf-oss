@@ -96,6 +96,18 @@ impl Offscreen {
 
     /// Render one frame and return it as RGBA8 rows, top-left origin.
     pub fn capture(&mut self, eye: Vec3, angles: Angle, view: ViewParams) -> Vec<u8> {
+        self.capture_with_hud(eye, angles, view, None)
+    }
+
+    /// Same, but draws a HUD over the world — the only way to see a menu or a
+    /// shell page without opening a window.
+    pub fn capture_with_hud(
+        &mut self,
+        eye: Vec3,
+        angles: Angle,
+        view: ViewParams,
+        hud: Option<crate::HudState>,
+    ) -> Vec<u8> {
         let mut camera = Camera::new(eye, angles, self.width as f32 / self.height as f32);
         camera.fov_y_deg = 90.0;
         self.renderer.update_frame(&camera, None, None, view);
@@ -103,7 +115,7 @@ impl Offscreen {
         let color_view = self
             .color
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.renderer.encode_frame(&color_view, None, false, false);
+        let mut encoder = self.renderer.encode_frame(&color_view, hud, false, false);
 
         // Copy to a mappable buffer. wgpu requires 256-byte-aligned copy rows.
         let unpadded = self.width * 4;

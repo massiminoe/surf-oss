@@ -531,7 +531,7 @@ fn harvest_trigger_brushes(
     Some((brushes, bounds.unwrap_or(world_bounds)))
 }
 
-/// `OSX_SURF_SPAWN_DEBUG=1` names the entity the picker chose, and every start
+/// `MX_SURF_SPAWN_DEBUG=1` names the entity the picker chose, and every start
 /// volume it recognised — the fastest way to explain a wrong spawn.
 fn pick_gameplay_spawn_debug(
     named: &HashMap<String, NamedEntity>,
@@ -540,7 +540,7 @@ fn pick_gameplay_spawn_debug(
     start_volumes: &[Aabb],
 ) -> Option<NamedPoint> {
     let pick = pick_gameplay_spawn(named, teleport_target_counts, player_spawns, start_volumes);
-    if std::env::var_os("OSX_SURF_SPAWN_DEBUG").is_some() {
+    if std::env::var_os("MX_SURF_SPAWN_DEBUG").is_some() {
         for v in start_volumes {
             println!("SPAWN startvolume {:?}..{:?}", v.mins, v.maxs);
         }

@@ -131,6 +131,8 @@ pub struct Renderer {
     pub camera_buffer: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
     pub materials: GpuMaterials,
+    /// Kept so a map reload can rebuild the skybox, which binds the camera.
+    camera_bind_group_layout: wgpu::BindGroupLayout,
     view_params_buffer: wgpu::Buffer,
     view_params_bind_group: wgpu::BindGroup,
     pub skybox: Option<SkyboxRenderer>,
@@ -314,6 +316,7 @@ impl Renderer {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            camera_bind_group_layout,
             materials,
             view_params_buffer,
             view_params_bind_group,
@@ -324,6 +327,29 @@ impl Renderer {
             ghost,
             trail,
         }
+    }
+
+    /// Swap in a different map. Rebuilds only what is map-specific — mesh,
+    /// material bind group, skybox — leaving the device, pipelines and HUD
+    /// alone. The material bind group is rebuilt against the *existing* layout
+    /// so the world pipeline keeps accepting it.
+    pub fn load_level(
+        &mut self,
+        mesh: &surf_core::graybox::GrayboxMesh,
+        atlas: &MaterialAtlas,
+        lightmaps: &LightmapAtlas,
+        sky: &SkyboxAtlas,
+    ) {
+        self.mesh = GpuMesh::from_graybox(&self.device, mesh);
+        self.materials
+            .reload(&self.device, &self.queue, atlas, lightmaps);
+        self.skybox = crate::skybox::SkyboxRenderer::try_new(
+            &self.device,
+            &self.queue,
+            self.config.format,
+            &self.camera_bind_group_layout,
+            sky,
+        );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

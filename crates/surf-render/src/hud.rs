@@ -192,6 +192,47 @@ pub fn menu_layout(
     }
 }
 
+/// A full-screen shell page: title screen, map picker, or loading. One centred
+/// panel, unlike the pause overlay's side-by-side pair.
+#[derive(Clone, Debug, Default)]
+pub struct ShellHud {
+    pub title: String,
+    pub subtitle: String,
+    /// `(label, value)` rows — value is a PB time, a tag, or empty.
+    pub items: Vec<(String, String)>,
+    pub selected: usize,
+    pub hovered: Option<usize>,
+    pub hint: String,
+    /// Status or error line under the list.
+    pub message: Option<String>,
+    /// Rows are drawn from here; the app scrolls long lists itself so what it
+    /// hit-tests and what is drawn stay the same slice.
+    pub scroll: usize,
+}
+
+/// Most shell rows on screen at once. A longer map list scrolls.
+pub const SHELL_ROWS_VISIBLE: usize = 16;
+
+/// Geometry for a shell page. Pure, like [`menu_layout`], so the app hit-tests
+/// exactly the rows the renderer drew.
+pub fn shell_layout(w: f32, h: f32, rows: usize) -> PanelLayout {
+    let pw = (w * 0.46).clamp(320.0, 560.0);
+    let x = ((w - pw) * 0.5).max(12.0);
+    let row_h = panel_row_h(rows);
+    let y = (h * 0.13).max(36.0);
+    let items_y0 = y + PANEL_TITLE_H + 74.0;
+    let bottom = items_y0 + rows as f32 * row_h + 84.0;
+    PanelLayout {
+        x,
+        y,
+        w: pw,
+        h: (bottom - y).max(200.0),
+        items_y0,
+        row_h,
+        rows,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct HudState {
     /// Horizontal speed u/s.
@@ -228,6 +269,8 @@ pub struct HudState {
     /// Live 2D speed delta vs PB ghost (positive = faster than ghost).
     pub ghost_speed_delta: Option<f32>,
     pub menu: Option<MenuHud>,
+    /// Title screen / map picker / loading page. Takes over the whole frame.
+    pub shell: Option<ShellHud>,
     /// Optional FPS / frame-time / resolution line (bottom-right).
     pub perf_line: Option<String>,
 }
@@ -253,6 +296,7 @@ impl Default for HudState {
             ghost_time_delta: None,
             ghost_speed_delta: None,
             menu: None,
+            shell: None,
             perf_line: None,
         }
     }
@@ -288,6 +332,11 @@ pub struct HudRenderer {
     locs_title_buf: Buffer,
     locs_bufs: Vec<Buffer>,
     locs_hint_buf: Buffer,
+    shell_title_buf: Buffer,
+    shell_sub_buf: Buffer,
+    shell_bufs: Vec<Buffer>,
+    shell_hint_buf: Buffer,
+    shell_msg_buf: Buffer,
     recent_title_buf: Buffer,
     recent_bufs: Vec<Buffer>,
     bar_pipeline: wgpu::RenderPipeline,
@@ -333,6 +382,13 @@ impl HudRenderer {
             .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 22.0)))
             .collect();
         let locs_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
+        let shell_title_buf = Buffer::new(&mut font_system, Metrics::new(38.0, 44.0));
+        let shell_sub_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
+        let shell_bufs: Vec<Buffer> = (0..SHELL_ROWS_VISIBLE)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(18.0, 23.0)))
+            .collect();
+        let shell_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
+        let shell_msg_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
         let recent_title_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 17.0));
         let recent_bufs = (0..6)
             .map(|_| Buffer::new(&mut font_system, Metrics::new(15.0, 20.0)))
@@ -447,6 +503,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             locs_hint_buf,
             menu_bufs,
             menu_hint_buf,
+            shell_title_buf,
+            shell_sub_buf,
+            shell_bufs,
+            shell_hint_buf,
+            shell_msg_buf,
             recent_title_buf,
             recent_bufs,
             bar_pipeline,
@@ -636,6 +697,35 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 attrs,
                 w,
                 20.0,
+            );
+        }
+
+        // Shell page text (title screen / map picker / loading).
+        let shell_open = hud.shell.is_some();
+        let mut shell_item_count = 0usize;
+        if let Some(ref sh) = hud.shell {
+            set_buf_text(&mut self.font_system, &mut self.shell_title_buf, &sh.title, attrs, w, 44.0);
+            set_buf_text(&mut self.font_system, &mut self.shell_sub_buf, &sh.subtitle, attrs, w, 19.0);
+            let start = sh.scroll.min(sh.items.len());
+            let end = (start + self.shell_bufs.len()).min(sh.items.len());
+            shell_item_count = end - start;
+            for i in 0..shell_item_count {
+                let (ref label, ref value) = sh.items[start + i];
+                let line = if value.is_empty() {
+                    label.clone()
+                } else {
+                    format!("{label:<20}{value:>10}")
+                };
+                set_buf_text(&mut self.font_system, &mut self.shell_bufs[i], &line, attrs, w, 23.0);
+            }
+            set_buf_text(&mut self.font_system, &mut self.shell_hint_buf, &sh.hint, attrs, w, 16.0);
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.shell_msg_buf,
+                sh.message.as_deref().unwrap_or(""),
+                attrs,
+                w,
+                19.0,
             );
         }
 
@@ -838,7 +928,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         // Center info box geometry, filled in when it has any rows.
         let mut info_box: Option<(f32, f32, f32, f32)> = None;
 
-        if !menu_open {
+        if !menu_open && !shell_open {
             // Headline speed: large, centered, just above the info box.
             let speed_w = line_width(&self.speed_buf);
             let speed_top = h * 0.40;
@@ -1058,6 +1148,68 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
 
         // Safety: glyphon needs buffers that were set; empty areas ok.
+        // Shell page: title, subtitle, rows, message, hint.
+        let shell_p = shell_layout(w, h, shell_item_count);
+        if let Some(ref sh) = hud.shell {
+            let text_left = shell_p.x + PANEL_PAD_X;
+            areas.push(TextArea {
+                buffer: &self.shell_title_buf,
+                left: text_left,
+                top: shell_p.y + 26.0,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(240, 238, 232),
+                custom_glyphs: &[],
+            });
+            areas.push(TextArea {
+                buffer: &self.shell_sub_buf,
+                left: text_left,
+                top: shell_p.y + 78.0,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(130, 136, 148),
+                custom_glyphs: &[],
+            });
+            for i in 0..shell_item_count {
+                let logical = sh.scroll + i;
+                let color = if logical == sh.selected {
+                    Color::rgb(255, 226, 140)
+                } else {
+                    Color::rgb(198, 202, 210)
+                };
+                areas.push(TextArea {
+                    buffer: &self.shell_bufs[i],
+                    left: text_left + 14.0,
+                    top: shell_p.items_y0 + i as f32 * shell_p.row_h + 4.0,
+                    scale: 1.0,
+                    bounds,
+                    default_color: color,
+                    custom_glyphs: &[],
+                });
+            }
+            let msg_y = shell_p.items_y0 + shell_item_count as f32 * shell_p.row_h + 16.0;
+            if sh.message.is_some() {
+                areas.push(TextArea {
+                    buffer: &self.shell_msg_buf,
+                    left: text_left,
+                    top: msg_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: Color::rgb(232, 138, 116),
+                    custom_glyphs: &[],
+                });
+            }
+            areas.push(TextArea {
+                buffer: &self.shell_hint_buf,
+                left: text_left,
+                top: msg_y + 26.0,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(118, 124, 136),
+                custom_glyphs: &[],
+            });
+        }
+
         let _ = self.text_renderer.prepare(
             device,
             queue,
@@ -1069,7 +1221,32 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         );
 
         let mut verts: Vec<HudVert> = Vec::new();
-        if menu_open {
+        if let Some(ref sh) = hud.shell {
+            // Near-opaque over the live world behind it: the world reads as a
+            // backdrop, not as something you could still be playing.
+            push_rect_ndc(&mut verts, -1.0, -1.0, 2.0, 2.0, [0.03, 0.035, 0.045, 0.90]);
+            push_rect_px(&mut verts, shell_p.x, shell_p.y, shell_p.w, shell_p.h, w, h, [0.09, 0.095, 0.12, 0.95]);
+            push_rect_px(&mut verts, shell_p.x, shell_p.y, shell_p.w, 2.0, w, h, [0.95, 0.78, 0.32, 0.95]);
+            if let Some(hov) = sh.hovered {
+                if hov >= sh.scroll && hov - sh.scroll < shell_item_count && hov != sh.selected {
+                    push_rect_px(
+                        &mut verts,
+                        shell_p.x + 10.0,
+                        shell_p.items_y0 + (hov - sh.scroll) as f32 * shell_p.row_h,
+                        shell_p.w - 20.0,
+                        shell_p.row_h,
+                        w,
+                        h,
+                        [1.0, 1.0, 1.0, 0.05],
+                    );
+                }
+            }
+            if sh.selected >= sh.scroll && sh.selected - sh.scroll < shell_item_count {
+                let sel_y = shell_p.items_y0 + (sh.selected - sh.scroll) as f32 * shell_p.row_h;
+                push_rect_px(&mut verts, shell_p.x + 10.0, sel_y, shell_p.w - 20.0, shell_p.row_h, w, h, [1.0, 0.88, 0.40, 0.10]);
+                push_rect_px(&mut verts, shell_p.x + 10.0, sel_y + 5.0, 3.0, shell_p.row_h - 10.0, w, h, [1.0, 0.86, 0.35, 0.95]);
+            }
+        } else if menu_open {
             if let Some(ref menu) = hud.menu {
                 // Soft full-screen dim.
                 push_rect_ndc(&mut verts, -1.0, -1.0, 2.0, 2.0, [0.02, 0.02, 0.04, 0.62]);

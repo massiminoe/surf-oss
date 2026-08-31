@@ -11,7 +11,8 @@ mod trail;
 
 pub use camera::Camera;
 pub use ghost::GhostPose;
-pub use hud::{menu_layout, MenuLayout, MenuPanel, PanelLayout};
+pub use hud::{menu_layout, shell_layout, MenuLayout, MenuPanel, PanelLayout};
+pub use hud::{ShellHud, SHELL_ROWS_VISIBLE};
 pub use hud::{HudRenderer, HudState, HudTimerPhase, MenuHud, MenuRecentEntry, ShowKeysState};
 pub use mesh::{GpuMaterials, GpuMesh, MeshVertex};
 pub use offscreen::{render_to_png, Offscreen};

@@ -1,4 +1,4 @@
-//! Procedural game audio for osx-surf. No samples, no audio assets.
+//! Procedural game audio for mx-surf. No samples, no audio assets.
 //!
 //! Two design rules drive everything here:
 //!

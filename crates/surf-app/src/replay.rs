@@ -1,4 +1,4 @@
-//! Native osx-surf replay format (`.osxr`).
+//! Native mx-surf replay format (`.osxr`).
 //!
 //! Binary layout (little-endian):
 //! ```text
@@ -592,7 +592,7 @@ pub struct GhostOption {
 
 /// KSF imported ghosts live under `assets/replays/external/ksf/<map>/imported/`.
 pub fn ksf_imported_dir(map: &str) -> PathBuf {
-    PathBuf::from("assets/replays/external/ksf")
+    crate::assets::ksf_dir()
         .join(map)
         .join("imported")
 }
@@ -753,7 +753,7 @@ struct KsfManifestMeta {
 }
 
 fn load_ksf_manifest_labels(map: &str) -> std::collections::HashMap<String, KsfManifestMeta> {
-    let path = PathBuf::from("assets/replays/external/ksf")
+    let path = crate::assets::ksf_dir()
         .join(map)
         .join("manifest.json");
     let Ok(text) = fs::read_to_string(&path) else {
@@ -804,7 +804,7 @@ fn format_secs(secs: f32) -> String {
     }
 }
 
-/// `~/Library/Application Support/osx-surf/replays/<map>/<track>/<style>/`
+/// `~/Library/Application Support/mx-surf/replays/<map>/<track>/<style>/`
 pub fn replay_dir(map: &str) -> PathBuf {
     app_support_dir()
         .join("replays")
@@ -827,7 +827,7 @@ fn app_support_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/osx-surf")
+    home.join("Library/Application Support/mx-surf")
 }
 
 fn unix_now() -> i64 {
@@ -928,7 +928,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("osx-surf-replay-{stamp}.osxr"));
+        let path = std::env::temp_dir().join(format!("mx-surf-replay-{stamp}.osxr"));
         let replay = Replay {
             header: ReplayHeader {
                 format_version: REPLAY_FORMAT_VERSION,

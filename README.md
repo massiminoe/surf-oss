@@ -1,4 +1,4 @@
-# osx-surf
+# mx-surf
 
 A macOS-native, single-player recreation of Counter-Strike's **surf** gamemode:
 Source-engine-faithful movement physics (surf + bunnyhop), real community surf map
@@ -40,7 +40,7 @@ missing, so absent assets can't quietly hide a regression behind a green run.
 
 **Optional — stock CS:S/HL2 textures.** Most corpus maps embed their custom
 assets in the BSP pakfile and render standalone. Faces using Valve *stock*
-materials need a real game install: set `OSX_SURF_GAME_DIR` to it. This is the
+materials need a real game install: set `MX_SURF_GAME_DIR` to it. This is the
 only part that requires owning Counter-Strike: Source.
 
 ### Feel-check controls

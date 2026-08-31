@@ -2,7 +2,7 @@
 //!
 //! Collision uses world-model (model 0) brushes matching MASK_PLAYERSOLID
 //! (including PLAYERCLIP). Trigger bmodels are never world-solid.
-//! Materials: pakfile VMT/VTF, optional local CS:S stock (`OSX_SURF_GAME_DIR`).
+//! Materials: pakfile VMT/VTF, optional local CS:S stock (`MX_SURF_GAME_DIR`).
 
 mod collision;
 mod disp;
@@ -248,7 +248,7 @@ impl LoadedMap {
     /// apart: continuous `trigger_push`, `trigger_gravity`, and the `AddOutput`
     /// boosters and launch pads driven by `FieldState`.
     ///
-    /// `OSX_SURF_NO_FIELDS=1` disables the `AddOutput` half for A/B runs.
+    /// `MX_SURF_NO_FIELDS=1` disables the `AddOutput` half for A/B runs.
     pub fn apply_fields(&self, player: &mut PlayerState, state: &mut FieldState, dt: f32) {
         let eff = self.field_effects(player.origin, state);
         surf_core::apply_base_velocity_momentum(&mut player.velocity, eff.released, dt);
@@ -350,10 +350,10 @@ fn unstick(world: &World, origin: Vec3) -> Vec3 {
     origin
 }
 
-/// `OSX_SURF_NO_FIELDS=1` — run without the map's `AddOutput` boosters, for
+/// `MX_SURF_NO_FIELDS=1` — run without the map's `AddOutput` boosters, for
 /// A/B against recordings made before they existed.
 fn no_fields() -> bool {
-    std::env::var_os("OSX_SURF_NO_FIELDS").is_some()
+    std::env::var_os("MX_SURF_NO_FIELDS").is_some()
 }
 
 /// True when the AABB is not entirely outside any brush plane (intersects or inside).

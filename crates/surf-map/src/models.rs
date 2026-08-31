@@ -106,9 +106,9 @@ struct LocalTri {
 /// it touches is in that area, so anything straddling the boundary is kept.
 pub fn skybox_prop_mask(bsp: &Bsp, leaf_areas: &[u16], sky_area: Option<u16>) -> Vec<bool> {
     let props = &bsp.static_props.props.props;
-    // A/B escape hatch, matching OSX_SURF_NO_PHY: proves a change in the world
+    // A/B escape hatch, matching MX_SURF_NO_PHY: proves a change in the world
     // came from this and not from something else that moved at the same time.
-    if std::env::var_os("OSX_SURF_NO_SKYBOX_CULL").is_some() {
+    if std::env::var_os("MX_SURF_NO_SKYBOX_CULL").is_some() {
         return vec![false; props.len()];
     }
     let Some(sky_area) = sky_area else {
@@ -129,7 +129,7 @@ pub fn skybox_prop_mask(bsp: &Bsp, leaf_areas: &[u16], sky_area: Option<u16>) ->
                     .all(|&leaf| leaf_areas.get(leaf as usize).copied() == Some(sky_area))
         })
         .collect();
-    if std::env::var_os("OSX_SURF_PROP_DEBUG").is_some() {
+    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
         let mut solid = 0;
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for (i, prop) in props.iter().enumerate() {
@@ -240,10 +240,10 @@ pub fn extract_prop_collision(
     let mut cache: HashMap<u16, Option<PropCollision>> = HashMap::new();
     let mut out = Vec::new();
     let mut census: Vec<PropInstance> = Vec::new();
-    // OSX_SURF_PROP_DEBUG=1 reports, per model, how much of its render mesh
+    // MX_SURF_PROP_DEBUG=1 reports, per model, how much of its render mesh
     // survives the upward-facing filter — the filter that decides whether an
     // MDL ramp is a surface or a set of holes.
-    let debug = std::env::var_os("OSX_SURF_PROP_DEBUG").is_some();
+    let debug = std::env::var_os("MX_SURF_PROP_DEBUG").is_some();
     let mut stats: HashMap<String, (usize, usize, usize, f32, bool)> = HashMap::new();
 
     for (prop_index, prop) in bsp.static_props.props.props.iter().enumerate() {
@@ -426,12 +426,12 @@ fn collide_prop(name: &str) -> bool {
 /// Render every prop we can decode. Skipping non-ramps left maps looking like
 /// bare terrain (boreas: 1587 props, all invisible).
 ///
-/// `OSX_SURF_HIDE_PROPS` takes a comma-separated list of path substrings and
+/// `MX_SURF_HIDE_PROPS` takes a comma-separated list of path substrings and
 /// drops those from the draw mesh only — collision is untouched. It exists so a
 /// "is that thing supposed to be there?" question can be answered by rendering
 /// the same view twice, which is cheaper than arguing about a screenshot.
 fn render_prop(name: &str) -> bool {
-    let Some(hide) = std::env::var_os("OSX_SURF_HIDE_PROPS") else {
+    let Some(hide) = std::env::var_os("MX_SURF_HIDE_PROPS") else {
         return true;
     };
     let hide = hide.to_string_lossy().to_ascii_lowercase();
@@ -454,11 +454,11 @@ struct PropCollision {
 fn decode_prop_collision(materials: &mut MaterialBank, model_path: &str) -> Option<PropCollision> {
     let normalized = normalize_path(model_path);
     // A/B escape hatch while the .phy path is being evaluated.
-    let allow_phy = std::env::var_os("OSX_SURF_NO_PHY").is_none();
+    let allow_phy = std::env::var_os("MX_SURF_NO_PHY").is_none();
     if let Some(stem) = normalized.strip_suffix(".mdl").filter(|_| allow_phy) {
         if let Some(bytes) = materials.get_bytes(&format!("{stem}.phy")) {
             if let Some(tris) = crate::phy::decode_collision(&bytes) {
-                if std::env::var_os("OSX_SURF_PROP_DEBUG").is_some() {
+                if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
                     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
                     for t in &tris {
                         for p in t {
@@ -524,7 +524,7 @@ fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<Vec<Lo
             });
         }
     }
-    if std::env::var_os("OSX_SURF_PROP_DEBUG").is_some() {
+    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for t in &out {
             for p in &t.positions {
