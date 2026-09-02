@@ -23,7 +23,30 @@ fn mask_playersolid() -> BrushFlags {
 
 pub struct DispExtract {
     pub collision: Vec<CollisionTri>,
+    /// For each collision tri, the index of the `ddispinfo_t` it came from.
+    pub owner: Vec<u32>,
+    /// Per displacement (BSP order): Hammer's displacement flags. vbsp stores
+    /// them in `minTess` with the high bit set ("If the high bit is set - this
+    /// is FLAGS!"); the low bits are `CCoreDispInfo`'s surface flags.
+    pub flags: Vec<u32>,
     pub render: Vec<Tri>,
+}
+
+/// Hammer "No Physics Collision": VPhysics objects ignore the surface.
+pub const DISP_NOPHYSICS_COLL: u32 = 0x2;
+/// Hammer "No Hull Collision": player / NPC hull traces ignore the surface.
+pub const DISP_NOHULL_COLL: u32 = 0x4;
+/// Hammer "No Ray Collision": bullets and line traces ignore the surface.
+pub const DISP_NORAY_COLL: u32 = 0x8;
+
+/// The displacement's flag bits, or 0 when `minTess` is a real tessellation value.
+pub fn disp_flags(disp: &vbsp::DisplacementInfo) -> u32 {
+    let raw = disp.minimum_tesselation as u32;
+    if raw & 0x8000_0000 != 0 {
+        raw & 0x7fff_ffff
+    } else {
+        0
+    }
 }
 
 pub fn extract_displacements(
@@ -32,14 +55,20 @@ pub fn extract_displacements(
     lightmaps: &mut LightmapBaker,
 ) -> DispExtract {
     let mut collision = Vec::new();
+    let mut owner = Vec::new();
     let mut render = Vec::new();
     let mask = mask_playersolid();
+    let flags: Vec<u32> = bsp.displacements.iter().map(disp_flags).collect();
 
-    for disp in &bsp.displacements {
-        let flags = BrushFlags::from_bits_truncate(disp.contents as u32);
-        if !flags.intersects(mask) {
+    for (disp_idx, disp) in bsp.displacements.iter().enumerate() {
+        let contents = BrushFlags::from_bits_truncate(disp.contents as u32);
+        if !contents.intersects(mask) {
             continue;
         }
+        // Hammer's "No Hull Collision": Source's `CM_TraceToDispTree` skips
+        // the displacement for every hull (non-ray) trace, which is what the
+        // player is. It is still drawn.
+        let hull_solid = flags[disp_idx] & DISP_NOHULL_COLL == 0 || ignore_nohull();
         let handle = Handle::new(bsp, disp);
         let Some(face_h) = handle.face() else {
             continue;
@@ -79,42 +108,62 @@ pub fn extract_displacements(
                 let v10 = verts[index(x + 1, y)];
                 let v01 = verts[index(x, y + 1)];
                 let v11 = verts[index(x + 1, y + 1)];
-                push_tri(
-                    &mut collision,
-                    &mut render,
-                    bsp,
-                    face_idx,
-                    face_ref,
-                    lightmaps,
-                    v00,
-                    v10,
-                    v01,
-                    color,
-                    tex_layer,
-                    tex_h.as_ref(),
-                );
-                push_tri(
-                    &mut collision,
-                    &mut render,
-                    bsp,
-                    face_idx,
-                    face_ref,
-                    lightmaps,
-                    v10,
-                    v11,
-                    v01,
-                    color,
-                    tex_layer,
-                    tex_h.as_ref(),
-                );
+                // Source splits each quad on a checkerboard
+                // (`CCoreDispInfo::GenerateCollisionSurface`): an odd
+                // `row*width + col` — i.e. odd x+y, width being odd — runs the
+                // diagonal from (x+1,y) to (x,y+1), an even one from (x,y) to
+                // (x+1,y+1). Its collision tree is built from those same
+                // triangles, so on a lumpy rock face the wrong diagonal moves
+                // the surface by tens of units mid-cell.
+                let anti = (x + y) % 2 == 1 || single_diagonal();
+                let (t1, t2) = if anti {
+                    ([v00, v10, v01], [v10, v11, v01])
+                } else {
+                    ([v00, v11, v01], [v00, v10, v11])
+                };
+                for [a, b, c] in [t1, t2] {
+                    push_tri(
+                        hull_solid,
+                        &mut collision,
+                        &mut owner,
+                        disp_idx as u32,
+                        &mut render,
+                        bsp,
+                        face_idx,
+                        face_ref,
+                        lightmaps,
+                        a,
+                        b,
+                        c,
+                        color,
+                        tex_layer,
+                        tex_h.as_ref(),
+                    );
+                }
             }
         }
     }
 
     DispExtract {
         collision,
+        owner,
+        flags,
         render,
     }
+}
+
+/// A/B lever: `MX_SURF_DISP_IGNORE_NOHULL=1` collides with displacements the
+/// mapper flagged "No Hull Collision", as the loader did before 2026-09-02.
+fn ignore_nohull() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MX_SURF_DISP_IGNORE_NOHULL").is_some())
+}
+
+/// A/B lever: `MX_SURF_DISP_SINGLE_DIAGONAL=1` restores the pre-2026-09-02
+/// triangulation (every quad split on the same diagonal).
+fn single_diagonal() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var_os("MX_SURF_DISP_SINGLE_DIAGONAL").is_some())
 }
 
 /// Match vbsp's subdivided_face + displacement offset (see Handle displacement).
@@ -178,7 +227,10 @@ fn displaced_grid(
 }
 
 fn push_tri(
+    hull_solid: bool,
     collision: &mut Vec<CollisionTri>,
+    owner: &mut Vec<u32>,
+    disp_idx: u32,
     render: &mut Vec<Tri>,
     bsp: &Bsp,
     face_idx: usize,
@@ -191,8 +243,13 @@ fn push_tri(
     tex: u32,
     tex_h: Option<&Handle<'_, vbsp::TextureInfo>>,
 ) {
-    let Some(col) = CollisionTri::from_points(a, b, c, TRI_THICKNESS) else {
-        return;
+    let col = if hull_solid {
+        let Some(col) = CollisionTri::from_points(a, b, c, TRI_THICKNESS) else {
+            return;
+        };
+        Some(col)
+    } else {
+        None
     };
     let pa = Vector {
         x: a.x,
@@ -219,8 +276,8 @@ fn push_tri(
     let lm_c = lightmaps.lm_uv(bsp, face_idx, face, pc);
     let mut col_rgb = color;
     if tex == 0 {
-        let n = col.planes[0].normal;
-        let flat = n.z.clamp(0.0, 1.0);
+        let n = (b - a).cross(c - a);
+        let flat = (n.z / n.length().max(1e-6)).clamp(0.0, 1.0);
         col_rgb = [
             0.35 + 0.15 * (1.0 - flat),
             0.40 + 0.25 * flat,
@@ -240,7 +297,10 @@ fn push_tri(
         lm_c,
         tex,
     });
-    collision.push(col);
+    if let Some(col) = col {
+        collision.push(col);
+        owner.push(disp_idx);
+    }
 }
 
 fn face_color_fallback(name: &str) -> [f32; 3] {

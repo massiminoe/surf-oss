@@ -5,7 +5,7 @@
 //! Materials: pakfile VMT/VTF, optional local CS:S stock (`MX_SURF_GAME_DIR`).
 
 mod collision;
-mod disp;
+pub mod disp;
 mod entities;
 pub mod fields;
 mod leaves;
@@ -81,6 +81,11 @@ pub struct LoadedMap {
     /// before it is displacement. Lets tools attribute a snag to the right
     /// source — prop tris come from a render mesh, displacement tris do not.
     pub prop_tri_start: usize,
+    /// For each displacement collision tri (`world.tris[..prop_tri_start]`),
+    /// the index of the displacement it came from, so a hit can be attributed.
+    pub disp_tri_owner: Vec<u32>,
+    /// Per displacement (BSP order): Hammer's collision flags, see `disp::DISP_*`.
+    pub disp_flags: Vec<u32>,
     /// Every static prop placed in the map, with the slice of prop collision it
     /// owns. Lets tools answer "what did I just hit?" with a model name.
     pub props: Vec<models::PropInstance>,
@@ -132,6 +137,8 @@ impl LoadedMap {
         let mut lightmaps = lightmap::LightmapBaker::from_bsp_bytes(data);
         let disps = disp::extract_displacements(&bsp, &mut materials, &mut lightmaps);
         let mut coll_tris = disps.collision;
+        let disp_tri_owner = disps.owner;
+        let disp_flags = disps.flags;
         let prop_tri_start = coll_tris.len();
         // The map's own area partition tells us which props are 3D-skybox
         // backdrop; those are neither drawn nor collided.
@@ -177,6 +184,8 @@ impl LoadedMap {
             gravities: ents.gravities,
             fields: ents.fields,
             prop_tri_start,
+            disp_tri_owner,
+            disp_flags,
             props,
             kill_z: world_bounds.mins.z - 256.0,
             world_bounds,
