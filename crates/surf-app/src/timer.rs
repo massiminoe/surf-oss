@@ -172,6 +172,21 @@ impl RunTimer {
             .collect();
     }
 
+    /// Does a soft respawn that landed the player `in_start` end the attempt?
+    ///
+    /// Fail teleports and kill-z respawns are one mechanism serving two very
+    /// different situations. On a **staged** track, being put back at a stage
+    /// start mid-run is normal and the clock must keep going. On a **linear**
+    /// track it means you wiped: the run is dead, and keeping the clock alive
+    /// only means the player has to press R before every retry.
+    ///
+    /// The test is deliberately narrow — the respawn has to land *inside the
+    /// start zone* — so a mid-course teleport that is part of the intended
+    /// route is untouched.
+    pub fn wipe_ends_run(&self, in_start: bool) -> bool {
+        self.track_type != TrackType::Staged && in_start
+    }
+
     /// Fail teleport / kill-z snapped the player (possibly into a stage start).
     /// Soft-respawn keeps the clock; do not treat this as voluntary start re-entry.
     pub fn notify_soft_respawn(&mut self) {
@@ -464,6 +479,77 @@ mod tests {
         let frozen = timer.time_secs;
         timer.tick(&zones, &mut p, dt, &[]);
         assert_eq!(timer.time_secs, frozen);
+    }
+
+    /// A wipe on a linear map ends the attempt, and the very next tick re-arms
+    /// so you can just go again. Before this, the clock survived a fail
+    /// teleport and every retry needed a manual R.
+    #[test]
+    fn a_wipe_back_into_the_start_zone_ends_a_linear_run_and_rearms() {
+        let zones = sample_zones();
+        let mut timer = RunTimer::new(TrackType::Linear);
+        let dt = 0.015;
+
+        let mut p = player_at(50.0, 0.0, true);
+        timer.tick(&zones, &mut p, dt, &[]);
+        p = player_at(150.0, 0.0, false);
+        for _ in 0..40 {
+            timer.tick(&zones, &mut p, dt, &[]);
+        }
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert!(timer.time_secs > 0.5);
+
+        // The map yanks us back to the start platform, as a fail teleport does.
+        p = player_at(50.0, 0.0, true);
+        let in_start = zones.main.start.contains_player(p.origin, p.hull());
+        assert!(in_start, "test fixture: respawn must land in the start box");
+
+        // Control — the old behaviour, which is what made R mandatory: treat the
+        // wipe as a soft respawn and the clock sails straight past it.
+        {
+            let mut old = timer.clone();
+            let mut q = p.clone();
+            old.notify_soft_respawn();
+            old.tick(&zones, &mut q, dt, &[]);
+            assert_eq!(old.phase, TimerPhase::Running);
+            assert!(old.time_secs > 0.5, "old path kept the clock, as expected");
+        }
+
+        assert!(
+            timer.wipe_ends_run(in_start),
+            "a linear wipe must end the run"
+        );
+        timer.reset();
+
+        timer.tick(&zones, &mut p, dt, &[]);
+        assert_eq!(timer.phase, TimerPhase::Armed, "should re-arm immediately");
+        assert_eq!(
+            timer.display_time(),
+            Some(0.0),
+            "clock must be back to zero"
+        );
+        assert!(timer.splits.is_empty());
+    }
+
+    /// The same mechanism on a staged map must NOT end the run — being put back
+    /// at a stage start mid-run is how staged maps work.
+    #[test]
+    fn a_staged_respawn_into_the_start_zone_keeps_the_run() {
+        let mut timer = RunTimer::new(TrackType::Staged);
+        assert!(!timer.wipe_ends_run(true));
+        timer.phase = TimerPhase::Running;
+        timer.time_secs = 12.0;
+        timer.notify_soft_respawn();
+        assert_eq!(timer.phase, TimerPhase::Running);
+        assert_eq!(timer.time_secs, 12.0);
+    }
+
+    /// A teleport that lands somewhere other than the start box is part of the
+    /// route, not a wipe.
+    #[test]
+    fn a_mid_course_teleport_does_not_end_a_linear_run() {
+        let timer = RunTimer::new(TrackType::Linear);
+        assert!(!timer.wipe_ends_run(false));
     }
 
     #[test]

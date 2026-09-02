@@ -592,9 +592,7 @@ pub struct GhostOption {
 
 /// KSF imported ghosts live under `assets/replays/external/ksf/<map>/imported/`.
 pub fn ksf_imported_dir(map: &str) -> PathBuf {
-    crate::assets::ksf_dir()
-        .join(map)
-        .join("imported")
+    crate::assets::ksf_dir().join(map).join("imported")
 }
 
 /// Build Off / Auto / PB / KSF-imported options for `map`. Includes `current_id`
@@ -745,43 +743,29 @@ pub fn path_to_ghost_id(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// Ghost labels come from the same manifest the leaderboard reads, so a
+/// record's rank/name/time can never disagree between the two screens.
+fn load_ksf_manifest_labels(map: &str) -> std::collections::HashMap<String, KsfManifestMeta> {
+    crate::leaderboard::ksf_records(map)
+        .into_iter()
+        .map(|r| {
+            (
+                r.file_stem,
+                KsfManifestMeta {
+                    rank: r.rank,
+                    name: r.name,
+                    time: r.time,
+                },
+            )
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 struct KsfManifestMeta {
     rank: u32,
     name: String,
     time: f32,
-}
-
-fn load_ksf_manifest_labels(map: &str) -> std::collections::HashMap<String, KsfManifestMeta> {
-    let path = crate::assets::ksf_dir()
-        .join(map)
-        .join("manifest.json");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return std::collections::HashMap::new();
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return std::collections::HashMap::new();
-    };
-    let mut out = std::collections::HashMap::new();
-    let Some(records) = v.get("records").and_then(|r| r.as_array()) else {
-        return out;
-    };
-    for rec in records {
-        let file = rec.get("file").and_then(|f| f.as_str()).unwrap_or_default();
-        let stem = file.trim_end_matches(".rec");
-        if stem.is_empty() {
-            continue;
-        }
-        let rank = rec.get("rank").and_then(|r| r.as_u64()).unwrap_or(999) as u32;
-        let name = rec
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("?")
-            .to_string();
-        let time = rec.get("time").and_then(|t| t.as_f64()).unwrap_or(0.0) as f32;
-        out.insert(stem.to_string(), KsfManifestMeta { rank, name, time });
-    }
-    out
 }
 
 fn truncate_name(name: &str, max_chars: usize) -> String {

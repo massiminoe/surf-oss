@@ -1,5 +1,6 @@
 //! wgpu renderer: textured static mesh + HUD + PB ghost.
 
+mod backdrop;
 mod camera;
 mod ghost;
 mod hud;
@@ -11,9 +12,9 @@ mod trail;
 
 pub use camera::Camera;
 pub use ghost::GhostPose;
-pub use hud::{menu_layout, shell_layout, MenuLayout, MenuPanel, PanelLayout};
-pub use hud::{ShellHud, SHELL_ROWS_VISIBLE};
-pub use hud::{HudRenderer, HudState, HudTimerPhase, MenuHud, MenuRecentEntry, ShowKeysState};
+pub use hud::{format_hud_time, layout_for, page_layout, PageLayout, PageSpec, PanelLayout, Rect};
+pub use hud::{HudRenderer, HudState, HudTimerPhase, ShowKeysState};
+pub use hud::{MenuPage, MenuPanel, MenuRow, RowKind, RowTone, PANEL_ROWS_MAX};
 pub use mesh::{GpuMaterials, GpuMesh, MeshVertex};
 pub use offscreen::{render_to_png, Offscreen};
 pub use pipeline::{Renderer, ViewParams};

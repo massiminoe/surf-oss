@@ -2,7 +2,9 @@
 
 pub mod assets;
 pub mod ksf_replay;
+pub mod leaderboard;
 pub mod locs;
+pub mod menu;
 pub mod pb;
 pub mod replay;
 pub mod resim;

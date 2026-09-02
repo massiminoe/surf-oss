@@ -1,4 +1,4 @@
-//! mx-surf app: graybox (M0), real BSP (M1), timer/zones (M2).
+//! mx-surf app: graybox (M0), real BSP (M1), timer/zones (M2), menus.
 //!
 //! Usage:
 //!   cargo run -p surf-app --release
@@ -8,23 +8,26 @@
 //!   cargo run -p surf-app --release -- --perf-secs 8 --size 2560x1440
 //!   cargo run -p surf-app --release -- --no-vsync
 //!
-//! Controls: WASD move, mouse look, Space jump (autobhop), Ctrl duck, R full reset,
-//! T stage reset (staged maps), Esc menu/pause (ghost picker + trail toggle),
-//! [ ] sens, - = airaccel.
+//! Controls: WASD move, mouse look, Space jump (autobhop), Ctrl duck, R full
+//! reset, T stage reset (staged maps), Esc pause menu, [ ] sens, - = airaccel.
+//!
 //! Practice locs: Mouse2 saveloc (pose + velocity + clock), Mouse1 loadloc
 //! (selected loc, newest by default). A loaded run keeps timing but is marked
-//! PRACTICE — no PB, no replay. Loc binds are inert while the menu is open or
-//! the mouse is uncaptured.
-//! P toggles **practice mode** (off at launch): loadloc only works while it is
-//! on, so a stray Mouse1 can't yank you out of a real run. Saveloc always works.
-//! Esc shows two panels side by side — settings and LOCS (practice toggle, the
-//! numbered loc list, Load, Clear all). Both are mouse-driven: click selects a
-//! row and flips toggles, wheel adjusts the hovered setting or steps the list,
-//! right-click deletes a loc, clicking outside resumes. Tab moves keyboard
-//! focus between panels; ↑↓ / ←→ / Enter / X drive the focused one.
-//! Readability (brightness / edges) and audio (volume, core/air/sub levels,
-//! wipe style) in Esc. Perf line logs to stdout once per second;
-//! `--perf-secs N` exits after N.
+//! PRACTICE — no PB, no replay. Loc binds are inert while a menu is open or the
+//! mouse is uncaptured. P toggles **practice mode** (off at launch): loadloc
+//! only works while it is on, so a stray Mouse1 can't yank you out of a real
+//! run. Saveloc always works.
+//!
+//! Menus: one page model everywhere (`surf_render::MenuPage`). The shell is
+//! Main menu → Play / Leaderboard / Settings, and Esc in a map opens a pause
+//! page with **sections** (Settings · Locs · Times) plus a permanent action bar
+//! — Resume, Restart, Maps, Main menu, Quit. Every page is fully mouse-driven:
+//! click a row or tab, drag a slider, wheel to adjust the hovered setting or
+//! step the list, right-click to go back (or to delete a loc). Tab moves
+//! keyboard focus between the list and the action bar; ↑↓ / ←→ / Enter drive
+//! whichever has it.
+//!
+//! Perf line logs to stdout once per second; `--perf-secs N` exits after N.
 //!
 //! macOS note: NSEvent mouse deltas are OS-accelerated. For fair feel, disable
 //! pointer acceleration (System Settings → Mouse → Pointer acceleration off),
@@ -35,7 +38,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use surf_app::leaderboard::{self, MapStanding};
 use surf_app::locs::{self, Loc, GRAYBOX_MAP};
+use surf_app::menu::{
+    slider_range, ButtonAction, Focus, Nav, PageId, PauseTab, RowAction, Setting, SettingsEntry,
+    LOC_ROW_PRACTICE, SETTINGS_PAGE,
+};
 use surf_app::pb::PbStore;
 use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay};
 use surf_app::session::{load_level, Level, Session};
@@ -43,16 +51,14 @@ use surf_app::settings::{Settings, GHOST_AUTO, GHOST_OFF, GHOST_PB};
 use surf_app::timer::{format_split_line, format_time, TimerPhase};
 use surf_app::zones::{MapZones, TrackType};
 use surf_audio::{
-    AudioEngine, AudioEvent, Levels as AudioLevels, Observation,
-    Params as AudioParams, WipeStyle,
+    AudioEngine, AudioEvent, Levels as AudioLevels, Observation, Params as AudioParams, WipeStyle,
 };
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
 use surf_core::{air_strafe_sync, is_on_surf_ramp, tick};
 use surf_render::{
-    Camera, GhostPose, GpuMesh, HudState, HudTimerPhase, MenuHud, MenuLayout, MenuPanel,
-    MenuRecentEntry, Renderer, ShellHud, ShowKeysState, TrailPoint, ViewParams,
-    SHELL_ROWS_VISIBLE,
+    Camera, GhostPose, GpuMesh, HudState, HudTimerPhase, MenuPage, MenuPanel, MenuRow, PageLayout,
+    Renderer, RowKind, RowTone, ShowKeysState, TrailPoint, ViewParams,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -64,45 +70,6 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 /// Source m_yaw / m_pitch defaults.
 const MOUSE_YAW_SCALE: f32 = 0.022;
 const MOUSE_PITCH_SCALE: f32 = 0.022;
-
-/// Adjustable / action menu rows (not counting read-only recent footer).
-/// Must stay <= the renderer's `menu_bufs` pool or extra rows vanish.
-const MENU_ITEM_COUNT: usize = 19;
-const MENU_SENS: usize = 0;
-const MENU_BRIGHTNESS: usize = 1;
-const MENU_SHADOW_LIFT: usize = 2;
-const MENU_SLOPE_TINT: usize = 3;
-const MENU_EDGE_HIGHLIGHT: usize = 4;
-const MENU_GHOST: usize = 5;
-const MENU_GHOST_TRAIL: usize = 6;
-const MENU_SYNC: usize = 7;
-const MENU_KEYS: usize = 8;
-const MENU_VSYNC: usize = 9;
-const MENU_AA: usize = 10;
-const MENU_AUDIO: usize = 11;
-const MENU_AUDIO_VOLUME: usize = 12;
-const MENU_AUDIO_CORE: usize = 13;
-const MENU_AUDIO_AIR: usize = 14;
-const MENU_AUDIO_SUB: usize = 15;
-const MENU_WIPE: usize = 16;
-const MENU_MAPS: usize = 17;
-const MENU_QUIT: usize = 18;
-
-/// Which panel owns the keyboard. Both are always drawn; clicking a panel or
-/// pressing Tab moves focus.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MenuFocus {
-    Settings,
-    Locs,
-}
-
-/// Locs panel rows: practice-mode toggle, then one row per loc, then the
-/// load and clear-all actions. Loc rows are `1..=n`, so the trailing two are
-/// derived from the list length.
-const LOC_ROW_PRACTICE: usize = 0;
-
-/// Most loc rows on screen at once; longer lists scroll around the selection.
-const LOC_ROWS_VISIBLE: usize = 14;
 
 /// Rolling frame-time samples for FPS / 1% low display.
 const FRAME_STAT_SAMPLES: usize = 180;
@@ -241,13 +208,16 @@ fn pct1_low_fps(dts: &[f32]) -> f32 {
 const PB_FLASH_SECS: f32 = 2.0;
 const SPLIT_FLASH_SECS: f32 = 2.5;
 
-
 /// One row of the map picker.
 struct MapEntry {
     label: String,
+    /// Map name as stored (`surf_summit`); the graybox arena uses its own key.
+    name: String,
     /// `None` = the generated graybox arena.
     path: Option<PathBuf>,
     pb: Option<f32>,
+    /// Imported KSF world record, when we have ghosts for the map.
+    wr: Option<f32>,
 }
 
 /// What the app is showing. A [`Session`] always exists underneath — the menus
@@ -264,7 +234,11 @@ enum Mode {
         name: String,
         started: Instant,
     },
-    /// In the world. `menu_open` layers the Esc pause panels over this.
+    /// Leaderboard: the map list, or one map's records.
+    Leaderboard { map: Option<String> },
+    /// Settings, reached from the main menu (same list as the pause section).
+    Settings,
+    /// In the world. `menu_open` layers the Esc pause page over this.
     Playing,
 }
 
@@ -277,14 +251,25 @@ struct App {
     mode: Mode,
     /// Map picker rows. PBs are cached here, not queried per frame.
     map_list: Vec<MapEntry>,
-    picker_selected: usize,
-    shell_selected: usize,
+    /// Per-map PB / WR summary for the leaderboard, refreshed when it opens.
+    standings: Vec<MapStanding>,
+    /// Cursor position on each page.
+    nav: Nav,
     /// Error from the last failed load, shown on the picker.
     load_error: Option<String>,
     keys: HashSet<KeyCode>,
     mouse_captured: bool,
     menu_open: bool,
-    menu_selected: usize,
+    /// Section of the pause menu that is showing.
+    pause_tab: PauseTab,
+    /// Whether the keyboard drives the row list or the action bar.
+    focus: Focus,
+    /// Index in the action bar while it has focus.
+    button_selected: usize,
+    /// Slider row being dragged with the mouse held down, if any.
+    dragging: Option<usize>,
+    /// A world has been entered at least once, so "Resume" is meaningful.
+    entered_world: bool,
     settings: Settings,
     last_frame: Instant,
     hud_timer: f32,
@@ -299,12 +284,10 @@ struct App {
     immediate_ok: bool,
     /// `None` when no output device was available — the game runs on silently.
     audio: Option<AudioEngine>,
-    /// Which panel the keyboard drives. Both panels are always visible.
-    menu_focus: MenuFocus,
-    /// Selected row in the locs panel (the settings panel uses `menu_selected`).
-    locs_selected: usize,
-    /// Cursor position in physical pixels while the menu is up.
+    /// Cursor position in physical pixels while a menu is up.
     cursor_px: (f32, f32),
+    /// Wall clock since launch — drives the menu backdrop and the busy bar.
+    start_time: Instant,
 }
 
 impl App {
@@ -365,13 +348,17 @@ impl App {
             session,
             mode: Mode::MainMenu,
             map_list: discover_maps(),
-            picker_selected: 0,
-            shell_selected: 0,
+            standings: Vec::new(),
+            nav: Nav::default(),
             load_error: None,
             keys: HashSet::new(),
             mouse_captured: false,
             menu_open: false,
-            menu_selected: 0,
+            pause_tab: PauseTab::Settings,
+            focus: Focus::Rows,
+            button_selected: 0,
+            dragging: None,
+            entered_world: false,
             settings,
             last_frame: Instant::now(),
             hud_timer: 0.0,
@@ -383,14 +370,14 @@ impl App {
             perf_started: None,
             immediate_ok: false,
             audio,
-            menu_focus: MenuFocus::Settings,
-            locs_selected: 0,
             cursor_px: (0.0, 0.0),
+            start_time: Instant::now(),
         };
 
         // `mx-surf <map>` and `--graybox` skip the shell, as they always have.
         if graybox {
             app.mode = Mode::Playing;
+            app.entered_world = true;
             app.on_session_loaded();
         } else if let Some(path) = map_path {
             app.begin_load(path);
@@ -466,9 +453,14 @@ impl App {
         self.session = session;
         self.mode = Mode::Playing;
         self.menu_open = false;
-        self.menu_selected = 0;
-        self.locs_selected = 0;
+        self.entered_world = true;
+        self.pause_tab = PauseTab::Settings;
+        self.nav.set(PageId::Locs, LOC_ROW_PRACTICE);
+        self.nav.set(PageId::Times, 0);
         self.on_session_loaded();
+        // Loading a map is a deliberate "play this now", so take the mouse
+        // rather than making the player click the world first.
+        self.set_capture(true);
     }
 
     /// Shared tail of "a new session is live". Also runs at startup so the two
@@ -485,7 +477,6 @@ impl App {
         }
         self.refresh_ghost_options();
         self.load_ghost();
-        self.refresh_recent_footer();
         self.apply_audio_settings();
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
@@ -499,115 +490,525 @@ impl App {
         }
     }
 
-
-    /// Selection index for the page that is up.
-    fn shell_sel(&mut self) -> &mut usize {
-        match self.mode {
-            Mode::MapPicker => &mut self.picker_selected,
-            _ => &mut self.shell_selected,
+    /// Identity of the page currently on screen.
+    fn page_id(&self) -> PageId {
+        match &self.mode {
+            Mode::MainMenu => PageId::Main,
+            Mode::MapPicker => PageId::Picker,
+            Mode::Settings => PageId::Settings,
+            Mode::Leaderboard { map: None } => PageId::Board,
+            Mode::Leaderboard { map: Some(_) } => PageId::Records,
+            Mode::Loading { .. } => PageId::Loading,
+            Mode::Playing => match self.pause_tab {
+                PauseTab::Settings => PageId::Settings,
+                PauseTab::Locs => PageId::Locs,
+                PauseTab::Times => PageId::Times,
+            },
         }
     }
 
-    fn shell_rows(&self) -> Vec<(String, String)> {
-        match self.mode {
-            Mode::MainMenu => vec![
-                ("Play".into(), String::new()),
-                ("Back to maps".into(), String::new()),
-            ("Quit".into(), String::new()),
-            ],
+    fn selected_row(&self) -> usize {
+        self.nav.get(self.page_id())
+    }
+
+    fn set_selected_row(&mut self, row: usize) {
+        let id = self.page_id();
+        self.nav.set(id, row);
+        // Highlighting a loc row *is* selecting it, so a later Mouse1 in game
+        // loads the one you were last looking at.
+        if id == PageId::Locs {
+            if let Some(i) = locs::loc_index_for_row(self.session.locs.len(), row) {
+                self.session.locs.set_selected(i);
+            }
+        }
+    }
+
+    /// Is a menu (shell page or pause overlay) on screen?
+    fn page_open(&self) -> bool {
+        !matches!(self.mode, Mode::Playing) || self.menu_open
+    }
+
+    // -- page content ------------------------------------------------------
+
+    /// Rows of the active page, each paired with what activating it does. One
+    /// builder so the drawn list and the action table cannot drift apart.
+    fn page_entries(&self) -> Vec<(MenuRow, RowAction)> {
+        match &self.mode {
+            Mode::MainMenu => {
+                let mut out = Vec::new();
+                if self.entered_world {
+                    out.push((
+                        MenuRow::item("Resume", self.session.level.short_name())
+                            .with_tone(RowTone::Accent),
+                        RowAction::MainResume,
+                    ));
+                }
+                out.push((MenuRow::item("Play", ""), RowAction::MainPlay));
+                out.push((MenuRow::item("Leaderboard", ""), RowAction::MainLeaderboard));
+                out.push((MenuRow::item("Settings", ""), RowAction::MainSettings));
+                out.push((MenuRow::item("Quit", ""), RowAction::MainQuit));
+                out
+            }
             Mode::MapPicker => self
                 .map_list
                 .iter()
-                .map(|m| {
-                    let pb = m.pb.map(format_time).unwrap_or_else(|| "—".into());
-                    (m.label.clone(), pb)
+                .enumerate()
+                .map(|(i, m)| {
+                    let row = MenuRow::item(
+                        m.label.clone(),
+                        m.pb.map(format_time).unwrap_or_else(|| "—".into()),
+                    )
+                    .with_note(
+                        m.wr.map(|t| format!("wr {}", format_time(t)))
+                            .unwrap_or_default(),
+                    )
+                    .with_tone(if m.pb.is_some() {
+                        RowTone::Normal
+                    } else {
+                        RowTone::Dim
+                    });
+                    (row, RowAction::PickMap(i))
                 })
                 .collect(),
-            _ => Vec::new(),
+            Mode::Settings => self.settings_entries(),
+            Mode::Leaderboard { map: None } => self
+                .standings
+                .iter()
+                .map(|st| {
+                    let row = MenuRow::item(
+                        st.label.clone(),
+                        st.pb.map(format_time).unwrap_or_else(|| "—".into()),
+                    )
+                    .with_note(match st.wr.as_ref() {
+                        Some(wr) => format!("wr {}", format_time(wr.time)),
+                        None => String::new(),
+                    })
+                    .with_tone(match st.delta() {
+                        // Beating an imported KSF record is a real event; say so.
+                        Some(d) if d <= 0.0 => RowTone::Good,
+                        Some(_) => RowTone::Normal,
+                        None if st.pb.is_some() => RowTone::Normal,
+                        None => RowTone::Dim,
+                    });
+                    (row, RowAction::OpenBoard(st.map.clone()))
+                })
+                .collect(),
+            Mode::Leaderboard { map: Some(map) } => self.record_entries(map),
+            Mode::Loading { .. } => Vec::new(),
+            Mode::Playing => match self.pause_tab {
+                PauseTab::Settings => self.settings_entries(),
+                PauseTab::Locs => self.locs_entries(),
+                PauseTab::Times => {
+                    let map = self.session.level.store_key().to_string();
+                    self.record_entries(&map)
+                }
+            },
         }
     }
 
-    /// Refresh cached PBs — cheap, but only worth doing on entering the picker.
-    fn refresh_map_pbs(&mut self) {
-        let Some(store) = self.pb_store.as_ref() else {
-            return;
-        };
-        for m in self.map_list.iter_mut() {
-            let name = match m.path.as_ref() {
-                Some(p) => p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
-                None => GRAYBOX_MAP.to_string(),
+    fn settings_entries(&self) -> Vec<(MenuRow, RowAction)> {
+        SETTINGS_PAGE
+            .iter()
+            .map(|e| match e {
+                SettingsEntry::Header(h) => (MenuRow::header(*h), RowAction::None),
+                SettingsEntry::Set(s) => (self.setting_row(*s), RowAction::Adjust(*s)),
+            })
+            .collect()
+    }
+
+    fn setting_row(&self, s: Setting) -> MenuRow {
+        let on = |b: bool| if b { "On" } else { "Off" };
+        let label = self.setting_label(s);
+        if let Some(range) = slider_range(s) {
+            let v = self.setting_value(s);
+            let text = match s {
+                Setting::Airaccel => format!("{v:.0}"),
+                Setting::Sens => format!("{v:.1}"),
+                _ => format!("{v:.2}"),
             };
-            m.pb = store.get(&name).ok().flatten();
+            return MenuRow::slider(label, text, range.frac_of(v));
+        }
+        match s {
+            Setting::Vsync => {
+                // "On*" = Immediate isn't offered by this surface, so the
+                // toggle is inert rather than broken.
+                let v = if self.settings.vsync {
+                    "On"
+                } else if self.immediate_ok {
+                    "Off"
+                } else {
+                    "On*"
+                };
+                MenuRow::item(label, v)
+            }
+            Setting::ShowSync => MenuRow::item(label, on(self.settings.show_sync_bar)),
+            Setting::ShowKeys => MenuRow::item(label, on(self.settings.show_keys)),
+            Setting::Ghost => MenuRow::item(label, self.ghost_label()),
+            Setting::GhostTrail => MenuRow::item(label, on(self.settings.ghost_trail)),
+            Setting::Audio => MenuRow::item(
+                label,
+                if self.audio.is_some() {
+                    on(self.settings.audio)
+                } else {
+                    "No device"
+                },
+            ),
+            Setting::Wipe => MenuRow::item(
+                label,
+                match WipeStyle::from_str_or_default(&self.settings.wipe_style) {
+                    WipeStyle::Rewind => "Rewind",
+                    WipeStyle::Dissolve => "Dissolve",
+                },
+            ),
+            _ => MenuRow::item(label, String::new()),
         }
     }
 
-    fn build_shell(&self) -> Option<ShellHud> {
-        let rows = self.shell_rows();
-        let (title, subtitle, hint) = match &self.mode {
+    fn setting_label(&self, s: Setting) -> &'static str {
+        match s {
+            Setting::Sens => "Sensitivity",
+            Setting::Brightness => "Brightness",
+            Setting::ShadowLift => "Shadow lift",
+            Setting::Vsync => "VSync",
+            Setting::ShowSync => "Show sync %",
+            Setting::ShowKeys => "Show keys",
+            Setting::Ghost => "Ghost",
+            Setting::GhostTrail => "Ghost trail",
+            Setting::Airaccel => "Airaccelerate",
+            Setting::Audio => "Audio",
+            Setting::AudioVolume => "Volume",
+            Setting::AudioCore => "Core level",
+            Setting::AudioAir => "Air level",
+            Setting::AudioSub => "Sub level",
+            Setting::Wipe => "Wipe sound",
+        }
+    }
+
+    fn locs_entries(&self) -> Vec<(MenuRow, RowAction)> {
+        let n = self.session.locs.len();
+        let mut out: Vec<(MenuRow, RowAction)> = Vec::with_capacity(n + 3);
+        out.push((
+            MenuRow::item(
+                "Practice mode",
+                if self.session.practice_mode {
+                    "On"
+                } else {
+                    "Off"
+                },
+            )
+            .with_tone(if self.session.practice_mode {
+                RowTone::Warn
+            } else {
+                RowTone::Dim
+            }),
+            RowAction::LocPractice,
+        ));
+        for i in 0..n {
+            let Some(loc) = self.session.locs.get(i) else {
+                continue;
+            };
+            let active = self.session.locs.selected() == Some(i);
+            out.push((
+                MenuRow::item(
+                    format!("{} #{}", if active { "▸" } else { " " }, i + 1),
+                    format_time(loc.time_secs),
+                )
+                .with_note(format!("{:.0} u/s", loc.speed_2d())),
+                RowAction::Loc(i),
+            ));
+        }
+        out.push((
+            MenuRow::item("Load selected", if n == 0 { "—" } else { "enter" }),
+            RowAction::LocLoad,
+        ));
+        out.push((
+            MenuRow::item("Clear all", if n == 0 { "—" } else { "x" }),
+            RowAction::LocClear,
+        ));
+        out
+    }
+
+    /// Times for one map: the imported KSF records, then the player's own.
+    fn record_entries(&self, map: &str) -> Vec<(MenuRow, RowAction)> {
+        let mut out: Vec<(MenuRow, RowAction)> = Vec::new();
+        let records = leaderboard::ksf_records(map);
+        let pb = self
+            .pb_store
+            .as_ref()
+            .and_then(|s| s.get(map).ok().flatten());
+
+        out.push((MenuRow::header("WORLD RECORDS · KSF"), RowAction::None));
+        if records.is_empty() {
+            out.push((
+                MenuRow::text("no imported records", "").with_tone(RowTone::Dim),
+                RowAction::None,
+            ));
+        }
+        for r in records.iter().take(15) {
+            let beat = pb.is_some_and(|p| p <= r.time);
+            out.push((
+                MenuRow::text(format!("#{:<2} {}", r.rank, r.name), format_time(r.time))
+                    .with_tone(if beat { RowTone::Good } else { RowTone::Normal }),
+                RowAction::None,
+            ));
+        }
+
+        out.push((MenuRow::header("YOUR TIMES"), RowAction::None));
+        match pb {
+            Some(t) => {
+                let note = records
+                    .first()
+                    .map(|wr| format!("{:+.3} vs wr", t - wr.time))
+                    .unwrap_or_default();
+                out.push((
+                    MenuRow::text("PB", format_time(t))
+                        .with_note(note)
+                        .with_tone(RowTone::Accent),
+                    RowAction::None,
+                ));
+            }
+            None => out.push((
+                MenuRow::text("no finish yet", "").with_tone(RowTone::Dim),
+                RowAction::None,
+            )),
+        }
+        let recent = self
+            .pb_store
+            .as_ref()
+            .and_then(|s| s.list_recent(map, 8).ok())
+            .unwrap_or_default();
+        for (i, r) in recent.iter().enumerate() {
+            out.push((
+                MenuRow::text(format!("run {}", i + 1), format_time(r.time_secs))
+                    .with_note(if r.is_pb { "pb".into() } else { String::new() })
+                    .with_tone(if r.is_pb { RowTone::Good } else { RowTone::Dim }),
+                RowAction::None,
+            ));
+        }
+        out
+    }
+
+    fn buttons(&self) -> Vec<ButtonAction> {
+        match &self.mode {
+            Mode::MainMenu | Mode::Loading { .. } => Vec::new(),
+            Mode::MapPicker | Mode::Settings | Mode::Leaderboard { .. } => vec![ButtonAction::Back],
+            Mode::Playing => vec![
+                ButtonAction::Resume,
+                ButtonAction::Restart,
+                ButtonAction::Maps,
+                ButtonAction::MainMenu,
+                ButtonAction::Quit,
+            ],
+        }
+    }
+
+    fn page_title(&self) -> (String, String, String) {
+        match &self.mode {
             Mode::MainMenu => (
-                "MX-SURF".to_string(),
-                "source-faithful surf".to_string(),
-                "↑↓ select   enter choose   esc quit".to_string(),
+                "MX-SURF".into(),
+                "source-faithful surf · single player".into(),
+                "↑↓ select   enter choose   or click a row".into(),
             ),
             Mode::MapPicker => (
-                "SELECT MAP".to_string(),
+                "SELECT MAP".into(),
                 format!("{} available", self.map_list.len()),
-                "↑↓ select   enter load   esc back".to_string(),
+                "↑↓ select   enter load   esc back".into(),
+            ),
+            Mode::Settings => (
+                "SETTINGS".into(),
+                "saved on close".into(),
+                "←→ or drag adjusts   wheel over a row   esc back".into(),
+            ),
+            Mode::Leaderboard { map: None } => (
+                "LEADERBOARD".into(),
+                "your PB against the imported KSF record".into(),
+                "enter opens a map's records   esc back".into(),
+            ),
+            Mode::Leaderboard { map: Some(m) } => (
+                m.strip_prefix("surf_").unwrap_or(m).to_uppercase(),
+                "ksf records · your runs".into(),
+                "esc back".into(),
             ),
             Mode::Loading { name, started, .. } => (
-                "LOADING".to_string(),
+                "LOADING".into(),
                 name.clone(),
-                format!("{:.1}s", started.elapsed().as_secs_f32()),
+                format!("{:.1}s elapsed", started.elapsed().as_secs_f32()),
             ),
-            Mode::Playing => return None,
-        };
-        let selected = match self.mode {
-            Mode::MapPicker => self.picker_selected,
-            _ => self.shell_selected,
-        };
-        let scroll = locs::scroll_window_start(rows.len(), SHELL_ROWS_VISIBLE, selected);
-        let drawn = rows.len().min(SHELL_ROWS_VISIBLE);
-        let hovered = if matches!(self.mode, Mode::Loading { .. }) {
-            None
-        } else {
-            surf_render::shell_layout(self.window_w as f32, self.window_h as f32, drawn)
-                .row_at(self.cursor_px.0, self.cursor_px.1)
-                .map(|r| r + scroll)
-                .filter(|r| *r < rows.len())
-        };
-        Some(ShellHud {
-            title,
-            subtitle,
-            items: rows,
-            selected,
-            hovered,
-            hint,
-            message: self.load_error.clone(),
-            scroll,
-        })
+            Mode::Playing => {
+                let hint = match self.pause_tab {
+                    PauseTab::Settings => "←→ or drag adjusts   wheel over a row   tab: actions",
+                    PauseTab::Locs => "click picks · enter loads · x deletes",
+                    PauseTab::Times => "esc resumes",
+                };
+                (
+                    self.session.level.short_name().to_uppercase(),
+                    match self.session.pb_time {
+                        Some(t) => format!("paused · pb {}", format_time(t)),
+                        None => "paused · no pb yet".into(),
+                    },
+                    hint.into(),
+                )
+            }
+        }
     }
 
-    fn shell_move(&mut self, d: i32) {
-        let n = self.shell_rows().len();
+    /// Build the page the renderer draws. `None` while actually playing.
+    fn build_page(&self) -> Option<MenuPage> {
+        if !self.page_open() {
+            return None;
+        }
+        let entries = self.page_entries();
+        let rows: Vec<MenuRow> = entries.iter().map(|(r, _)| r.clone()).collect();
+        let selected = self.selected_row().min(rows.len().saturating_sub(1));
+        let (title, subtitle, hint) = self.page_title();
+        let playing = matches!(self.mode, Mode::Playing);
+        let wide = matches!(self.mode, Mode::Leaderboard { .. })
+            || (playing && self.pause_tab == PauseTab::Times);
+        let buttons: Vec<String> = self
+            .buttons()
+            .iter()
+            .map(|b| b.label().to_string())
+            .collect();
+
+        // The layout decides how many rows fit, so scroll has to be derived
+        // from it — otherwise the window and the highlight disagree.
+        let mut page = MenuPage {
+            title,
+            subtitle,
+            tabs: if playing {
+                PauseTab::ALL
+                    .iter()
+                    .map(|t| {
+                        match t {
+                            PauseTab::Settings => "SETTINGS",
+                            PauseTab::Locs => "LOCS",
+                            PauseTab::Times => "TIMES",
+                        }
+                        .to_string()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            tab: self.pause_tab.index(),
+            tab_hovered: None,
+            panel: MenuPanel {
+                rows,
+                selected,
+                hovered: None,
+                scroll: 0,
+                focused: self.focus == Focus::Rows,
+            },
+            buttons,
+            button_selected: (self.focus == Focus::Buttons).then_some(self.button_selected),
+            button_hovered: None,
+            message: self.load_error.clone(),
+            hint,
+            wide,
+            backdrop: !playing,
+            busy: matches!(self.mode, Mode::Loading { .. }),
+        };
+        let layout = surf_render::layout_for(self.screen().0, self.screen().1, &page);
+        page.panel.scroll = locs::scroll_window_start(
+            page.panel.rows.len(),
+            layout.panel.rows,
+            page.panel.selected,
+        );
+        let (mx, my) = self.cursor_px;
+        page.panel.hovered = layout
+            .panel
+            .row_at(mx, my)
+            .map(|d| d + page.panel.scroll)
+            .filter(|r| *r < page.panel.rows.len());
+        page.tab_hovered = layout.tabs.iter().position(|r| r.contains(mx, my));
+        page.button_hovered = layout.buttons.iter().position(|r| r.contains(mx, my));
+        Some(page)
+    }
+
+    /// Physical pixel size of the drawing surface — the space menu geometry and
+    /// `CursorMoved` both live in, so no scaling is needed between them.
+    fn screen(&self) -> (f32, f32) {
+        self.renderer
+            .as_ref()
+            .map(|r| (r.config.width as f32, r.config.height as f32))
+            .unwrap_or((self.window_w as f32, self.window_h as f32))
+    }
+
+    fn page_layout(&self) -> Option<(MenuPage, PageLayout)> {
+        let page = self.build_page()?;
+        let (w, h) = self.screen();
+        let layout = surf_render::layout_for(w, h, &page);
+        Some((page, layout))
+    }
+
+    // -- page navigation ---------------------------------------------------
+
+    /// Move the row cursor, skipping headers and read-only lines. Wraps.
+    fn move_selection(&mut self, d: i32) {
+        let entries = self.page_entries();
+        let n = entries.len();
         if n == 0 {
             return;
         }
-        let sel = self.shell_sel();
-        *sel = ((*sel as i32 + d).rem_euclid(n as i32)) as usize;
+        let selectable = |i: usize| entries[i].0.kind.selectable();
+        let mut row = self.selected_row().min(n - 1) as i32;
+        for _ in 0..n {
+            row = (row + d).rem_euclid(n as i32);
+            if selectable(row as usize) {
+                self.set_selected_row(row as usize);
+                return;
+            }
+        }
+        // Nothing selectable (a records page): leave the cursor alone.
     }
 
-    fn shell_activate(&mut self, event_loop: &ActiveEventLoop) {
-        match self.mode {
-            Mode::MainMenu => match self.shell_selected {
-                0 => {
-                    self.refresh_map_pbs();
-                    self.load_error = None;
-                    self.mode = Mode::MapPicker;
+    /// Put the cursor on the first selectable row of a page we just opened.
+    fn snap_selection_into_range(&mut self) {
+        let entries = self.page_entries();
+        if entries.is_empty() {
+            self.set_selected_row(0);
+            return;
+        }
+        let cur = self.selected_row();
+        if cur < entries.len() && entries[cur].0.kind.selectable() {
+            return;
+        }
+        let first = entries.iter().position(|(r, _)| r.kind.selectable());
+        self.set_selected_row(first.unwrap_or(0));
+    }
+
+    fn action_at(&self, row: usize) -> Option<RowAction> {
+        self.page_entries().get(row).map(|(_, a)| a.clone())
+    }
+
+    fn activate_row(&mut self, row: usize, event_loop: &ActiveEventLoop) {
+        let Some(action) = self.action_at(row) else {
+            return;
+        };
+        match action {
+            RowAction::None => {}
+            // Toggles and cyclers flip on Enter/click; sliders need ←→, the
+            // wheel, or a drag, so activating one does nothing rather than
+            // jumping the value under the cursor.
+            RowAction::Adjust(s) => {
+                if slider_range(s).is_none() {
+                    self.adjust_setting(s, 1);
                 }
-                _ => event_loop.exit(),
-            },
-            Mode::MapPicker => {
-                let Some(entry) = self.map_list.get(self.picker_selected) else {
+            }
+            RowAction::MainResume => self.resume_world(),
+            RowAction::MainPlay => self.open_picker(),
+            RowAction::MainLeaderboard => self.open_leaderboard(),
+            RowAction::MainSettings => {
+                self.mode = Mode::Settings;
+                self.focus = Focus::Rows;
+                self.snap_selection_into_range();
+            }
+            RowAction::MainQuit => {
+                self.persist_settings();
+                event_loop.exit();
+            }
+            RowAction::PickMap(i) => {
+                let Some(entry) = self.map_list.get(i) else {
                     return;
                 };
                 match entry.path.clone() {
@@ -621,64 +1022,153 @@ impl App {
                     }
                 }
             }
+            RowAction::OpenBoard(map) => {
+                self.mode = Mode::Leaderboard { map: Some(map) };
+                self.nav.set(PageId::Records, 0);
+            }
+            RowAction::LocPractice => {
+                let on = !self.session.practice_mode;
+                self.set_practice_mode(on);
+            }
+            RowAction::Loc(i) => {
+                // Picking a loc here is deliberate, so it arms practice mode for
+                // you rather than refusing — the guard exists for stray clicks.
+                self.set_practice_mode(true);
+                self.close_menu(true);
+                self.load_loc(i);
+            }
+            RowAction::LocLoad => {
+                if let Some(i) = self.session.locs.selected() {
+                    self.set_practice_mode(true);
+                    self.close_menu(true);
+                    self.load_loc(i);
+                }
+            }
+            RowAction::LocClear => {
+                let n = self.session.locs.len();
+                if n > 0 {
+                    self.session.locs.clear();
+                    self.persist_locs();
+                    self.nav.set(PageId::Locs, LOC_ROW_PRACTICE);
+                    println!("cleared {n} locs");
+                }
+            }
+        }
+    }
+
+    /// ←→ / wheel on a row.
+    fn adjust_row(&mut self, row: usize, dir: i32) {
+        match self.action_at(row) {
+            Some(RowAction::Adjust(s)) => self.adjust_setting(s, dir),
+            Some(RowAction::LocPractice) => {
+                let on = !self.session.practice_mode;
+                self.set_practice_mode(on);
+            }
             _ => {}
         }
     }
 
-    fn shell_back(&mut self, event_loop: &ActiveEventLoop) {
-        match self.mode {
-            Mode::MainMenu => event_loop.exit(),
-            Mode::MapPicker => {
+    fn activate_button(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        let Some(b) = self.buttons().get(i).copied() else {
+            return;
+        };
+        match b {
+            ButtonAction::Resume => self.close_menu(true),
+            ButtonAction::Restart => {
+                self.close_menu(true);
+                self.reset();
+            }
+            ButtonAction::Maps => self.open_picker(),
+            ButtonAction::MainMenu => self.leave_to_main_menu(),
+            ButtonAction::Quit => {
+                self.persist_settings();
+                event_loop.exit();
+            }
+            ButtonAction::Back => self.page_back(event_loop),
+        }
+    }
+
+    /// Is backing out of this page a harmless click target? On the title
+    /// screen "back" is *quit*, so a stray click off the panel — or a
+    /// right-click — must not trigger it. Esc still can, deliberately.
+    fn back_is_click_safe(&self) -> bool {
+        !matches!(self.mode, Mode::MainMenu | Mode::Loading { .. })
+    }
+
+    /// Esc / right-click / Back.
+    fn page_back(&mut self, event_loop: &ActiveEventLoop) {
+        match &self.mode {
+            Mode::MainMenu => {
+                self.persist_settings();
+                event_loop.exit();
+            }
+            Mode::MapPicker | Mode::Settings | Mode::Leaderboard { map: None } => {
+                self.persist_settings();
                 self.load_error = None;
                 self.mode = Mode::MainMenu;
+                self.focus = Focus::Rows;
+                self.snap_selection_into_range();
             }
-            _ => {}
+            Mode::Leaderboard { map: Some(_) } => {
+                self.mode = Mode::Leaderboard { map: None };
+                self.focus = Focus::Rows;
+                self.snap_selection_into_range();
+            }
+            Mode::Loading { .. } => {}
+            Mode::Playing => self.close_menu(false),
         }
     }
 
-    fn shell_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
-        match code {
-            KeyCode::ArrowUp | KeyCode::KeyW => self.shell_move(-1),
-            KeyCode::ArrowDown | KeyCode::KeyS => self.shell_move(1),
-            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => {
-                self.shell_activate(event_loop)
-            }
-            KeyCode::Escape => self.shell_back(event_loop),
-            _ => {}
-        }
-    }
-
-    /// Click on a shell row: select it, then act on it — the same row the
-    /// renderer drew, via the shared layout.
-    fn shell_click(&mut self, event_loop: &ActiveEventLoop) {
-        let rows = self.shell_rows();
-        if rows.is_empty() {
-            return;
-        }
-        let selected = match self.mode {
-            Mode::MapPicker => self.picker_selected,
-            _ => self.shell_selected,
-        };
-        let scroll = locs::scroll_window_start(rows.len(), SHELL_ROWS_VISIBLE, selected);
-        let drawn = rows.len().min(SHELL_ROWS_VISIBLE);
-        let layout =
-            surf_render::shell_layout(self.window_w as f32, self.window_h as f32, drawn);
-        if let Some(r) = layout.row_at(self.cursor_px.0, self.cursor_px.1) {
-            let logical = r + scroll;
-            if logical < rows.len() {
-                *self.shell_sel() = logical;
-                self.shell_activate(event_loop);
-            }
-        }
-    }
-
-    /// Back out of the world to the map list, dropping mouse capture.
-    fn leave_to_picker(&mut self) {
+    fn open_picker(&mut self) {
+        self.refresh_map_pbs();
+        self.load_error = None;
         self.menu_open = false;
         self.set_capture(false);
         self.mode = Mode::MapPicker;
+        self.focus = Focus::Rows;
+        self.snap_selection_into_range();
     }
 
+    fn open_leaderboard(&mut self) {
+        self.refresh_map_pbs();
+        let names: Vec<String> = self.map_list.iter().map(|m| m.name.clone()).collect();
+        self.standings = leaderboard::standings(&names, self.pb_store.as_ref());
+        self.mode = Mode::Leaderboard { map: None };
+        self.focus = Focus::Rows;
+        self.snap_selection_into_range();
+    }
+
+    /// Back into the world we already have loaded, from the main menu.
+    fn resume_world(&mut self) {
+        self.load_error = None;
+        self.mode = Mode::Playing;
+        self.menu_open = false;
+        self.set_capture(true);
+    }
+
+    /// Leave the world for the title screen. The session stays loaded, so
+    /// "Resume" on the main menu goes straight back without a reload.
+    fn leave_to_main_menu(&mut self) {
+        self.persist_settings();
+        self.menu_open = false;
+        self.set_capture(false);
+        self.mode = Mode::MainMenu;
+        self.focus = Focus::Rows;
+        self.snap_selection_into_range();
+    }
+
+    /// Refresh cached PBs / records — cheap, but only worth doing on entering
+    /// a page that shows them.
+    fn refresh_map_pbs(&mut self) {
+        for m in self.map_list.iter_mut() {
+            if let Some(store) = self.pb_store.as_ref() {
+                m.pb = store.get(&m.name).ok().flatten();
+            }
+            if m.wr.is_none() {
+                m.wr = leaderboard::world_record(&m.name).map(|r| r.time);
+            }
+        }
+    }
 
     fn refresh_ghost_options(&mut self) {
         let Some(name) = self.session.level.map_name().map(|s| s.to_string()) else {
@@ -693,7 +1183,8 @@ impl App {
     }
 
     fn ghost_label(&self) -> String {
-        self.session.ghost_options
+        self.session
+            .ghost_options
             .iter()
             .find(|o| o.id == self.settings.ghost)
             .map(|o| o.label.clone())
@@ -705,7 +1196,8 @@ impl App {
         if self.session.ghost_options.is_empty() {
             return;
         }
-        let cur = self.session
+        let cur = self
+            .session
             .ghost_options
             .iter()
             .position(|o| o.id == self.settings.ghost)
@@ -775,30 +1267,6 @@ impl App {
         }
     }
 
-    fn refresh_recent_footer(&mut self) {
-        self.session.recent_runs.clear();
-        self.session.recent_count = 0;
-        let Some(name) = self.session.level.map_name() else {
-            return;
-        };
-        let Some(store) = self.pb_store.as_ref() else {
-            return;
-        };
-        let Ok(recent) = store.list_recent(name, 5) else {
-            return;
-        };
-        let Ok(count) = store.count_completions(name) else {
-            return;
-        };
-        self.session.recent_count = count as u32;
-        for r in recent {
-            self.session.recent_runs.push(MenuRecentEntry {
-                time: format_time(r.time_secs),
-                is_pb: r.is_pb,
-            });
-        }
-    }
-
     /// Freeze pose + velocity + run clock into a new numbered loc.
     fn save_loc(&mut self) {
         let loc = Loc::capture(&self.session.player, &self.session.run_timer.snapshot());
@@ -833,10 +1301,13 @@ impl App {
         // the point of practising with a loc saved before one.
         self.session.field_state.reset();
         let snap = loc.timer_snapshot();
-        self.session.run_timer.restore(&snap, self.session.player.grounded);
+        self.session
+            .run_timer
+            .restore(&snap, self.session.player.grounded);
         self.session.run_timer.mark_practice();
         if let Some(zones) = self.session.zones.as_ref() {
-            self.session.run_timer
+            self.session
+                .run_timer
                 .sync_checkpoints_after_restore(zones, &self.session.player);
         }
 
@@ -847,7 +1318,8 @@ impl App {
         self.session.sync_display = 0.0;
 
         self.session.finish_recorded = false;
-        self.session.pb_delta = self.session
+        self.session.pb_delta = self
+            .session
             .pb_time
             .filter(|_| self.session.run_timer.phase == TimerPhase::Running)
             .map(|pb| self.session.run_timer.time_secs - pb);
@@ -872,7 +1344,9 @@ impl App {
         // fire a phantom landing, and re-arm rather than wipe — a loadloc is not
         // a failure.
         self.session.audio_on_ramp = false;
-        self.session.audio_detect.resync(false, self.session.player.grounded);
+        self.session
+            .audio_detect
+            .resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
@@ -944,17 +1418,20 @@ impl App {
 
     fn open_menu(&mut self) {
         self.menu_open = true;
-        self.menu_focus = MenuFocus::Settings;
-        self.menu_selected = 0;
-        // Land the locs panel on the active loc so it reads as "this is the one
+        self.focus = Focus::Rows;
+        self.button_selected = 0;
+        // Land the locs list on the active loc so it reads as "this is the one
         // Mouse1 will load".
-        self.locs_selected = match self.session.locs.selected() {
-            Some(i) => i + 1,
-            None => LOC_ROW_PRACTICE,
-        };
+        self.nav.set(
+            PageId::Locs,
+            match self.session.locs.selected() {
+                Some(i) => i + 1,
+                None => LOC_ROW_PRACTICE,
+            },
+        );
         self.set_capture(false);
         self.refresh_ghost_options();
-        self.refresh_recent_footer();
+        self.snap_selection_into_range();
         // The sim is paused, so nothing would update the parameters — zero them
         // so the voice releases instead of holding a note under the menu.
         if let Some(audio) = self.audio.as_ref() {
@@ -964,53 +1441,62 @@ impl App {
 
     fn close_menu(&mut self, recapture: bool) {
         self.menu_open = false;
+        self.dragging = None;
         self.persist_settings();
         if recapture {
             self.set_capture(true);
         }
     }
 
-    fn menu_adjust(&mut self, dir: i32) {
-        if self.menu_focus == MenuFocus::Locs {
-            if self.locs_selected == LOC_ROW_PRACTICE {
-                self.set_practice_mode(!self.session.practice_mode);
+    fn setting_value(&self, s: Setting) -> f32 {
+        match s {
+            Setting::Sens => self.settings.mouse_sens,
+            Setting::Brightness => self.settings.brightness,
+            Setting::ShadowLift => self.settings.shadow_lift,
+            Setting::Airaccel => self.session.vars.airaccelerate,
+            Setting::AudioVolume => self.settings.audio_volume,
+            Setting::AudioCore => self.settings.audio_core,
+            Setting::AudioAir => self.settings.audio_air,
+            Setting::AudioSub => self.settings.audio_sub,
+            _ => 0.0,
+        }
+    }
+
+    /// Write a continuous setting, clamped by whoever owns the clamp.
+    fn set_setting_value(&mut self, s: Setting, v: f32) {
+        match s {
+            Setting::Sens => self.settings.mouse_sens = Settings::clamp_sens(v),
+            Setting::Brightness => self.settings.brightness = Settings::clamp_brightness(v),
+            Setting::ShadowLift => self.settings.shadow_lift = Settings::clamp_shadow_lift(v),
+            Setting::Airaccel => self.session.vars.airaccelerate = v.clamp(1.0, 1000.0),
+            Setting::AudioVolume => {
+                self.settings.audio_volume = Settings::clamp_audio_volume(v);
             }
+            Setting::AudioCore => self.settings.audio_core = Settings::clamp_audio_level(v),
+            Setting::AudioAir => self.settings.audio_air = Settings::clamp_audio_level(v),
+            Setting::AudioSub => self.settings.audio_sub = Settings::clamp_audio_level(v),
+            _ => return,
+        }
+        self.apply_audio_settings();
+    }
+
+    /// Drag / click on a slider track: set the value from a 0..1 position.
+    fn set_setting_frac(&mut self, s: Setting, frac: f32) {
+        let Some(range) = slider_range(s) else {
+            return;
+        };
+        self.set_setting_value(s, range.value_of(frac));
+    }
+
+    /// One notch of a setting: a slider step, or a toggle / cycle.
+    fn adjust_setting(&mut self, s: Setting, dir: i32) {
+        if let Some(range) = slider_range(s) {
+            let v = range.nudge(self.setting_value(s), dir);
+            self.set_setting_value(s, v);
             return;
         }
-        match self.menu_selected {
-            MENU_SENS => {
-                let step = if dir > 0 { 1.25 } else { 1.0 / 1.25 };
-                self.settings.mouse_sens = Settings::clamp_sens(self.settings.mouse_sens * step);
-            }
-            MENU_BRIGHTNESS => {
-                let step = if dir > 0 { 0.1 } else { -0.1 };
-                self.settings.brightness =
-                    Settings::clamp_brightness(self.settings.brightness + step);
-            }
-            MENU_SHADOW_LIFT => {
-                let step = if dir > 0 { 0.1 } else { -0.1 };
-                self.settings.shadow_lift =
-                    Settings::clamp_shadow_lift(self.settings.shadow_lift + step);
-            }
-            MENU_SLOPE_TINT => {
-                self.settings.slope_tint = !self.settings.slope_tint;
-            }
-            MENU_EDGE_HIGHLIGHT => {
-                self.settings.edge_highlight = !self.settings.edge_highlight;
-            }
-            MENU_GHOST => {
-                self.cycle_ghost(dir);
-            }
-            MENU_GHOST_TRAIL => {
-                self.settings.ghost_trail = !self.settings.ghost_trail;
-            }
-            MENU_SYNC => {
-                self.settings.show_sync_bar = !self.settings.show_sync_bar;
-            }
-            MENU_KEYS => {
-                self.settings.show_keys = !self.settings.show_keys;
-            }
-            MENU_VSYNC => {
+        match s {
+            Setting::Vsync => {
                 let want_vsync = !self.settings.vsync;
                 if !want_vsync && !self.immediate_ok {
                     println!("VSync: Immediate not available on this surface; staying on");
@@ -1019,37 +1505,12 @@ impl App {
                     self.apply_present_mode();
                 }
             }
-            MENU_AA => {
-                if dir > 0 {
-                    self.session.vars.airaccelerate = (self.session.vars.airaccelerate * 1.5).min(1000.0);
-                } else {
-                    self.session.vars.airaccelerate = (self.session.vars.airaccelerate / 1.5).max(1.0);
-                }
-            }
-            MENU_AUDIO => {
-                self.settings.audio = !self.settings.audio;
-            }
-            MENU_AUDIO_VOLUME => {
-                let step = if dir > 0 { 0.05 } else { -0.05 };
-                self.settings.audio_volume =
-                    Settings::clamp_audio_volume(self.settings.audio_volume + step);
-            }
-            MENU_AUDIO_CORE => {
-                let step = if dir > 0 { 0.1 } else { -0.1 };
-                self.settings.audio_core =
-                    Settings::clamp_audio_level(self.settings.audio_core + step);
-            }
-            MENU_AUDIO_AIR => {
-                let step = if dir > 0 { 0.1 } else { -0.1 };
-                self.settings.audio_air =
-                    Settings::clamp_audio_level(self.settings.audio_air + step);
-            }
-            MENU_AUDIO_SUB => {
-                let step = if dir > 0 { 0.1 } else { -0.1 };
-                self.settings.audio_sub =
-                    Settings::clamp_audio_level(self.settings.audio_sub + step);
-            }
-            MENU_WIPE => {
+            Setting::ShowSync => self.settings.show_sync_bar = !self.settings.show_sync_bar,
+            Setting::ShowKeys => self.settings.show_keys = !self.settings.show_keys,
+            Setting::Ghost => self.cycle_ghost(dir),
+            Setting::GhostTrail => self.settings.ghost_trail = !self.settings.ghost_trail,
+            Setting::Audio => self.settings.audio = !self.settings.audio,
+            Setting::Wipe => {
                 let next = WipeStyle::from_str_or_default(&self.settings.wipe_style).toggled();
                 self.settings.wipe_style = next.as_str().into();
                 // Play it on selection: this is a choice you make by ear.
@@ -1058,7 +1519,6 @@ impl App {
                     audio.push(AudioEvent::Wipe);
                 }
             }
-            MENU_MAPS | MENU_QUIT => {}
             _ => {}
         }
         self.apply_audio_settings();
@@ -1084,241 +1544,6 @@ impl App {
         }
     }
 
-    fn build_menu_hud(&self) -> MenuPanel {
-        let on = |b: bool| if b { "On" } else { "Off" };
-        let vsync_label = if self.settings.vsync {
-            "On".into()
-        } else if self.immediate_ok {
-            "Off".into()
-        } else {
-            "On*".into()
-        };
-        let items = vec![
-            (
-                "Mouse sens".into(),
-                format!("{:.1}", self.settings.mouse_sens),
-            ),
-            (
-                "Brightness".into(),
-                format!("{:.1}", self.settings.brightness),
-            ),
-            (
-                "Shadow lift".into(),
-                format!("{:.1}", self.settings.shadow_lift),
-            ),
-            ("Slope tint".into(), on(self.settings.slope_tint).into()),
-            (
-                "Edge highlight".into(),
-                on(self.settings.edge_highlight).into(),
-            ),
-            ("Ghost".into(), self.ghost_label()),
-            ("Ghost trail".into(), on(self.settings.ghost_trail).into()),
-            ("Show sync %".into(), on(self.settings.show_sync_bar).into()),
-            ("Show keys".into(), on(self.settings.show_keys).into()),
-            ("VSync".into(), vsync_label),
-            (
-                "Airaccelerate".into(),
-                format!("{:.0}", self.session.vars.airaccelerate),
-            ),
-            (
-                "Audio".into(),
-                if self.audio.is_some() {
-                    on(self.settings.audio).into()
-                } else {
-                    "No device".into()
-                },
-            ),
-            (
-                "Audio volume".into(),
-                format!("{:.2}", self.settings.audio_volume),
-            ),
-            (
-                "Core level".into(),
-                format!("{:.1}", self.settings.audio_core),
-            ),
-            (
-                "Air level".into(),
-                format!("{:.1}", self.settings.audio_air),
-            ),
-            (
-                "Sub level".into(),
-                format!("{:.1}", self.settings.audio_sub),
-            ),
-            (
-                "Wipe sound".into(),
-                match WipeStyle::from_str_or_default(&self.settings.wipe_style) {
-                    WipeStyle::Rewind => "Rewind".into(),
-                    WipeStyle::Dissolve => "Dissolve".into(),
-                },
-            ),
-            ("Quit".into(), String::new()),
-        ];
-        MenuPanel {
-            title: "PAUSED".into(),
-            selected: self.menu_selected,
-            hovered: self.hovered_row(MenuFocus::Settings),
-            focused: self.menu_focus == MenuFocus::Settings,
-            items,
-            hint: "↑↓ select   ←→ adjust   click / wheel   Esc resume".into(),
-        }
-    }
-
-    /// Rows on the locs panel: practice toggle + one row per loc + load + clear.
-    fn locs_menu_len(&self) -> usize {
-        locs::locs_page_len(self.session.locs.len())
-    }
-
-    fn loc_row_load(&self) -> usize {
-        self.session.locs.len() + 1
-    }
-
-    fn loc_row_clear(&self) -> usize {
-        self.session.locs.len() + 2
-    }
-
-    /// The loc index a locs-panel row points at, if it is a loc row.
-    fn loc_index_for_row(&self, row: usize) -> Option<usize> {
-        locs::loc_index_for_row(self.session.locs.len(), row)
-    }
-
-    /// Rows actually drawn in the locs panel (the list scrolls past
-    /// [`LOC_ROWS_VISIBLE`], so this is not the logical row count).
-    fn locs_drawn_rows(&self) -> usize {
-        self.session.locs.len().min(LOC_ROWS_VISIBLE) + 3
-    }
-
-    /// The Locs box. Long lists scroll: only [`LOC_ROWS_VISIBLE`] loc rows are
-    /// emitted, windowed around the selection, and `selected` is remapped to the
-    /// emitted list so the highlight lands on the right line.
-    fn build_locs_panel(&self) -> MenuPanel {
-        let n = self.session.locs.len();
-        let sel = self.locs_selected.min(self.locs_menu_len() - 1);
-        let mut items: Vec<(String, String)> = Vec::with_capacity(self.locs_drawn_rows());
-        items.push((
-            "Practice mode".into(),
-            if self.session.practice_mode {
-                "On".into()
-            } else {
-                "Off".into()
-            },
-        ));
-
-        // Window the loc list around whichever loc row is selected.
-        let focus = self.loc_index_for_row(sel).unwrap_or(0);
-        let visible = n.min(LOC_ROWS_VISIBLE);
-        let first = locs::scroll_window_start(n, LOC_ROWS_VISIBLE, focus);
-        for i in first..first + visible {
-            let loc = match self.session.locs.get(i) {
-                Some(l) => l,
-                None => continue,
-            };
-            let active = self.session.locs.selected() == Some(i);
-            items.push((
-                format!("{} #{}", if active { "▸" } else { " " }, i + 1),
-                format!("{:.0} u/s  {}", loc.speed_2d(), format_time(loc.time_secs)),
-            ));
-        }
-
-        items.push((
-            "Load".into(),
-            if n == 0 { "-".into() } else { "Enter".into() },
-        ));
-        items.push((
-            "Clear all".into(),
-            if n == 0 { "-".into() } else { "click".into() },
-        ));
-
-        let hint = if n == 0 {
-            "no locs — Mouse2 saves one".into()
-        } else {
-            "click picks · Load or Enter goes · right-click deletes".into()
-        };
-
-        MenuPanel {
-            title: "LOCS".into(),
-            // Remap: rows scrolled above the window are not drawn.
-            selected: locs::drawn_row(n, LOC_ROWS_VISIBLE, sel),
-            hovered: self.hovered_row(MenuFocus::Locs),
-            focused: self.menu_focus == MenuFocus::Locs,
-            items,
-            hint,
-        }
-    }
-
-    fn build_menu(&self) -> MenuHud {
-        MenuHud {
-            main: self.build_menu_hud(),
-            locs: self.build_locs_panel(),
-            recent_count: self.session.recent_count,
-            recent: self.session.recent_runs.clone(),
-        }
-    }
-
-    /// Geometry the renderer will use this frame — the app hit-tests the same
-    /// numbers, so clicks land on the rows that are actually on screen.
-    fn menu_layout(&self) -> MenuLayout {
-        let (w, h) = self
-            .renderer
-            .as_ref()
-            .map(|r| (r.config.width as f32, r.config.height as f32))
-            .unwrap_or((self.window_w as f32, self.window_h as f32));
-        // Mirror the renderer: an empty list still draws one "no finishes yet"
-        // row, and the pool caps it at 6.
-        let recent_rows = if self.session.recent_runs.is_empty() {
-            1
-        } else {
-            self.session.recent_runs.len().min(6)
-        };
-        surf_render::menu_layout(w, h, MENU_ITEM_COUNT, self.locs_drawn_rows(), recent_rows)
-    }
-
-    /// Panel + logical row under the cursor, if any. Loc rows are mapped back
-    /// from drawn position to logical index so scrolling can't misdirect a click.
-    fn hit_test(&self, mx: f32, my: f32) -> Option<(MenuFocus, usize)> {
-        let layout = self.menu_layout();
-        if let Some(row) = layout.main.row_at(mx, my) {
-            return Some((MenuFocus::Settings, row));
-        }
-        if let Some(drawn) = layout.locs.row_at(mx, my) {
-            return Some((MenuFocus::Locs, self.locs_logical_row(drawn)));
-        }
-        None
-    }
-
-    /// Invert the scroll window: drawn row → logical locs-panel row.
-    fn locs_logical_row(&self, drawn: usize) -> usize {
-        let n = self.session.locs.len();
-        let visible = n.min(LOC_ROWS_VISIBLE);
-        if drawn == 0 {
-            return LOC_ROW_PRACTICE;
-        }
-        if drawn <= visible {
-            let focus = self
-                .loc_index_for_row(self.locs_selected.min(self.locs_menu_len() - 1))
-                .unwrap_or(0);
-            let first = locs::scroll_window_start(n, LOC_ROWS_VISIBLE, focus);
-            return first + drawn; // logical loc row = index + 1
-        }
-        if drawn == visible + 1 {
-            self.loc_row_load()
-        } else {
-            self.loc_row_clear()
-        }
-    }
-
-    /// Row to paint as hovered on `panel`, in *drawn* coordinates.
-    fn hovered_row(&self, panel: MenuFocus) -> Option<usize> {
-        if !self.menu_open {
-            return None;
-        }
-        let (mx, my) = self.cursor_px;
-        let layout = self.menu_layout();
-        match panel {
-            MenuFocus::Settings => layout.main.row_at(mx, my),
-            MenuFocus::Locs => layout.locs.row_at(mx, my),
-        }
-    }
-
     fn reset(&mut self) {
         let (spawn_origin, spawn_angles) = self.session.level.spawn();
         self.session.player = PlayerState {
@@ -1338,6 +1563,13 @@ impl App {
         self.session.prev_origin = self.session.player.origin;
         self.session.accumulator = 0.0;
         self.session.sync_display = 0.0;
+        self.clear_run_state();
+    }
+
+    /// Throw away the current attempt: clock, splits, ghost, recorded frames.
+    /// Everything a fresh run needs zeroed, without moving the player — a wipe
+    /// has already been teleported by the map, and only wants this half.
+    fn clear_run_state(&mut self) {
         self.session.run_timer.reset();
         self.session.field_state.reset();
         self.session.pb_delta = None;
@@ -1353,11 +1585,27 @@ impl App {
         // landing, and mark the restart with the same quiet tick the start zone
         // uses. A manual reset is not a failure and doesn't get a wipe.
         self.session.audio_on_ramp = false;
-        self.session.audio_detect.resync(false, self.session.player.grounded);
+        self.session
+            .audio_detect
+            .resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
         }
+    }
+
+    /// Did the soft respawn we just took end the attempt? See
+    /// [`RunTimer::wipe_ends_run`] — the rule lives there so it can be tested
+    /// without the event loop.
+    fn wipe_ends_the_run(&self) -> bool {
+        let Some(zones) = self.session.zones.as_ref() else {
+            return false;
+        };
+        let in_start = zones
+            .main
+            .start
+            .contains_player(self.session.player.origin, self.session.player.hull());
+        self.session.run_timer.wipe_ends_run(in_start)
     }
 
     /// Snap to the current stage start without clearing the run clock / splits.
@@ -1393,10 +1641,14 @@ impl App {
         // inside a stage start doesn't cancel or double-split.
         self.session.run_timer.notify_soft_respawn();
         if let Some(zones) = self.session.zones.as_ref() {
-            self.session.run_timer.sync_stage_after_respawn(zones, &self.session.player);
+            self.session
+                .run_timer
+                .sync_stage_after_respawn(zones, &self.session.player);
         }
         self.session.audio_on_ramp = false;
-        self.session.audio_detect.resync(false, self.session.player.grounded);
+        self.session
+            .audio_detect
+            .resync(false, self.session.player.grounded);
         if let Some(audio) = self.audio.as_ref() {
             audio.set_params(AudioParams::default());
             audio.push(AudioEvent::Rearm);
@@ -1559,15 +1811,27 @@ impl App {
             let prev_vel = self.session.player.velocity;
             let cmd = self.build_cmd();
             let wishing = cmd.forward_move.abs() + cmd.side_move.abs() > 0.0;
-            self.session.player = tick(self.session.level.world(), &self.session.player, &cmd, &self.session.vars);
+            self.session.player = tick(
+                self.session.level.world(),
+                &self.session.player,
+                &cmd,
+                &self.session.vars,
+            );
             // Trigger touches are processed at the end of a move, so a booster
             // pays out on the tick you leave it and the basevelocity a volume
             // asserts is carried by the next one.
-            self.session.level
-                .apply_fields(&mut self.session.player, &mut self.session.field_state, tick_dt);
+            self.session.level.apply_fields(
+                &mut self.session.player,
+                &mut self.session.field_state,
+                tick_dt,
+            );
 
             let mut soft_respawned = false;
-            if let Some((dest, angles)) = self.session.level.touch_teleport(self.session.player.origin) {
+            if let Some((dest, angles)) = self
+                .session
+                .level
+                .touch_teleport(self.session.player.origin)
+            {
                 self.session.player.origin = dest;
                 self.session.player.viewangles = angles;
                 // Whatever volume we were standing in is not where we are now.
@@ -1575,21 +1839,21 @@ impl App {
                 soft_respawned = true;
             }
             if self.session.player.origin.z < self.session.level.kill_z() {
-                let (spawn_origin, spawn_angles) = if self.session.run_timer.track_type == TrackType::Staged
-                {
-                    if let Some(zones) = self.session.zones.as_ref() {
-                        stage_respawn_pose(
-                            zones,
-                            &self.session.level,
-                            self.session.run_timer.current_stage,
-                            self.session.player.viewangles,
-                        )
+                let (spawn_origin, spawn_angles) =
+                    if self.session.run_timer.track_type == TrackType::Staged {
+                        if let Some(zones) = self.session.zones.as_ref() {
+                            stage_respawn_pose(
+                                zones,
+                                &self.session.level,
+                                self.session.run_timer.current_stage,
+                                self.session.player.viewangles,
+                            )
+                        } else {
+                            self.session.level.spawn()
+                        }
                     } else {
                         self.session.level.spawn()
-                    }
-                } else {
-                    self.session.level.spawn()
-                };
+                    };
                 self.session.player.origin = spawn_origin;
                 self.session.player.viewangles = spawn_angles;
                 self.session.player.velocity = Vec3::ZERO;
@@ -1602,9 +1866,18 @@ impl App {
             }
 
             if soft_respawned {
-                self.session.run_timer.notify_soft_respawn();
-                if let Some(zones) = self.session.zones.as_ref() {
-                    self.session.run_timer.sync_stage_after_respawn(zones, &self.session.player);
+                if self.wipe_ends_the_run() {
+                    // Back in the start box on a linear map: the attempt is
+                    // over. Clearing here (before the timer ticks) lets the
+                    // same tick re-arm, so you can simply go again.
+                    self.clear_run_state();
+                } else {
+                    self.session.run_timer.notify_soft_respawn();
+                    if let Some(zones) = self.session.zones.as_ref() {
+                        self.session
+                            .run_timer
+                            .sync_stage_after_respawn(zones, &self.session.player);
+                    }
                 }
             }
 
@@ -1613,7 +1886,11 @@ impl App {
             // probe the ghost trail already uses, so the two agree.
             if self.audio.is_some() && self.settings.audio {
                 let hull = self.session.player.hull();
-                let on_ramp = is_on_surf_ramp(self.session.level.world(), self.session.player.origin, &hull);
+                let on_ramp = is_on_surf_ramp(
+                    self.session.level.world(),
+                    self.session.player.origin,
+                    &hull,
+                );
                 self.session.audio_on_ramp = on_ramp;
                 let obs = Observation {
                     dt: tick_dt,
@@ -1633,7 +1910,8 @@ impl App {
                 let phase_before = self.session.run_timer.phase;
                 let was_finished = self.session.run_timer.is_finished();
                 let pb_splits = self.session.pb_splits.clone();
-                self.session.run_timer
+                self.session
+                    .run_timer
                     .tick(zones, &mut self.session.player, tick_dt, &pb_splits);
                 if let Some(ev) = self.session.run_timer.take_split_event() {
                     let staged = self.session.run_timer.track_type == TrackType::Staged;
@@ -1643,7 +1921,10 @@ impl App {
                     self.session.split_flash_left = SPLIT_FLASH_SECS;
                 }
                 self.record_replay_tick(phase_before, &cmd);
-                if self.session.run_timer.is_finished() && !was_finished && !self.session.finish_recorded {
+                if self.session.run_timer.is_finished()
+                    && !was_finished
+                    && !self.session.finish_recorded
+                {
                     self.on_finish();
                 }
                 if self.session.run_timer.phase == TimerPhase::Running {
@@ -1693,10 +1974,13 @@ impl App {
             return;
         }
 
-        let origin = self.session.prev_origin.lerp(self.session.player.origin, self.session.alpha);
+        let origin = self
+            .session
+            .prev_origin
+            .lerp(self.session.player.origin, self.session.alpha);
         let eye = origin + Vec3::new(0.0, 0.0, self.session.player.hull().eye_height);
         let speed = self.session.player.velocity.length_2d();
-        let show_keys = if self.settings.show_keys && !self.menu_open {
+        let show_keys = if self.settings.show_keys && !self.page_open() {
             Some(ShowKeysState {
                 forward: self.keys.contains(&KeyCode::KeyW),
                 back: self.keys.contains(&KeyCode::KeyS),
@@ -1707,15 +1991,16 @@ impl App {
         } else {
             None
         };
-        let menu = if self.menu_open {
-            Some(self.build_menu())
-        } else {
-            None
-        };
+        let page = self.build_page();
         let timer_phase = self.hud_timer_phase();
         let perf_line = self.frame_stats.line();
         let racing = self.session.run_timer.phase == TimerPhase::Running
-            && self.session.pb_ghost.as_ref().map(|g| g.active).unwrap_or(false);
+            && self
+                .session
+                .pb_ghost
+                .as_ref()
+                .map(|g| g.active)
+                .unwrap_or(false);
         let (ghost_time_delta, ghost_speed_delta, ghost_pose, trail_pts) = if racing {
             let g = self.session.pb_ghost.as_ref().unwrap();
             let td = Some(self.session.run_timer.time_secs - g.current_time());
@@ -1740,7 +2025,8 @@ impl App {
         } else {
             None
         };
-        let stage_line = self.session
+        let stage_line = self
+            .session
             .zones
             .as_ref()
             .and_then(|z| self.session.run_timer.stage_hud_label(z));
@@ -1762,9 +2048,9 @@ impl App {
             practice_mode: self.session.practice_mode,
             ghost_time_delta,
             ghost_speed_delta,
-            menu,
-            shell: self.build_shell(),
+            page,
             perf_line,
+            time: self.start_time.elapsed().as_secs_f32(),
         };
         let viewangles = self.session.player.viewangles;
         let title_base = self.session.title_base.clone();
@@ -1780,16 +2066,10 @@ impl App {
 
         let aspect = renderer.config.width as f32 / renderer.config.height.max(1) as f32;
         let camera = Camera::new(eye, viewangles, aspect);
-        let view = ViewParams {
-            exposure: Settings::clamp_brightness(self.settings.brightness),
-            shadow_lift: Settings::clamp_shadow_lift(self.settings.shadow_lift),
-            slope_tint: if self.settings.slope_tint { 1.0 } else { 0.0 },
-            edge_highlight: if self.settings.edge_highlight {
-                1.0
-            } else {
-                0.0
-            },
-        };
+        let view = ViewParams::new(
+            Settings::clamp_brightness(self.settings.brightness),
+            Settings::clamp_shadow_lift(self.settings.shadow_lift),
+        );
 
         let trail_ref = if trail_pts.len() >= 2 {
             Some(trail_pts.as_slice())
@@ -1891,7 +2171,8 @@ impl App {
             return;
         };
 
-        let saved_path = self.session
+        let saved_path = self
+            .session
             .replay_rec
             .finish(&name, time, &self.session.vars, &splits)
             .and_then(|replay| {
@@ -1937,216 +2218,239 @@ impl App {
                         "Finished {} in {} (PB {})",
                         name,
                         format_time(time),
-                        self.session.pb_time.map(format_time).unwrap_or_else(|| "-".into())
+                        self.session
+                            .pb_time
+                            .map(format_time)
+                            .unwrap_or_else(|| "-".into())
                     );
                 }
                 Err(e) => eprintln!("PB write failed: {e}"),
             }
         }
-        self.refresh_recent_footer();
     }
 
-    /// Rows on the focused panel.
-    fn menu_len(&self) -> usize {
-        match self.menu_focus {
-            MenuFocus::Settings => MENU_ITEM_COUNT,
-            MenuFocus::Locs => self.locs_menu_len(),
-        }
-    }
+    // -- page input --------------------------------------------------------
 
-    fn menu_row(&self) -> usize {
-        match self.menu_focus {
-            MenuFocus::Settings => self.menu_selected,
-            MenuFocus::Locs => self.locs_selected,
-        }
-    }
-
-    fn set_menu_row(&mut self, row: usize) {
-        match self.menu_focus {
-            MenuFocus::Settings => self.menu_selected = row,
-            MenuFocus::Locs => {
-                self.locs_selected = row;
-                // Highlighting a loc row *is* selecting it, so Mouse1 in game
-                // afterwards loads the one you were last looking at.
-                if let Some(i) = self.loc_index_for_row(row) {
-                    self.session.locs.set_selected(i);
-                }
-            }
-        }
-    }
-
-    fn focus_panel(&mut self, panel: MenuFocus) {
-        self.menu_focus = panel;
-    }
-
-    fn handle_menu_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+    /// Keyboard on any menu page — shell or pause. One handler, so a key that
+    /// works on one page works on all of them.
+    fn page_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
         match code {
-            KeyCode::Escape => {
-                // Close menu without recapture; Esc again (uncaptured) quits.
-                self.close_menu(false);
-            }
+            KeyCode::Escape => self.page_back(event_loop),
             KeyCode::Tab => {
-                self.menu_focus = match self.menu_focus {
-                    MenuFocus::Settings => MenuFocus::Locs,
-                    MenuFocus::Locs => MenuFocus::Settings,
+                if self.buttons().is_empty() {
+                    return;
+                }
+                self.focus = match self.focus {
+                    Focus::Rows => Focus::Buttons,
+                    Focus::Buttons => Focus::Rows,
                 };
             }
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                let row = self.menu_row();
-                self.menu_activate(self.menu_focus, row, event_loop);
+            KeyCode::KeyQ | KeyCode::KeyE if matches!(self.mode, Mode::Playing) => {
+                let dir = if code == KeyCode::KeyE { 1 } else { -1 };
+                self.cycle_tab(dir);
             }
+            KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => match self.focus {
+                Focus::Rows => {
+                    let row = self.selected_row();
+                    self.activate_row(row, event_loop);
+                }
+                Focus::Buttons => {
+                    let i = self.button_selected;
+                    self.activate_button(i, event_loop);
+                }
+            },
             KeyCode::KeyX | KeyCode::Backspace | KeyCode::Delete => {
-                if self.menu_focus == MenuFocus::Locs {
-                    let row = self.locs_selected;
-                    self.delete_loc_row(row);
+                let row = self.selected_row();
+                self.delete_loc_row(row);
+            }
+            KeyCode::ArrowUp | KeyCode::KeyW => {
+                if self.focus == Focus::Rows {
+                    self.move_selection(-1);
                 }
             }
-            KeyCode::ArrowUp => {
-                let len = self.menu_len();
-                let row = self.menu_row();
-                self.set_menu_row(if row == 0 { len - 1 } else { row - 1 });
+            KeyCode::ArrowDown | KeyCode::KeyS => {
+                if self.focus == Focus::Rows {
+                    self.move_selection(1);
+                }
             }
-            KeyCode::ArrowDown => {
-                let len = self.menu_len();
-                let row = self.menu_row();
-                self.set_menu_row((row + 1) % len);
+            KeyCode::ArrowLeft | KeyCode::KeyA => self.page_horizontal(-1),
+            KeyCode::ArrowRight | KeyCode::KeyD => self.page_horizontal(1),
+            KeyCode::Home => {
+                self.set_selected_row(0);
+                self.snap_selection_into_range();
             }
-            KeyCode::ArrowLeft | KeyCode::KeyA => self.menu_adjust(-1),
-            KeyCode::ArrowRight | KeyCode::KeyD => self.menu_adjust(1),
+            KeyCode::End => {
+                let n = self.page_entries().len();
+                self.set_selected_row(n.saturating_sub(1));
+                self.snap_selection_into_range();
+            }
             _ => {}
         }
     }
 
+    /// ←→ adjusts the selected setting, or walks the action bar when it has
+    /// focus.
+    fn page_horizontal(&mut self, dir: i32) {
+        match self.focus {
+            Focus::Rows => {
+                let row = self.selected_row();
+                self.adjust_row(row, dir);
+            }
+            Focus::Buttons => {
+                let n = self.buttons().len();
+                if n > 0 {
+                    self.button_selected =
+                        ((self.button_selected as i32 + dir).rem_euclid(n as i32)) as usize;
+                }
+            }
+        }
+    }
+
+    fn cycle_tab(&mut self, dir: i32) {
+        let n = PauseTab::ALL.len() as i32;
+        let i = (self.pause_tab.index() as i32 + dir).rem_euclid(n) as usize;
+        self.set_tab(PauseTab::ALL[i]);
+    }
+
+    fn set_tab(&mut self, tab: PauseTab) {
+        if self.pause_tab == tab {
+            return;
+        }
+        self.pause_tab = tab;
+        self.focus = Focus::Rows;
+        self.snap_selection_into_range();
+    }
+
     fn delete_loc_row(&mut self, row: usize) {
-        let Some(i) = self.loc_index_for_row(row) else {
+        if self.page_id() != PageId::Locs {
+            return;
+        }
+        let Some(i) = locs::loc_index_for_row(self.session.locs.len(), row) else {
             return;
         };
         self.session.locs.remove(i);
         self.persist_locs();
         println!("deleted loc #{} ({} left)", i + 1, self.session.locs.len());
-        self.locs_selected = self.locs_selected.min(self.locs_menu_len() - 1);
-        if let Some(j) = self.loc_index_for_row(self.locs_selected) {
-            self.session.locs.set_selected(j);
-        }
+        let last = locs::locs_page_len(self.session.locs.len()) - 1;
+        let row = row.min(last);
+        self.set_selected_row(row);
     }
 
-    /// Enter / click on a row.
-    fn menu_activate(&mut self, panel: MenuFocus, row: usize, event_loop: &ActiveEventLoop) {
-        if panel == MenuFocus::Locs {
-            if row == LOC_ROW_PRACTICE {
-                self.set_practice_mode(!self.session.practice_mode);
-            } else if self.loc_index_for_row(row).is_some() || row == self.loc_row_load() {
-                // Picking a loc here is deliberate, so it arms practice mode for
-                // you rather than refusing — the guard exists for stray clicks.
-                let index = self.loc_index_for_row(row).or_else(|| self.session.locs.selected());
-                if let Some(i) = index {
-                    self.set_practice_mode(true);
-                    self.close_menu(true);
-                    self.load_loc(i);
-                }
-            } else if row == self.loc_row_clear() && !self.session.locs.is_empty() {
-                let n = self.session.locs.len();
-                self.session.locs.clear();
-                self.persist_locs();
-                self.locs_selected = LOC_ROW_PRACTICE;
-                println!("cleared {n} locs");
-            }
-            return;
-        }
-        match row {
-            MENU_MAPS => {
-                self.leave_to_picker();
-                return;
-            }
-            MENU_QUIT => {
-                self.persist_settings();
-                event_loop.exit();
-            }
-            // Toggles and cyclers act on click/Enter; numeric rows need ←→ or
-            // the wheel, so activating them just closes the menu as before.
-            MENU_SLOPE_TINT | MENU_EDGE_HIGHLIGHT | MENU_GHOST | MENU_GHOST_TRAIL | MENU_SYNC
-            | MENU_KEYS | MENU_VSYNC | MENU_AUDIO | MENU_WIPE => self.menu_adjust(1),
-            _ => self.close_menu(true),
-        }
-    }
-
-    /// Left click: focus the panel, select the row, and activate it if it is a
-    /// toggle or an action. Clicking off both panels resumes.
-    fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
+    /// Left click anywhere on a menu page.
+    fn page_click(&mut self, event_loop: &ActiveEventLoop) {
         let (mx, my) = self.cursor_px;
-        let Some((panel, row)) = self.hit_test(mx, my) else {
-            let layout = self.menu_layout();
-            if !layout.main.contains(mx, my) && !layout.locs.contains(mx, my) {
-                self.close_menu(true);
-            }
+        let Some((page, layout)) = self.page_layout() else {
             return;
         };
-        self.focus_panel(panel);
-        self.set_menu_row(row);
-        // Numeric settings rows would otherwise close the menu on a click, which
-        // is not what clicking a slider row should do.
-        let numeric = panel == MenuFocus::Settings
-            && matches!(
-                row,
-                MENU_SENS
-                    | MENU_BRIGHTNESS
-                    | MENU_SHADOW_LIFT
-                    | MENU_AA
-                    | MENU_AUDIO_VOLUME
-                    | MENU_AUDIO_CORE
-                    | MENU_AUDIO_AIR
-                    | MENU_AUDIO_SUB
-            );
-        // A loc row selects on click; Load (or Enter) is what goes there, so a
-        // misclick in the list can't teleport you.
-        let loc_row = panel == MenuFocus::Locs && self.loc_index_for_row(row).is_some();
-        if !numeric && !loc_row {
-            self.menu_activate(panel, row, event_loop);
+
+        if let Some(i) = layout.tabs.iter().position(|r| r.contains(mx, my)) {
+            if let Some(tab) = PauseTab::ALL.get(i).copied() {
+                self.set_tab(tab);
+            }
+            return;
+        }
+        if let Some(i) = layout.buttons.iter().position(|r| r.contains(mx, my)) {
+            self.focus = Focus::Buttons;
+            self.button_selected = i;
+            self.activate_button(i, event_loop);
+            return;
+        }
+        if let Some(drawn) = layout.panel.row_at(mx, my) {
+            let row = drawn + page.panel.scroll;
+            let Some(entry) = self.page_entries().into_iter().nth(row) else {
+                return;
+            };
+            if !entry.0.kind.selectable() {
+                return;
+            }
+            self.focus = Focus::Rows;
+            self.set_selected_row(row);
+            // A slider follows the cursor from here until the button comes up.
+            if let (RowKind::Slider(_), RowAction::Adjust(s)) = (entry.0.kind, &entry.1) {
+                if let Some(frac) = layout.panel.slider_frac_at(mx) {
+                    let s = *s;
+                    self.dragging = Some(row);
+                    self.set_setting_frac(s, frac);
+                }
+                return;
+            }
+            // A loc row selects on click; Enter or "Load selected" is what goes
+            // there, so a misclick in the list can't teleport you.
+            if matches!(entry.1, RowAction::Loc(_)) {
+                return;
+            }
+            self.activate_row(row, event_loop);
+            return;
+        }
+        // Clicking off the panel resumes / backs out, as it always has — but
+        // never where "back" would quit the game.
+        if !layout.panel.contains(mx, my) && self.back_is_click_safe() {
+            self.page_back(event_loop);
         }
     }
 
-    /// Right click deletes the loc under the cursor.
-    fn menu_right_click(&mut self) {
+    /// Cursor moved with the left button down: keep feeding a slider.
+    fn page_drag(&mut self) {
+        let Some(row) = self.dragging else {
+            return;
+        };
+        let Some(RowAction::Adjust(s)) = self.action_at(row) else {
+            self.dragging = None;
+            return;
+        };
+        let Some((_, layout)) = self.page_layout() else {
+            return;
+        };
+        // No `slider_frac_at` guard here: once a drag has started, tracking the
+        // cursor past the left end of the track should read as 0, not as "stop".
+        let (x0, x1) = layout.panel.slider_track();
+        let frac = ((self.cursor_px.0 - x0) / (x1 - x0)).clamp(0.0, 1.0);
+        self.set_setting_frac(s, frac);
+    }
+
+    /// Right click: delete the loc under the cursor, else go back a page.
+    fn page_right_click(&mut self, event_loop: &ActiveEventLoop) {
         let (mx, my) = self.cursor_px;
-        if let Some((MenuFocus::Locs, row)) = self.hit_test(mx, my) {
-            if self.loc_index_for_row(row).is_some() {
-                self.focus_panel(MenuFocus::Locs);
-                self.delete_loc_row(row);
+        if let Some((page, layout)) = self.page_layout() {
+            if let Some(drawn) = layout.panel.row_at(mx, my) {
+                let row = drawn + page.panel.scroll;
+                if matches!(self.action_at(row), Some(RowAction::Loc(_))) {
+                    self.delete_loc_row(row);
+                    return;
+                }
             }
         }
+        if self.back_is_click_safe() {
+            self.page_back(event_loop);
+        }
     }
 
-    /// Wheel adjusts the hovered settings row, or steps through the loc list.
-    fn menu_scroll(&mut self, dy: f32) {
-        if dy == 0.0 {
+    /// Wheel adjusts the hovered setting, otherwise steps the list.
+    fn page_scroll(&mut self, dy: f32) {
+        if dy.abs() < 0.01 {
             return;
         }
         let dir = if dy > 0.0 { 1 } else { -1 };
         let (mx, my) = self.cursor_px;
-        let Some((panel, row)) = self.hit_test(mx, my) else {
-            return;
-        };
-        self.focus_panel(panel);
-        match panel {
-            MenuFocus::Settings => {
-                self.menu_selected = row;
-                self.menu_adjust(dir);
-            }
-            MenuFocus::Locs => {
-                // Scroll moves through rows rather than changing a value —
-                // there is nothing to "adjust" in a list.
-                let len = self.locs_menu_len();
-                let cur = self.locs_selected.min(len - 1);
-                let next = if dir > 0 {
-                    (cur + 1) % len
-                } else if cur == 0 {
-                    len - 1
-                } else {
-                    cur - 1
-                };
-                self.set_menu_row(next);
+        let hovered = self.page_layout().and_then(|(page, layout)| {
+            layout
+                .panel
+                .row_at(mx, my)
+                .map(|d| d + page.panel.scroll)
+                .filter(|r| *r < page.panel.rows.len())
+        });
+        if let Some(row) = hovered {
+            if matches!(self.action_at(row), Some(RowAction::Adjust(s)) if slider_range(s).is_some())
+            {
+                self.focus = Focus::Rows;
+                self.set_selected_row(row);
+                self.adjust_row(row, dir);
+                return;
             }
         }
+        // Scrolling a list moves the cursor; the window follows it.
+        self.focus = Focus::Rows;
+        self.move_selection(-dir);
     }
 }
 
@@ -2180,25 +2484,22 @@ impl ApplicationHandler for App {
                 ..
             } => match state {
                 ElementState::Pressed => {
-                    // Shell pages own input entirely: no capture, no loc binds,
-                    // no player keys.
-                    if !matches!(self.mode, Mode::Playing) {
-                        if !repeat || matches!(code, KeyCode::ArrowUp | KeyCode::ArrowDown) {
-                            self.shell_key(code, event_loop);
-                        }
-                        return;
-                    }
-                    if self.menu_open {
-                        if !repeat {
-                            self.handle_menu_key(code, event_loop);
-                        } else if matches!(
+                    // Any open page owns input entirely: no capture, no loc
+                    // binds, no player keys.
+                    if self.page_open() {
+                        let repeatable = matches!(
                             code,
-                            KeyCode::ArrowLeft
+                            KeyCode::ArrowUp
+                                | KeyCode::ArrowDown
+                                | KeyCode::ArrowLeft
                                 | KeyCode::ArrowRight
+                                | KeyCode::KeyW
+                                | KeyCode::KeyS
                                 | KeyCode::KeyA
                                 | KeyCode::KeyD
-                        ) {
-                            self.handle_menu_key(code, event_loop);
+                        );
+                        if !repeat || repeatable {
+                            self.page_key(code, event_loop);
                         }
                         return;
                     }
@@ -2208,8 +2509,8 @@ impl ApplicationHandler for App {
                             if self.mouse_captured {
                                 self.open_menu();
                             } else {
-                                // Uncaptured + Esc → quit (second Esc after leaving menu).
-                                event_loop.exit();
+                                // Uncaptured + Esc → back to the title screen.
+                                self.leave_to_main_menu();
                             }
                         }
                         KeyCode::KeyR => self.reset(),
@@ -2221,21 +2522,15 @@ impl ApplicationHandler for App {
                             }
                         }
                         KeyCode::BracketLeft => {
-                            self.settings.mouse_sens =
-                                Settings::clamp_sens(self.settings.mouse_sens / 1.25);
+                            self.adjust_setting(Setting::Sens, -1);
                             self.persist_settings();
                         }
                         KeyCode::BracketRight => {
-                            self.settings.mouse_sens =
-                                Settings::clamp_sens(self.settings.mouse_sens * 1.25);
+                            self.adjust_setting(Setting::Sens, 1);
                             self.persist_settings();
                         }
-                        KeyCode::Minus => {
-                            self.session.vars.airaccelerate = (self.session.vars.airaccelerate / 1.5).max(1.0);
-                        }
-                        KeyCode::Equal => {
-                            self.session.vars.airaccelerate = (self.session.vars.airaccelerate * 1.5).min(1000.0);
-                        }
+                        KeyCode::Minus => self.adjust_setting(Setting::Airaccel, -1),
+                        KeyCode::Equal => self.adjust_setting(Setting::Airaccel, 1),
                         _ => {}
                     }
                 }
@@ -2245,42 +2540,35 @@ impl ApplicationHandler for App {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_px = (position.x as f32, position.y as f32);
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                if !matches!(self.mode, Mode::Playing) {
-                    let dy = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
-                    };
-                    if dy.abs() > 0.01 {
-                        self.shell_move(if dy > 0.0 { -1 } else { 1 });
-                    }
-                } else if self.menu_open {
-                    let dy = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
-                    };
-                    self.menu_scroll(dy);
+                // A slider keeps following the cursor while the button is down,
+                // which is the difference between a bar and a real slider.
+                if self.dragging.is_some() {
+                    self.page_drag();
                 }
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
-                // Loc binds are live only during actual play. In the menu the
-                // same clicks drive the panels, so a click on the UI can never
-                // move the player.
-                if !matches!(self.mode, Mode::Playing) {
-                    match button {
-                        MouseButton::Left => self.shell_click(event_loop),
-                        MouseButton::Right => self.shell_back(event_loop),
-                        _ => {}
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.page_open() {
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    };
+                    self.page_scroll(dy);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Released {
+                    if button == MouseButton::Left {
+                        self.dragging = None;
                     }
-                } else if self.menu_open {
+                    return;
+                }
+                // Loc binds are live only during actual play. On a menu page the
+                // same clicks drive the UI, so a click on a panel can never move
+                // the player.
+                if self.page_open() {
                     match button {
-                        MouseButton::Left => self.menu_click(event_loop),
-                        MouseButton::Right => self.menu_right_click(),
+                        MouseButton::Left => self.page_click(event_loop),
+                        MouseButton::Right => self.page_right_click(event_loop),
                         _ => {}
                     }
                 } else if !self.mouse_captured {
@@ -2357,14 +2645,15 @@ impl ApplicationHandler for App {
         event: DeviceEvent,
     ) {
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            if !self.mouse_captured || self.menu_open {
+            if !self.mouse_captured || self.page_open() {
                 return;
             }
             let yaw_scale = self.settings.mouse_sens * MOUSE_YAW_SCALE;
             let pitch_scale = self.settings.mouse_sens * MOUSE_PITCH_SCALE;
             self.session.player.viewangles.yaw -= dx as f32 * yaw_scale;
             self.session.player.viewangles.pitch += dy as f32 * pitch_scale;
-            self.session.player.viewangles.pitch = self.session.player.viewangles.pitch.clamp(-89.0, 89.0);
+            self.session.player.viewangles.pitch =
+                self.session.player.viewangles.pitch.clamp(-89.0, 89.0);
             if self.session.player.viewangles.yaw > 180.0 {
                 self.session.player.viewangles.yaw -= 360.0;
             }
@@ -2438,16 +2727,20 @@ fn discover_maps() -> Vec<MapEntry> {
             let label = stem.strip_prefix("surf_").unwrap_or(&stem).to_string();
             Some(MapEntry {
                 label,
+                name: stem,
                 path: Some(p),
                 pb: None,
+                wr: None,
             })
         })
         .collect();
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out.push(MapEntry {
         label: "graybox arena".into(),
+        name: GRAYBOX_MAP.to_string(),
         path: None,
         pb: None,
+        wr: None,
     });
     out
 }

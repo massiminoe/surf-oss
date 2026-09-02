@@ -1,4 +1,9 @@
-//! Persisted player prefs (sens + HUD + readability toggles).
+//! Persisted player prefs (sens + HUD + readability + audio).
+//!
+//! `#[serde(default)]` on the struct is load-bearing twice over: it lets an old
+//! settings file gain new keys, and it lets a *removed* key (the retired
+//! `slope_tint` / `edge_highlight` readability toggles) be ignored rather than
+//! failing the whole file to parse.
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,10 +29,6 @@ pub struct Settings {
     pub brightness: f32,
     /// Lift dark lightmap luxels toward white (0 = authentic, ~0.5 = readable caves).
     pub shadow_lift: f32,
-    /// Tint steep surfaces cool so ramps read against floors/walls.
-    pub slope_tint: bool,
-    /// Screen-space crease edges from normal discontinuities.
-    pub edge_highlight: bool,
     /// Active ghost: [`GHOST_OFF`], [`GHOST_AUTO`], [`GHOST_PB`], or an `.osxr` path.
     pub ghost: String,
     /// Neon on/off-ramp trail behind the ghost while racing.
@@ -56,8 +57,6 @@ impl Default for Settings {
             vsync: true,
             brightness: 1.0,
             shadow_lift: 0.0,
-            slope_tint: false,
-            edge_highlight: false,
             ghost: GHOST_AUTO.into(),
             ghost_trail: true,
             audio: true,
@@ -78,8 +77,7 @@ impl Settings {
 
     pub fn load_path(path: &std::path::Path) -> Result<Self, String> {
         let text = fs::read_to_string(path).map_err(|e| format!("settings read: {e}"))?;
-        let mut s: Self =
-            serde_json::from_str(&text).map_err(|e| format!("settings json: {e}"))?;
+        let mut s: Self = serde_json::from_str(&text).map_err(|e| format!("settings json: {e}"))?;
         s.mouse_sens = Self::clamp_sens(s.mouse_sens);
         s.brightness = Self::clamp_brightness(s.brightness);
         s.shadow_lift = Self::clamp_shadow_lift(s.shadow_lift);
@@ -167,8 +165,6 @@ mod tests {
             vsync: false,
             brightness: 1.4,
             shadow_lift: 0.3,
-            slope_tint: true,
-            edge_highlight: true,
             ghost: "off".into(),
             ghost_trail: false,
             audio: false,
@@ -192,8 +188,6 @@ mod tests {
         assert!(!loaded.vsync);
         assert!((loaded.brightness - 1.4).abs() < 1e-5);
         assert!((loaded.shadow_lift - 0.3).abs() < 1e-5);
-        assert!(loaded.slope_tint);
-        assert!(loaded.edge_highlight);
         assert_eq!(loaded.ghost, "off");
         assert!(!loaded.ghost_trail);
         let _ = fs::remove_file(&path);

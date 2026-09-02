@@ -6,25 +6,31 @@ use surf_map::{LightmapAtlas, MaterialAtlas, SkyboxAtlas};
 use wgpu::util::DeviceExt;
 
 /// Per-frame readability knobs (CPU → fragment uniform).
+///
+/// A uniform block is 16-byte aligned, so the two live knobs are padded out
+/// explicitly rather than left to whatever the driver assumes. `_pad` is
+/// private: build one with [`ViewParams::new`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ViewParams {
     pub exposure: f32,
     pub shadow_lift: f32,
-    /// 0 = off, 1 = on
-    pub slope_tint: f32,
-    /// 0 = off, 1 = on
-    pub edge_highlight: f32,
+    _pad: [f32; 2],
+}
+
+impl ViewParams {
+    pub fn new(exposure: f32, shadow_lift: f32) -> Self {
+        Self {
+            exposure,
+            shadow_lift,
+            _pad: [0.0; 2],
+        }
+    }
 }
 
 impl Default for ViewParams {
     fn default() -> Self {
-        Self {
-            exposure: 1.0,
-            shadow_lift: 0.0,
-            slope_tint: 0.0,
-            edge_highlight: 0.0,
-        }
+        Self::new(1.0, 0.0)
     }
 }
 
@@ -33,8 +39,6 @@ struct Camera { view_proj: mat4x4<f32> }
 struct ViewParams {
     exposure: f32,
     shadow_lift: f32,
-    slope_tint: f32,
-    edge_highlight: f32,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var albedo: texture_2d_array<f32>;
@@ -71,34 +75,6 @@ fn vs_main(v: VsIn) -> VsOut {
     return out;
 }
 
-fn apply_readability(base: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
-    var color = base * params.exposure;
-
-    // Reconstruct face normal in Y-up render space (Source Z → Y).
-    let dp1 = dpdx(world_pos);
-    let dp2 = dpdy(world_pos);
-    let n = normalize(cross(dp1, dp2));
-    let up = abs(n.y);
-    let steep = clamp(1.0 - up, 0.0, 1.0);
-
-    if params.slope_tint > 0.5 {
-        // Cool tint on ramps/walls; leave floors closer to bake.
-        let tint = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(0.55, 0.82, 1.05), steep * 0.65);
-        color *= tint;
-        // Slight fill so dark steep faces stay readable with tint on.
-        color += steep * 0.04 * vec3<f32>(0.4, 0.55, 0.7);
-    }
-
-    if params.edge_highlight > 0.5 {
-        let edge = length(fwidth(n));
-        let e = smoothstep(0.08, 0.45, edge);
-        let line = vec3<f32>(0.95, 0.97, 1.0);
-        color = mix(color, mix(color * 0.35, line, 0.55), e * 0.9);
-    }
-
-    return color;
-}
-
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb;
@@ -119,7 +95,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
         base = sample.rgb * light * 2.0;
     }
-    return vec4<f32>(apply_readability(base, v.world_pos), 1.0);
+    return vec4<f32>(base * params.exposure, 1.0);
 }
 "#;
 
@@ -430,6 +406,14 @@ impl Renderer {
                 label: Some("frame"),
             });
 
+        // A shell page paints its own opaque backdrop over the whole frame, so
+        // the world behind it is invisible. Skipping it means sitting on the
+        // main menu doesn't re-draw a 2.6M-triangle map every frame.
+        let world_hidden = hud
+            .as_ref()
+            .and_then(|h| h.page.as_ref())
+            .is_some_and(|p| p.backdrop);
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main"),
@@ -457,21 +441,25 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if let Some(sky) = &self.skybox {
-                sky.draw(&mut pass);
-            }
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            pass.set_bind_group(1, &self.materials.bind_group, &[]);
-            pass.set_bind_group(2, &self.view_params_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
-            if draw_trail {
-                self.trail.draw(&mut pass, &self.camera_bind_group);
-            }
-            if draw_ghost {
-                self.ghost.draw(&mut pass, &self.camera_bind_group);
+            if world_hidden {
+                // Depth/colour are still cleared by the pass itself.
+            } else {
+                if let Some(sky) = &self.skybox {
+                    sky.draw(&mut pass);
+                }
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &self.materials.bind_group, &[]);
+                pass.set_bind_group(2, &self.view_params_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
+                if draw_trail {
+                    self.trail.draw(&mut pass, &self.camera_bind_group);
+                }
+                if draw_ghost {
+                    self.ghost.draw(&mut pass, &self.camera_bind_group);
+                }
             }
         }
 

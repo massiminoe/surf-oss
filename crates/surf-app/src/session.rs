@@ -10,14 +10,13 @@
 //! arena before anything is picked), so nothing here is optional and no caller
 //! has to unwrap.
 
+use surf_audio::EventDetector;
 use surf_core::graybox::GrayboxMesh;
+use surf_core::graybox::GrayboxWorld;
 use surf_core::math::{Angle, Vec3};
 use surf_core::movement::{MoveVars, PlayerState, UserCmd};
 use surf_core::{graybox, tick, World};
-use surf_core::graybox::GrayboxWorld;
 use surf_map::{FieldState, LightmapAtlas, LoadedMap, MaterialAtlas, SkyboxAtlas};
-use surf_audio::EventDetector;
-use surf_render::{MenuRecentEntry};
 
 use crate::locs::{LocStore, GRAYBOX_MAP};
 use crate::pb::PbStore;
@@ -146,8 +145,6 @@ pub struct Session {
     pub pb_delta: Option<f32>,
     pub finish_recorded: bool,
     pub pb_flash_left: f32,
-    pub recent_count: u32,
-    pub recent_runs: Vec<MenuRecentEntry>,
     pub replay_rec: ReplayRecorder,
     /// PB checkpoint splits (from pb.osxr header or derived).
     pub pb_splits: Vec<f32>,
@@ -237,8 +234,6 @@ impl Session {
             pb_delta: None,
             finish_recorded: false,
             pb_flash_left: 0.0,
-            recent_count: 0,
-            recent_runs: Vec::new(),
             replay_rec: ReplayRecorder::default(),
             pb_splits: Vec::new(),
             pb_ghost: None,

@@ -18,9 +18,11 @@ use crate::timer::{TimerPhase, TimerSnapshot};
 
 pub const LOCS_FORMAT_VERSION: u32 = 1;
 
-/// Upper bound on locs per map. Saveloc is a spam key; without a cap the file
-/// and the menu list both grow without limit.
-pub const MAX_LOCS: usize = 64;
+/// Upper bound on locs per map. Saveloc is a spam key, so there is still a cap
+/// on the file and the menu list — but the old 64 was low enough to hit during
+/// an ordinary practice session, and the list scrolls now, so it costs nothing
+/// to be generous.
+pub const MAX_LOCS: usize = 512;
 
 /// Map name used when there is no BSP (graybox).
 pub const GRAYBOX_MAP: &str = "graybox";

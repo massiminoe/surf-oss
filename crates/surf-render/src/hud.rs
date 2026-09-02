@@ -1,10 +1,23 @@
-//! Modern HUD: glyphon text (JetBrains Mono), centered speed + info box,
-//! and the Esc menu.
+//! HUD: glyphon text (JetBrains Mono) for the gameplay readout, plus the
+//! menu system — one page model shared by the pause overlay and every shell
+//! page (title screen, map picker, settings, leaderboard, loading).
+//!
+//! There used to be two parallel implementations: a side-by-side pair of pause
+//! panels and a separate single-panel shell. They drifted (only one had
+//! scrolling, only one had hover). Now both build a [`MenuPage`] and go through
+//! one layout function and one draw path, so a feature added to menus is added
+//! everywhere at once.
+//!
+//! [`page_layout`] is the single source of geometry: it returns the exact rects
+//! the renderer draws, and the app hit-tests the same values, so a click can
+//! never land on a row other than the one on screen.
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
+
+use crate::backdrop::Backdrop;
 
 const FONT_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Medium.ttf");
 const FONT_FAMILY: &str = "JetBrains Mono";
@@ -28,40 +41,159 @@ pub struct ShowKeysState {
     pub jump: bool,
 }
 
-/// One recent finish row for the pause menu.
-#[derive(Clone, Debug, Default)]
-pub struct MenuRecentEntry {
-    pub time: String,
-    pub is_pb: bool,
+// ---------------------------------------------------------------------------
+// Menu model
+// ---------------------------------------------------------------------------
+
+/// What a row *is*, which decides how it draws and whether it can be selected.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum RowKind {
+    /// Section heading. Never selectable — the app's cursor skips it.
+    Header,
+    #[default]
+    Item,
+    /// Continuous value: draws a track under the row, `frac` full.
+    Slider(f32),
+    /// Read-only line (a leaderboard entry).
+    Text,
 }
 
-/// One pause-overlay panel (settings on the left, locs on the right).
+impl RowKind {
+    pub fn selectable(&self) -> bool {
+        !matches!(self, RowKind::Header)
+    }
+}
+
+/// Colour role for a row's value. Keeps the palette in the renderer instead of
+/// scattering RGB triples through the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RowTone {
+    #[default]
+    Normal,
+    Dim,
+    /// A PB, a win, a time ahead.
+    Good,
+    /// Something armed / destructive.
+    Warn,
+    Accent,
+}
+
+/// One menu line: `label` left, optional `note` in the middle column, `value`
+/// right-aligned. Three columns cover every page we have (settings, locs,
+/// leaderboard) without per-page layout code.
+#[derive(Clone, Debug, Default)]
+pub struct MenuRow {
+    pub label: String,
+    pub note: String,
+    pub value: String,
+    pub kind: RowKind,
+    pub tone: RowTone,
+}
+
+impl MenuRow {
+    pub fn header(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            kind: RowKind::Header,
+            ..Default::default()
+        }
+    }
+
+    pub fn item(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn slider(label: impl Into<String>, value: impl Into<String>, frac: f32) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            kind: RowKind::Slider(frac.clamp(0.0, 1.0)),
+            ..Default::default()
+        }
+    }
+
+    pub fn text(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            kind: RowKind::Text,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = note.into();
+        self
+    }
+
+    pub fn with_tone(mut self, tone: RowTone) -> Self {
+        self.tone = tone;
+        self
+    }
+}
+
+/// The scrolling list of a page. `selected` / `hovered` / `scroll` are all in
+/// *logical* row coordinates; the renderer draws `rows[scroll..]`.
 #[derive(Clone, Debug, Default)]
 pub struct MenuPanel {
-    /// Heading — names the box.
-    pub title: String,
-    /// Rows as `(label, value)`. Value may be empty (e.g. Quit).
-    pub items: Vec<(String, String)>,
-    pub hint: String,
+    pub rows: Vec<MenuRow>,
     pub selected: usize,
-    /// Row under the cursor, if any.
     pub hovered: Option<usize>,
-    /// Panel owns the keyboard. Only the focused panel draws a hard selection.
+    pub scroll: usize,
+    /// Panel owns the keyboard (vs. the button bar).
     pub focused: bool,
 }
 
-/// Settings / pause overlay content (preformatted by the app). Both panels are
-/// always drawn — the loc list is a peer of the settings list, not a sub-page.
+/// A full menu page: pause overlay or shell screen.
 #[derive(Clone, Debug, Default)]
-pub struct MenuHud {
-    pub main: MenuPanel,
-    pub locs: MenuPanel,
-    /// Total finishes on this map (for the recent heading, under the settings).
-    pub recent_count: u32,
-    pub recent: Vec<MenuRecentEntry>,
+pub struct MenuPage {
+    pub title: String,
+    pub subtitle: String,
+    /// Section tabs. Empty = no tab strip.
+    pub tabs: Vec<String>,
+    pub tab: usize,
+    pub tab_hovered: Option<usize>,
+    pub panel: MenuPanel,
+    /// Always-visible action bar under the list (Resume / Back / Quit …).
+    pub buttons: Vec<String>,
+    /// `Some` = keyboard focus is on the button bar, at this index.
+    pub button_selected: Option<usize>,
+    pub button_hovered: Option<usize>,
+    /// Status or error line under the list.
+    pub message: Option<String>,
+    pub hint: String,
+    /// Wider panel, for pages with three real columns (leaderboard).
+    pub wide: bool,
+    /// Draw the procedural backdrop over the world (shell pages). `false` just
+    /// dims the world, which is what the pause overlay wants.
+    pub backdrop: bool,
+    /// Indeterminate progress bar under the title (loading).
+    pub busy: bool,
 }
 
-/// Pixel geometry of one panel. The renderer draws from this and the app
+// ---------------------------------------------------------------------------
+// Geometry
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    pub fn contains(&self, mx: f32, my: f32) -> bool {
+        mx >= self.x && mx <= self.x + self.w && my >= self.y && my <= self.y + self.h
+    }
+}
+
+/// Pixel geometry of the row list. The renderer draws from this and the app
 /// hit-tests against it, so a click always lands on the row you can see.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PanelLayout {
@@ -69,22 +201,20 @@ pub struct PanelLayout {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-    /// Top of the first row.
+    /// Top of the first *drawn* row.
     pub items_y0: f32,
     pub row_h: f32,
+    /// How many rows fit / are drawn (not the logical row count).
     pub rows: usize,
 }
 
 impl PanelLayout {
-    /// Row index under a cursor position, if it is over one.
+    /// Drawn-row index under a cursor position, if it is over one.
     pub fn row_at(&self, mx: f32, my: f32) -> Option<usize> {
         if self.rows == 0 || self.row_h <= 0.0 {
             return None;
         }
-        if mx < self.x || mx > self.x + self.w {
-            return None;
-        }
-        if my < self.items_y0 {
+        if mx < self.x || mx > self.x + self.w || my < self.items_y0 {
             return None;
         }
         let row = ((my - self.items_y0) / self.row_h).floor();
@@ -92,146 +222,185 @@ impl PanelLayout {
             return None;
         }
         let row = row as usize;
-        if row < self.rows {
-            Some(row)
-        } else {
-            None
-        }
+        (row < self.rows).then_some(row)
     }
 
     pub fn contains(&self, mx: f32, my: f32) -> bool {
         mx >= self.x && mx <= self.x + self.w && my >= self.y && my <= self.y + self.h
     }
-}
 
-/// Geometry for the whole pause overlay.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MenuLayout {
-    pub main: PanelLayout,
-    pub locs: PanelLayout,
-}
+    /// Horizontal span of a slider track. Deliberately the right half of the
+    /// row: clicking a label still just selects, clicking the track sets the
+    /// value the way a slider should. The right end stops short of the value
+    /// column so the bar never runs under the number it is showing.
+    pub fn slider_track(&self) -> (f32, f32) {
+        let x0 = self.x + self.w * 0.44;
+        let x1 = self.x + self.w - PANEL_PAD_X - VALUE_GUTTER;
+        (x0, x1.max(x0 + 1.0))
+    }
 
-const PANEL_GAP: f32 = 22.0;
-const PANEL_TITLE_H: f32 = 36.0;
-const PANEL_HINT_H: f32 = 18.0;
-const PANEL_PAD_X: f32 = 28.0;
-const RECENT_ROW_H: f32 = 22.0;
-
-fn panel_row_h(rows: usize) -> f32 {
-    // Tighten rows once a list is long so a taller panel still fits on small
-    // windows. Stays clear of the 22 px line height, so rows never overlap.
-    if rows > 14 {
-        25.0
-    } else {
-        30.0
+    /// Fraction 0..1 for a click at `mx` on a slider row, or `None` when the
+    /// cursor is left of the track (the label half).
+    pub fn slider_frac_at(&self, mx: f32) -> Option<f32> {
+        let (x0, x1) = self.slider_track();
+        if mx < x0 - 8.0 {
+            return None;
+        }
+        Some(((mx - x0) / (x1 - x0)).clamp(0.0, 1.0))
     }
 }
 
-/// Lay out both panels side by side, centred as a pair. Pure — the app calls
-/// this to hit-test the exact rows the renderer drew.
-pub fn menu_layout(
-    w: f32,
-    h: f32,
-    main_rows: usize,
-    loc_rows: usize,
-    recent_rows: usize,
-) -> MenuLayout {
-    let want_main = 440.0_f32;
-    let want_locs = 360.0_f32;
-    let available = (w - 48.0).max(280.0);
-    let total = want_main + want_locs + PANEL_GAP;
-    // Squeeze both panels proportionally rather than letting either fall off.
-    let scale = if total > available {
-        available / total
+/// Everything a page draws, in pixels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageLayout {
+    pub panel: PanelLayout,
+    pub tabs: Vec<Rect>,
+    pub buttons: Vec<Rect>,
+    pub title_y: f32,
+    pub subtitle_y: f32,
+    pub busy_y: f32,
+    pub message_y: f32,
+    pub hint_y: f32,
+}
+
+/// Counts a page needs laid out. Kept as a struct so adding a region later
+/// can't silently reorder positional arguments at a call site.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PageSpec {
+    /// Total logical rows (the layout decides how many of them fit).
+    pub rows: usize,
+    pub tabs: usize,
+    pub buttons: usize,
+    pub wide: bool,
+}
+
+const PANEL_PAD_X: f32 = 26.0;
+/// Width reserved at the right of a row for its value text.
+const VALUE_GUTTER: f32 = 62.0;
+const ROW_H: f32 = 27.0;
+const TAB_H: f32 = 30.0;
+const BUTTON_H: f32 = 32.0;
+
+/// Hard cap on drawn rows — must stay <= the renderer's row buffer pool.
+pub const PANEL_ROWS_MAX: usize = 22;
+
+/// Lay out a menu page. Pure: the app calls this to hit-test exactly what the
+/// renderer drew.
+pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
+    let want = if spec.wide { w * 0.62 } else { w * 0.48 };
+    let (lo, hi) = if spec.wide {
+        (420.0, 900.0)
     } else {
-        1.0
+        (360.0, 660.0)
     };
-    let main_w = (want_main * scale).max(200.0);
-    let locs_w = (want_locs * scale).max(160.0);
-    let group_w = main_w + locs_w + PANEL_GAP * scale;
-    let group_x = ((w - group_w) * 0.5).max(12.0);
+    let pw = want.clamp(lo, hi).min((w - 40.0).max(240.0));
+    let px = ((w - pw) * 0.5).max(12.0);
+    let py = (h * 0.11).max(26.0);
 
-    let title_y = (h * 0.16).max(48.0);
-    let panel_y = title_y - 28.0;
-    let items_y0 = title_y + PANEL_TITLE_H + 18.0;
-
-    let main_row_h = panel_row_h(main_rows);
-    let main_hint_y = items_y0 + main_rows as f32 * main_row_h + 10.0;
-    // Recent footer hangs under the settings panel only.
-    let recent_title_y = main_hint_y + PANEL_HINT_H + 22.0;
-    let recent_y0 = recent_title_y + 22.0;
-    let main_bottom = if recent_rows > 0 {
-        recent_y0 + recent_rows as f32 * RECENT_ROW_H + 28.0
+    let title_y = py + 24.0;
+    let subtitle_y = py + 70.0;
+    let has_tabs = spec.tabs > 0;
+    let tabs_y = py + 98.0;
+    let items_y0 = if has_tabs {
+        tabs_y + TAB_H + 18.0
     } else {
-        recent_title_y + 36.0
+        py + 104.0
     };
 
-    let locs_row_h = panel_row_h(loc_rows);
-    let locs_hint_y = items_y0 + loc_rows as f32 * locs_row_h + 10.0;
-    let locs_bottom = locs_hint_y + PANEL_HINT_H + 26.0;
+    // Reserve the space below the list before deciding how many rows fit.
+    let below = 22.0 /* message */ + 24.0 /* hint */
+        + if spec.buttons > 0 { BUTTON_H + 26.0 } else { 14.0 }
+        + 24.0;
+    let avail = (h - items_y0 - below - 16.0).max(0.0);
+    let fits = (avail / ROW_H).floor().max(0.0) as usize;
+    let rows = spec.rows.min(fits).min(PANEL_ROWS_MAX);
 
-    MenuLayout {
-        main: PanelLayout {
-            x: group_x,
-            y: panel_y,
-            w: main_w,
-            h: (main_bottom - panel_y).max(200.0),
+    let items_end = items_y0 + rows as f32 * ROW_H;
+    let message_y = items_end + 12.0;
+    let hint_y = message_y + 24.0;
+    let buttons_y = hint_y + 26.0;
+
+    let inner_x = px + PANEL_PAD_X;
+    let inner_w = pw - PANEL_PAD_X * 2.0;
+
+    let tabs = if has_tabs {
+        let gap = 8.0;
+        let tw = (inner_w - gap * (spec.tabs as f32 - 1.0)) / spec.tabs as f32;
+        (0..spec.tabs)
+            .map(|i| Rect {
+                x: inner_x + i as f32 * (tw + gap),
+                y: tabs_y,
+                w: tw,
+                h: TAB_H,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let buttons = if spec.buttons > 0 {
+        let gap = 8.0;
+        // Cap the width so a single "Back" is a button, not a banner, then
+        // centre whatever the strip comes to.
+        let bw = ((inner_w - gap * (spec.buttons as f32 - 1.0)) / spec.buttons as f32).min(168.0);
+        let strip_w = bw * spec.buttons as f32 + gap * (spec.buttons as f32 - 1.0);
+        let bx = inner_x + (inner_w - strip_w) * 0.5;
+        (0..spec.buttons)
+            .map(|i| Rect {
+                x: bx + i as f32 * (bw + gap),
+                y: buttons_y,
+                w: bw,
+                h: BUTTON_H,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let bottom = if spec.buttons > 0 {
+        buttons_y + BUTTON_H + 22.0
+    } else {
+        hint_y + 30.0
+    };
+
+    PageLayout {
+        panel: PanelLayout {
+            x: px,
+            y: py,
+            w: pw,
+            h: (bottom - py).max(180.0),
             items_y0,
-            row_h: main_row_h,
-            rows: main_rows,
+            row_h: ROW_H,
+            rows,
         },
-        locs: PanelLayout {
-            x: group_x + main_w + PANEL_GAP * scale,
-            y: panel_y,
-            w: locs_w,
-            h: (locs_bottom - panel_y).max(160.0),
-            items_y0,
-            row_h: locs_row_h,
-            rows: loc_rows,
-        },
+        tabs,
+        buttons,
+        title_y,
+        subtitle_y,
+        busy_y: subtitle_y + 30.0,
+        message_y,
+        hint_y,
     }
 }
 
-/// A full-screen shell page: title screen, map picker, or loading. One centred
-/// panel, unlike the pause overlay's side-by-side pair.
-#[derive(Clone, Debug, Default)]
-pub struct ShellHud {
-    pub title: String,
-    pub subtitle: String,
-    /// `(label, value)` rows — value is a PB time, a tag, or empty.
-    pub items: Vec<(String, String)>,
-    pub selected: usize,
-    pub hovered: Option<usize>,
-    pub hint: String,
-    /// Status or error line under the list.
-    pub message: Option<String>,
-    /// Rows are drawn from here; the app scrolls long lists itself so what it
-    /// hit-tests and what is drawn stay the same slice.
-    pub scroll: usize,
+/// Layout for `page`, so the app and the renderer agree without rebuilding the
+/// spec in two places.
+pub fn layout_for(w: f32, h: f32, page: &MenuPage) -> PageLayout {
+    page_layout(
+        w,
+        h,
+        PageSpec {
+            rows: page.panel.rows.len(),
+            tabs: page.tabs.len(),
+            buttons: page.buttons.len(),
+            wide: page.wide,
+        },
+    )
 }
 
-/// Most shell rows on screen at once. A longer map list scrolls.
-pub const SHELL_ROWS_VISIBLE: usize = 16;
-
-/// Geometry for a shell page. Pure, like [`menu_layout`], so the app hit-tests
-/// exactly the rows the renderer drew.
-pub fn shell_layout(w: f32, h: f32, rows: usize) -> PanelLayout {
-    let pw = (w * 0.46).clamp(320.0, 560.0);
-    let x = ((w - pw) * 0.5).max(12.0);
-    let row_h = panel_row_h(rows);
-    let y = (h * 0.13).max(36.0);
-    let items_y0 = y + PANEL_TITLE_H + 74.0;
-    let bottom = items_y0 + rows as f32 * row_h + 84.0;
-    PanelLayout {
-        x,
-        y,
-        w: pw,
-        h: (bottom - y).max(200.0),
-        items_y0,
-        row_h,
-        rows,
-    }
-}
+// ---------------------------------------------------------------------------
+// HUD state
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
 pub struct HudState {
@@ -259,20 +428,19 @@ pub struct HudState {
     /// Staged maps: `"STAGE 2/5"` while armed/running/finished.
     pub stage_line: Option<String>,
     /// Run was resumed from a saved loc: the clock is real, the run is not.
-    /// Folded into the phase label so a practice time can never be misread.
     pub practice: bool,
-    /// Practice mode armed — loadloc is unlocked. Shown so it's always visible
-    /// whether a stray click can yank you out of a run.
+    /// Practice mode armed — loadloc is unlocked.
     pub practice_mode: bool,
-    /// Live time delta vs PB ghost (negative = ahead). Shown while racing ghost.
+    /// Live time delta vs PB ghost (negative = ahead).
     pub ghost_time_delta: Option<f32>,
     /// Live 2D speed delta vs PB ghost (positive = faster than ghost).
     pub ghost_speed_delta: Option<f32>,
-    pub menu: Option<MenuHud>,
-    /// Title screen / map picker / loading page. Takes over the whole frame.
-    pub shell: Option<ShellHud>,
+    /// Pause overlay or shell page. Takes over the frame when present.
+    pub page: Option<MenuPage>,
     /// Optional FPS / frame-time / resolution line (bottom-right).
     pub perf_line: Option<String>,
+    /// Seconds since app start — drives the backdrop and the busy bar.
+    pub time: f32,
 }
 
 impl Default for HudState {
@@ -295,9 +463,9 @@ impl Default for HudState {
             stage_line: None,
             ghost_time_delta: None,
             ghost_speed_delta: None,
-            menu: None,
-            shell: None,
+            page: None,
             perf_line: None,
+            time: 0.0,
         }
     }
 }
@@ -309,12 +477,33 @@ struct HudVert {
     color: [f32; 4],
 }
 
+// Palette. The accent is the one locked for the world art (#2FBF7F); amber is
+// kept for times only, so "this is a result" and "this is selected" never read
+// as the same thing.
+// Quad colours are written to an sRGB surface, so these are the *linear*
+// values of the intended swatches — spelling #2FBF7F as 0.184 would come out
+// three stops light.
+const C_ACCENT: [f32; 4] = [0.02843, 0.521, 0.21223, 1.0]; // #2FBF7F
+const TXT_TITLE: Color = Color::rgb(238, 242, 240);
+const TXT_SUB: Color = Color::rgb(122, 132, 140);
+const TXT_HEADER: Color = Color::rgb(96, 150, 124);
+const TXT_LABEL: Color = Color::rgb(200, 206, 212);
+const TXT_LABEL_SEL: Color = Color::rgb(244, 250, 246);
+const TXT_VALUE: Color = Color::rgb(146, 154, 164);
+const TXT_ACCENT: Color = Color::rgb(72, 200, 138);
+const TXT_GOOD: Color = Color::rgb(110, 230, 140);
+const TXT_WARN: Color = Color::rgb(240, 170, 90);
+const TXT_DIM: Color = Color::rgb(112, 120, 130);
+const TXT_HINT: Color = Color::rgb(112, 120, 132);
+const TXT_ERR: Color = Color::rgb(232, 138, 116);
+
 pub struct HudRenderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    backdrop: Backdrop,
     speed_buf: Buffer,
     time_buf: Buffer,
     delta_buf: Buffer,
@@ -326,24 +515,25 @@ pub struct HudRenderer {
     sync_buf: Buffer,
     keys_buf: Buffer,
     perf_buf: Buffer,
-    menu_title_buf: Buffer,
-    menu_bufs: Vec<Buffer>,
-    menu_hint_buf: Buffer,
-    locs_title_buf: Buffer,
-    locs_bufs: Vec<Buffer>,
-    locs_hint_buf: Buffer,
-    shell_title_buf: Buffer,
-    shell_sub_buf: Buffer,
-    shell_bufs: Vec<Buffer>,
-    shell_hint_buf: Buffer,
-    shell_msg_buf: Buffer,
-    recent_title_buf: Buffer,
-    recent_bufs: Vec<Buffer>,
+    page_title_buf: Buffer,
+    page_sub_buf: Buffer,
+    page_hint_buf: Buffer,
+    page_msg_buf: Buffer,
+    tab_bufs: Vec<Buffer>,
+    label_bufs: Vec<Buffer>,
+    note_bufs: Vec<Buffer>,
+    value_bufs: Vec<Buffer>,
+    button_bufs: Vec<Buffer>,
     bar_pipeline: wgpu::RenderPipeline,
     bar_vbo: wgpu::Buffer,
     bar_capacity: u32,
     bar_vert_count: u32,
 }
+
+/// Tab strip / button bar pools. Beyond this a page's extra entries are simply
+/// not drawn, so keep them in step with what the app builds.
+const MAX_TABS: usize = 5;
+const MAX_BUTTONS: usize = 6;
 
 impl HudRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
@@ -357,8 +547,7 @@ impl HudRenderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
-        // Speed is the headline read (reference HUD: large, centered, above
-        // the info box) — everything else is deliberately quieter.
+        // Speed is the headline read — everything else is deliberately quieter.
         let speed_buf = Buffer::new(&mut font_system, Metrics::new(58.0, 66.0));
         let time_buf = Buffer::new(&mut font_system, Metrics::new(20.0, 26.0));
         let delta_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
@@ -370,28 +559,24 @@ impl HudRenderer {
         let sync_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
         let keys_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 22.0));
         let perf_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 16.0));
-        let menu_title_buf = Buffer::new(&mut font_system, Metrics::new(26.0, 32.0));
-        // Must stay >= the app's menu row count; extra rows are silently
-        // truncated rather than wrapping.
-        let menu_bufs = (0..24)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 22.0)))
+
+        let page_title_buf = Buffer::new(&mut font_system, Metrics::new(34.0, 40.0));
+        let page_sub_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
+        let page_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
+        let page_msg_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
+        let tab_bufs = (0..MAX_TABS)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
             .collect();
-        let menu_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
-        let locs_title_buf = Buffer::new(&mut font_system, Metrics::new(26.0, 32.0));
-        let locs_bufs = (0..20)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(17.0, 22.0)))
-            .collect();
-        let locs_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
-        let shell_title_buf = Buffer::new(&mut font_system, Metrics::new(38.0, 44.0));
-        let shell_sub_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
-        let shell_bufs: Vec<Buffer> = (0..SHELL_ROWS_VISIBLE)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(18.0, 23.0)))
-            .collect();
-        let shell_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
-        let shell_msg_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
-        let recent_title_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 17.0));
-        let recent_bufs = (0..6)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(15.0, 20.0)))
+        let mk_rows = |fs: &mut FontSystem, size: f32| {
+            (0..PANEL_ROWS_MAX)
+                .map(|_| Buffer::new(fs, Metrics::new(size, size + 5.0)))
+                .collect::<Vec<_>>()
+        };
+        let label_bufs = mk_rows(&mut font_system, 16.0);
+        let note_bufs = mk_rows(&mut font_system, 14.0);
+        let value_bufs = mk_rows(&mut font_system, 15.0);
+        let button_bufs = (0..MAX_BUTTONS)
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
             .collect();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -472,7 +657,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             cache: None,
         });
 
-        let bar_capacity = 1024u32;
+        let bar_capacity = 4096u32;
         let bar_vbo = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud_bar_vbo"),
             size: (bar_capacity as u64) * std::mem::size_of::<HudVert>() as u64,
@@ -486,6 +671,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             viewport,
             atlas,
             text_renderer,
+            backdrop: Backdrop::new(device, format),
             speed_buf,
             time_buf,
             delta_buf,
@@ -497,19 +683,15 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             sync_buf,
             keys_buf,
             perf_buf,
-            menu_title_buf,
-            locs_title_buf,
-            locs_bufs,
-            locs_hint_buf,
-            menu_bufs,
-            menu_hint_buf,
-            shell_title_buf,
-            shell_sub_buf,
-            shell_bufs,
-            shell_hint_buf,
-            shell_msg_buf,
-            recent_title_buf,
-            recent_bufs,
+            page_title_buf,
+            page_sub_buf,
+            page_hint_buf,
+            page_msg_buf,
+            tab_bufs,
+            label_bufs,
+            note_bufs,
+            value_bufs,
+            button_bufs,
             bar_pipeline,
             bar_vbo,
             bar_capacity,
@@ -546,6 +728,18 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             bottom: height as i32,
         };
 
+        let page_open = hud.page.is_some();
+        self.backdrop.prepare(
+            queue,
+            hud.time,
+            width,
+            height,
+            match hud.page.as_ref() {
+                Some(p) if p.backdrop => 1.0,
+                _ => 0.0,
+            },
+        );
+
         // --- gameplay HUD text ---
         let speed_label = format!("{:.0}", hud.speed);
         set_buf_text(
@@ -570,9 +764,9 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             HudTimerPhase::Running => hud.stage_line.as_deref(),
             HudTimerPhase::Idle => None,
         };
-        // Both states always show, even on Idle/Running where there'd be no
-        // label: a loaded run must never be mistaken for a clean one, and you
-        // must be able to see at a glance whether Mouse1 is armed.
+        // Both states always show, even where there'd be no label: a loaded run
+        // must never be mistaken for a clean one, and you must be able to see at
+        // a glance whether Mouse1 is armed.
         let practice_tag = if hud.practice {
             Some("PRACTICE")
         } else if hud.practice_mode {
@@ -674,7 +868,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             );
         }
 
-        // The sync bar is gone; the toggle now drives a line in the info box.
         let sync_label = if hud.show_sync_bar {
             Some(format!("Sync: {:.0}%", hud.sync.clamp(0.0, 100.0)))
         } else {
@@ -700,148 +893,110 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             );
         }
 
-        // Shell page text (title screen / map picker / loading).
-        let shell_open = hud.shell.is_some();
-        let mut shell_item_count = 0usize;
-        if let Some(ref sh) = hud.shell {
-            set_buf_text(&mut self.font_system, &mut self.shell_title_buf, &sh.title, attrs, w, 44.0);
-            set_buf_text(&mut self.font_system, &mut self.shell_sub_buf, &sh.subtitle, attrs, w, 19.0);
-            let start = sh.scroll.min(sh.items.len());
-            let end = (start + self.shell_bufs.len()).min(sh.items.len());
-            shell_item_count = end - start;
-            for i in 0..shell_item_count {
-                let (ref label, ref value) = sh.items[start + i];
-                let line = if value.is_empty() {
-                    label.clone()
-                } else {
-                    format!("{label:<20}{value:>10}")
-                };
-                set_buf_text(&mut self.font_system, &mut self.shell_bufs[i], &line, attrs, w, 23.0);
-            }
-            set_buf_text(&mut self.font_system, &mut self.shell_hint_buf, &sh.hint, attrs, w, 16.0);
+        // --- menu page text ---
+        let layout = hud
+            .page
+            .as_ref()
+            .map(|p| layout_for(w, h, p))
+            .unwrap_or_default();
+        let mut drawn_rows = 0usize;
+        let mut tab_count = 0usize;
+        let mut button_count = 0usize;
+        if let Some(ref page) = hud.page {
             set_buf_text(
                 &mut self.font_system,
-                &mut self.shell_msg_buf,
-                sh.message.as_deref().unwrap_or(""),
+                &mut self.page_title_buf,
+                &page.title,
                 attrs,
                 w,
-                19.0,
+                44.0,
             );
-        }
-
-        // Pause menu text
-        let menu_open = hud.menu.is_some();
-        let mut menu_item_count = 0usize;
-        let mut locs_item_count = 0usize;
-        let mut recent_count = 0usize;
-        if let Some(ref menu) = hud.menu {
             set_buf_text(
                 &mut self.font_system,
-                &mut self.menu_title_buf,
-                &menu.main.title,
+                &mut self.page_sub_buf,
+                &page.subtitle,
                 attrs,
                 w,
-                36.0,
+                20.0,
             );
-            menu_item_count = menu.main.items.len().min(self.menu_bufs.len());
-            for i in 0..menu_item_count {
-                let (ref label, ref value) = menu.main.items[i];
-                let line = if value.is_empty() {
-                    label.clone()
-                } else {
-                    format!("{label:<18}{value:>8}")
-                };
-                set_buf_text(
-                    &mut self.font_system,
-                    &mut self.menu_bufs[i],
-                    &line,
-                    attrs,
-                    w,
-                    26.0,
-                );
-            }
             set_buf_text(
                 &mut self.font_system,
-                &mut self.menu_hint_buf,
-                &menu.main.hint,
+                &mut self.page_hint_buf,
+                &page.hint,
                 attrs,
                 w,
                 18.0,
             );
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.page_msg_buf,
+                page.message.as_deref().unwrap_or(""),
+                attrs,
+                w,
+                20.0,
+            );
 
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.locs_title_buf,
-                &menu.locs.title,
-                attrs,
-                w,
-                36.0,
-            );
-            locs_item_count = menu.locs.items.len().min(self.locs_bufs.len());
-            for i in 0..locs_item_count {
-                let (ref label, ref value) = menu.locs.items[i];
-                let line = if value.is_empty() {
-                    label.clone()
-                } else {
-                    format!("{label:<14}{value:>10}")
-                };
+            tab_count = page
+                .tabs
+                .len()
+                .min(self.tab_bufs.len())
+                .min(layout.tabs.len());
+            for i in 0..tab_count {
                 set_buf_text(
                     &mut self.font_system,
-                    &mut self.locs_bufs[i],
-                    &line,
-                    attrs,
-                    w,
-                    26.0,
-                );
-            }
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.locs_hint_buf,
-                &menu.locs.hint,
-                attrs,
-                w,
-                18.0,
-            );
-            {
-                let recent_heading = if menu.recent_count == 0 {
-                    "RECENT".into()
-                } else {
-                    format!("RECENT  ·  {} finishes", menu.recent_count)
-                };
-                set_buf_text(
-                    &mut self.font_system,
-                    &mut self.recent_title_buf,
-                    &recent_heading,
+                    &mut self.tab_bufs[i],
+                    &page.tabs[i],
                     attrs,
                     w,
                     20.0,
                 );
-                if menu.recent.is_empty() {
-                    recent_count = 1;
-                    set_buf_text(
-                        &mut self.font_system,
-                        &mut self.recent_bufs[0],
-                        "no finishes yet",
-                        attrs,
-                        w,
-                        22.0,
-                    );
-                } else {
-                    recent_count = menu.recent.len().min(self.recent_bufs.len());
-                    for i in 0..recent_count {
-                        let e = &menu.recent[i];
-                        let pb = if e.is_pb { "  PB" } else { "" };
-                        let line = format!("#{:<2}  {}{pb}", i + 1, e.time);
-                        set_buf_text(
-                            &mut self.font_system,
-                            &mut self.recent_bufs[i],
-                            &line,
-                            attrs,
-                            w,
-                            22.0,
-                        );
-                    }
-                }
+            }
+
+            let start = page.panel.scroll.min(page.panel.rows.len());
+            drawn_rows = layout.panel.rows.min(page.panel.rows.len() - start);
+            let col_w = layout.panel.w - PANEL_PAD_X * 2.0;
+            for i in 0..drawn_rows {
+                let row = &page.panel.rows[start + i];
+                set_buf_text(
+                    &mut self.font_system,
+                    &mut self.label_bufs[i],
+                    &row.label,
+                    attrs,
+                    col_w,
+                    22.0,
+                );
+                set_buf_text(
+                    &mut self.font_system,
+                    &mut self.note_bufs[i],
+                    &row.note,
+                    attrs,
+                    col_w,
+                    20.0,
+                );
+                set_buf_text(
+                    &mut self.font_system,
+                    &mut self.value_bufs[i],
+                    &row.value,
+                    attrs,
+                    col_w,
+                    22.0,
+                );
+            }
+
+            button_count = page
+                .buttons
+                .len()
+                .min(self.button_bufs.len())
+                .min(layout.buttons.len());
+            for i in 0..button_count {
+                set_buf_text(
+                    &mut self.font_system,
+                    &mut self.button_bufs[i],
+                    &page.buttons[i],
+                    attrs,
+                    w,
+                    20.0,
+                );
             }
         }
 
@@ -858,77 +1013,31 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         let phase_color = if hud.practice {
             Color::rgb(255, 170, 80)
         } else if hud.practice_mode {
-            // Armed but not yet tainted — present, not alarming.
             Color::rgb(190, 165, 120)
         } else {
             Color::rgb(150, 155, 165)
         };
         let pb_abs_color = Color::rgb(170, 175, 185);
         let delta_color = match hud.pb_delta_secs {
-            Some(d) if d < 0.0 => Color::rgb(110, 230, 140),
+            Some(d) if d < 0.0 => TXT_GOOD,
             Some(d) if d > 0.0 => Color::rgb(240, 110, 110),
             _ => Color::rgb(180, 180, 190),
         };
-        let flash_color = Color::rgb(255, 220, 100);
-        let split_color = match hud.pb_delta_secs {
-            // Color split flash by its own delta if we embedded sign in the string —
-            // use ghost-style: green when line contains " -", else red/neutral.
-            _ => {
-                if let Some(ref s) = hud.split_line {
-                    if s.contains(" -") {
-                        Color::rgb(110, 230, 140)
-                    } else if s.contains(" +") {
-                        Color::rgb(240, 110, 110)
-                    } else {
-                        Color::rgb(210, 215, 225)
-                    }
-                } else {
-                    Color::rgb(210, 215, 225)
-                }
-            }
+        let split_color = match hud.split_line.as_deref() {
+            Some(s) if s.contains(" -") => TXT_GOOD,
+            Some(s) if s.contains(" +") => Color::rgb(240, 110, 110),
+            _ => Color::rgb(210, 215, 225),
         };
         let ghost_color = match hud.ghost_time_delta {
-            Some(d) if d < 0.0 => Color::rgb(110, 230, 140),
+            Some(d) if d < 0.0 => TXT_GOOD,
             Some(d) if d > 0.0 => Color::rgb(240, 110, 110),
             _ => Color::rgb(160, 200, 220),
         };
-        let sync_color = Color::rgb(200, 185, 140);
-        let keys_color = Color::rgb(200, 205, 215);
-        let perf_color = Color::rgb(160, 165, 175);
-        let menu_title_color = Color::rgb(245, 246, 250);
-        let menu_sel = Color::rgb(255, 220, 130);
-        let menu_sel_dim = Color::rgb(198, 176, 122);
-        let menu_hover = Color::rgb(235, 238, 246);
-        let menu_norm = Color::rgb(200, 204, 214);
-        let menu_hint_color = Color::rgb(120, 126, 138);
-        let recent_title_color = Color::rgb(140, 146, 160);
-        let recent_norm = Color::rgb(190, 196, 208);
-        let recent_pb = Color::rgb(255, 210, 110);
 
-        let mut areas: Vec<TextArea> = Vec::with_capacity(24);
-
-        // Menu layout (pixel space) — the same function the app hit-tests with,
-        // so a click always lands on the row that was drawn.
-        let layout = menu_layout(w, h, menu_item_count, locs_item_count, recent_count);
-        let main_p = layout.main;
-        let locs_p = layout.locs;
-        let panel_pad_x = PANEL_PAD_X;
-        let row_h = main_p.row_h;
-        let hint_h = PANEL_HINT_H;
-        let recent_row_h = RECENT_ROW_H;
-        let menu_title_y = main_p.y + 28.0;
-        let items_y0 = main_p.items_y0;
-        let hint_y = items_y0 + menu_item_count as f32 * row_h + 10.0;
-        let recent_title_y = hint_y + hint_h + 22.0;
-        let recent_y0 = recent_title_y + 22.0;
-        let text_left = main_p.x + panel_pad_x;
-        let locs_text_left = locs_p.x + panel_pad_x;
-        let locs_hint_y = locs_p.items_y0 + locs_item_count as f32 * locs_p.row_h + 10.0;
-
-        // Center info box geometry, filled in when it has any rows.
+        let mut areas: Vec<TextArea> = Vec::with_capacity(96);
         let mut info_box: Option<(f32, f32, f32, f32)> = None;
 
-        if !menu_open && !shell_open {
+        if !page_open {
             // Headline speed: large, centered, just above the info box.
             let speed_w = line_width(&self.speed_buf);
             let speed_top = h * 0.40;
@@ -942,7 +1051,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 custom_glyphs: &[],
             });
 
-            // Rows of the box, in the reference HUD's order.
             let mut rows: Vec<(&Buffer, Color, f32)> = Vec::with_capacity(8);
             if time_label.is_some() {
                 rows.push((&self.time_buf, time_color, 27.0));
@@ -963,7 +1071,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 rows.push((&self.ghost_buf, ghost_color, 22.0));
             }
             if sync_label.is_some() {
-                rows.push((&self.sync_buf, sync_color, 22.0));
+                rows.push((&self.sync_buf, Color::rgb(200, 185, 140), 22.0));
             }
 
             if !rows.is_empty() {
@@ -1004,7 +1112,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     top: speed_top - 54.0,
                     scale: 1.0,
                     bounds,
-                    default_color: flash_color,
+                    default_color: Color::rgb(255, 220, 100),
                     custom_glyphs: &[],
                 });
             }
@@ -1017,13 +1125,13 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     top: h - 48.0,
                     scale: 1.0,
                     bounds,
-                    default_color: keys_color,
+                    default_color: Color::rgb(200, 205, 215),
                     custom_glyphs: &[],
                 });
             }
         }
 
-        // Perf line stays visible over the pause menu too.
+        // Perf line stays visible over the menus too.
         if hud.perf_line.is_some() {
             let pw = line_width(&self.perf_buf);
             areas.push(TextArea {
@@ -1032,182 +1140,410 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 top: h - 28.0,
                 scale: 1.0,
                 bounds,
-                default_color: perf_color,
+                default_color: Color::rgb(160, 165, 175),
                 custom_glyphs: &[],
             });
         }
 
-        if let Some(ref menu) = hud.menu {
-            // Row text is brightest on the focused panel's selection; the
-            // unfocused panel keeps a dimmer marker so you never lose your place.
-            let row_color = |panel: &MenuPanel, i: usize| {
-                if i == panel.selected {
-                    if panel.focused {
-                        menu_sel
-                    } else {
-                        menu_sel_dim
-                    }
-                } else if panel.hovered == Some(i) {
-                    menu_hover
+        let mut verts: Vec<HudVert> = Vec::new();
+
+        if let Some(ref page) = hud.page {
+            let p = layout.panel;
+            let text_left = p.x + PANEL_PAD_X;
+            let value_right = p.x + p.w - PANEL_PAD_X;
+
+            // Backdrop pages own the frame; the pause overlay only dims it.
+            if page.backdrop {
+                // A touch of extra darkening under the panel column so text has
+                // guaranteed contrast whatever the backdrop is doing.
+                push_rect_px(
+                    &mut verts,
+                    p.x,
+                    p.y,
+                    p.w,
+                    p.h,
+                    w,
+                    h,
+                    [0.00335, 0.00478, 0.007, 0.88], // #0B0F14
+                );
+            } else {
+                push_rect_ndc(
+                    &mut verts,
+                    -1.0,
+                    -1.0,
+                    2.0,
+                    2.0,
+                    [0.0, 0.0006, 0.0012, 0.90],
+                );
+                push_rect_px(
+                    &mut verts,
+                    p.x,
+                    p.y,
+                    p.w,
+                    p.h,
+                    w,
+                    h,
+                    [0.00605, 0.00802, 0.01161, 0.95], // #12161C
+                );
+            }
+            // Top accent rule.
+            push_rect_px(&mut verts, p.x, p.y, p.w, 2.0, w, h, C_ACCENT);
+
+            // Tab strip.
+            for (i, r) in layout.tabs.iter().take(tab_count).enumerate() {
+                let active = i == page.tab;
+                let hovered = page.tab_hovered == Some(i);
+                let fill = if active {
+                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.16]
+                } else if hovered {
+                    [1.0, 1.0, 1.0, 0.02]
                 } else {
-                    menu_norm
+                    [1.0, 1.0, 1.0, 0.006]
+                };
+                push_rect_px(&mut verts, r.x, r.y, r.w, r.h, w, h, fill);
+                if active {
+                    push_rect_px(&mut verts, r.x, r.y + r.h - 2.0, r.w, 2.0, w, h, C_ACCENT);
                 }
-            };
-
-            let tw = line_width(&self.menu_title_buf);
-            areas.push(TextArea {
-                buffer: &self.menu_title_buf,
-                left: main_p.x + (main_p.w - tw) * 0.5,
-                top: menu_title_y,
-                scale: 1.0,
-                bounds,
-                default_color: menu_title_color,
-                custom_glyphs: &[],
-            });
-            for i in 0..menu_item_count {
+                let tw = line_width(&self.tab_bufs[i]);
                 areas.push(TextArea {
-                    buffer: &self.menu_bufs[i],
+                    buffer: &self.tab_bufs[i],
+                    left: r.x + (r.w - tw) * 0.5,
+                    top: r.y + 7.0,
+                    scale: 1.0,
+                    bounds,
+                    default_color: if active { TXT_TITLE } else { TXT_DIM },
+                    custom_glyphs: &[],
+                });
+            }
+
+            // Selection band + hover wash.
+            let start = page.panel.scroll;
+            let sel_drawn = page.panel.selected.checked_sub(start);
+            if let Some(sd) = sel_drawn.filter(|d| *d < drawn_rows) {
+                let selectable = page.panel.rows[page.panel.selected].kind.selectable();
+                if selectable {
+                    let sel_y = p.items_y0 + sd as f32 * p.row_h;
+                    let a = if page.panel.focused { 0.14 } else { 0.06 };
+                    push_rect_px(
+                        &mut verts,
+                        p.x + 10.0,
+                        sel_y,
+                        p.w - 20.0,
+                        p.row_h,
+                        w,
+                        h,
+                        [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], a],
+                    );
+                    let tick_a = if page.panel.focused { 1.0 } else { 0.45 };
+                    push_rect_px(
+                        &mut verts,
+                        p.x + 10.0,
+                        sel_y + 4.0,
+                        3.0,
+                        p.row_h - 8.0,
+                        w,
+                        h,
+                        [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], tick_a],
+                    );
+                }
+            }
+            if let Some(hv) = page.panel.hovered {
+                if let Some(hd) = hv.checked_sub(start).filter(|d| *d < drawn_rows) {
+                    if hv != page.panel.selected && page.panel.rows[hv].kind.selectable() {
+                        push_rect_px(
+                            &mut verts,
+                            p.x + 10.0,
+                            p.items_y0 + hd as f32 * p.row_h,
+                            p.w - 20.0,
+                            p.row_h,
+                            w,
+                            h,
+                            [1.0, 1.0, 1.0, 0.012],
+                        );
+                    }
+                }
+            }
+
+            // Rows.
+            let (track_x0, track_x1) = p.slider_track();
+            for i in 0..drawn_rows {
+                let row = &page.panel.rows[start + i];
+                let y = p.items_y0 + i as f32 * p.row_h;
+                let selected = start + i == page.panel.selected;
+                match row.kind {
+                    RowKind::Header => {
+                        // Headers sit lower in their row with a hairline above.
+                        push_rect_px(
+                            &mut verts,
+                            text_left,
+                            y + 6.0,
+                            p.w - PANEL_PAD_X * 2.0,
+                            1.0,
+                            w,
+                            h,
+                            [1.0, 1.0, 1.0, 0.02],
+                        );
+                        areas.push(TextArea {
+                            buffer: &self.label_bufs[i],
+                            left: text_left,
+                            top: y + 11.0,
+                            scale: 1.0,
+                            bounds,
+                            default_color: TXT_HEADER,
+                            custom_glyphs: &[],
+                        });
+                        continue;
+                    }
+                    RowKind::Slider(frac) => {
+                        let ty = y + p.row_h - 7.0;
+                        push_rect_px(
+                            &mut verts,
+                            track_x0,
+                            ty,
+                            track_x1 - track_x0,
+                            2.0,
+                            w,
+                            h,
+                            [1.0, 1.0, 1.0, 0.035],
+                        );
+                        let fill = (track_x1 - track_x0) * frac.clamp(0.0, 1.0);
+                        push_rect_px(
+                            &mut verts,
+                            track_x0,
+                            ty,
+                            fill.max(1.0),
+                            2.0,
+                            w,
+                            h,
+                            [
+                                C_ACCENT[0],
+                                C_ACCENT[1],
+                                C_ACCENT[2],
+                                if selected { 1.0 } else { 0.6 },
+                            ],
+                        );
+                        // Knob, so the affordance reads as draggable.
+                        push_rect_px(
+                            &mut verts,
+                            track_x0 + fill - 2.0,
+                            ty - 4.0,
+                            4.0,
+                            10.0,
+                            w,
+                            h,
+                            [
+                                C_ACCENT[0],
+                                C_ACCENT[1],
+                                C_ACCENT[2],
+                                if selected { 1.0 } else { 0.7 },
+                            ],
+                        );
+                    }
+                    _ => {}
+                }
+
+                areas.push(TextArea {
+                    buffer: &self.label_bufs[i],
                     left: text_left,
-                    top: items_y0 + i as f32 * row_h + 4.0,
+                    top: y + 4.0,
                     scale: 1.0,
                     bounds,
-                    default_color: row_color(&menu.main, i),
+                    default_color: if selected { TXT_LABEL_SEL } else { TXT_LABEL },
                     custom_glyphs: &[],
                 });
+                if !row.note.is_empty() {
+                    areas.push(TextArea {
+                        buffer: &self.note_bufs[i],
+                        left: p.x + p.w * 0.46,
+                        top: y + 6.0,
+                        scale: 1.0,
+                        bounds,
+                        default_color: TXT_DIM,
+                        custom_glyphs: &[],
+                    });
+                }
+                if !row.value.is_empty() {
+                    let vw = line_width(&self.value_bufs[i]);
+                    areas.push(TextArea {
+                        buffer: &self.value_bufs[i],
+                        left: value_right - vw,
+                        top: y + 5.0,
+                        scale: 1.0,
+                        bounds,
+                        default_color: match row.tone {
+                            RowTone::Good => TXT_GOOD,
+                            RowTone::Warn => TXT_WARN,
+                            RowTone::Accent => TXT_ACCENT,
+                            RowTone::Dim => TXT_DIM,
+                            RowTone::Normal => {
+                                if selected {
+                                    TXT_LABEL_SEL
+                                } else {
+                                    TXT_VALUE
+                                }
+                            }
+                        },
+                        custom_glyphs: &[],
+                    });
+                }
             }
-            let hw = line_width(&self.menu_hint_buf);
-            areas.push(TextArea {
-                buffer: &self.menu_hint_buf,
-                left: main_p.x + (main_p.w - hw) * 0.5,
-                top: hint_y,
-                scale: 1.0,
-                bounds,
-                default_color: menu_hint_color,
-                custom_glyphs: &[],
-            });
 
-            let ltw = line_width(&self.locs_title_buf);
-            areas.push(TextArea {
-                buffer: &self.locs_title_buf,
-                left: locs_p.x + (locs_p.w - ltw) * 0.5,
-                top: menu_title_y,
-                scale: 1.0,
-                bounds,
-                default_color: menu_title_color,
-                custom_glyphs: &[],
-            });
-            for i in 0..locs_item_count {
-                areas.push(TextArea {
-                    buffer: &self.locs_bufs[i],
-                    left: locs_text_left,
-                    top: locs_p.items_y0 + i as f32 * locs_p.row_h + 4.0,
-                    scale: 1.0,
-                    bounds,
-                    default_color: row_color(&menu.locs, i),
-                    custom_glyphs: &[],
-                });
+            // Scroll indicator: a thumb on the right edge of the list.
+            let total = page.panel.rows.len();
+            if total > drawn_rows && drawn_rows > 0 {
+                let track_h = drawn_rows as f32 * p.row_h;
+                let thumb_h = (track_h * drawn_rows as f32 / total as f32).max(18.0);
+                let max_scroll = (total - drawn_rows) as f32;
+                let t = (start as f32 / max_scroll.max(1.0)).clamp(0.0, 1.0);
+                push_rect_px(
+                    &mut verts,
+                    p.x + p.w - 6.0,
+                    p.items_y0,
+                    2.0,
+                    track_h,
+                    w,
+                    h,
+                    [1.0, 1.0, 1.0, 0.02],
+                );
+                push_rect_px(
+                    &mut verts,
+                    p.x + p.w - 6.0,
+                    p.items_y0 + (track_h - thumb_h) * t,
+                    2.0,
+                    thumb_h,
+                    w,
+                    h,
+                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.55],
+                );
             }
-            let lhw = line_width(&self.locs_hint_buf);
-            areas.push(TextArea {
-                buffer: &self.locs_hint_buf,
-                left: locs_p.x + (locs_p.w - lhw) * 0.5,
-                top: locs_hint_y,
-                scale: 1.0,
-                bounds,
-                default_color: menu_hint_color,
-                custom_glyphs: &[],
-            });
 
+            // Title / subtitle.
             areas.push(TextArea {
-                buffer: &self.recent_title_buf,
+                buffer: &self.page_title_buf,
                 left: text_left,
-                top: recent_title_y,
+                top: layout.title_y,
                 scale: 1.0,
                 bounds,
-                default_color: recent_title_color,
+                default_color: TXT_TITLE,
                 custom_glyphs: &[],
             });
-            for i in 0..recent_count {
-                let color = if menu.recent.get(i).is_some_and(|e| e.is_pb) {
-                    recent_pb
-                } else if menu.recent.is_empty() {
-                    menu_hint_color
+            areas.push(TextArea {
+                buffer: &self.page_sub_buf,
+                left: text_left,
+                top: layout.subtitle_y,
+                scale: 1.0,
+                bounds,
+                default_color: TXT_SUB,
+                custom_glyphs: &[],
+            });
+
+            // Indeterminate progress: a lozenge sweeping the panel width. There
+            // is no real progress signal from the loader, so pretending to one
+            // would be a lie — this only says "still working".
+            if page.busy {
+                let bx = text_left;
+                let bw = p.w - PANEL_PAD_X * 2.0;
+                push_rect_px(
+                    &mut verts,
+                    bx,
+                    layout.busy_y,
+                    bw,
+                    3.0,
+                    w,
+                    h,
+                    [1.0, 1.0, 1.0, 0.02],
+                );
+                let seg = bw * 0.28;
+                let phase = (hud.time * 0.55).fract();
+                // Ease so it decelerates at the ends instead of wrapping harshly.
+                let eased = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+                push_rect_px(
+                    &mut verts,
+                    bx + (bw - seg) * eased,
+                    layout.busy_y,
+                    seg,
+                    3.0,
+                    w,
+                    h,
+                    C_ACCENT,
+                );
+            }
+
+            if page.message.is_some() {
+                areas.push(TextArea {
+                    buffer: &self.page_msg_buf,
+                    left: text_left,
+                    top: layout.message_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: TXT_ERR,
+                    custom_glyphs: &[],
+                });
+            }
+            areas.push(TextArea {
+                buffer: &self.page_hint_buf,
+                left: text_left,
+                top: layout.hint_y,
+                scale: 1.0,
+                bounds,
+                default_color: TXT_HINT,
+                custom_glyphs: &[],
+            });
+
+            // Button bar.
+            for (i, r) in layout.buttons.iter().take(button_count).enumerate() {
+                let focused = page.button_selected == Some(i);
+                let hovered = page.button_hovered == Some(i);
+                let fill = if focused {
+                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.20]
+                } else if hovered {
+                    [1.0, 1.0, 1.0, 0.03]
                 } else {
-                    recent_norm
+                    [1.0, 1.0, 1.0, 0.010]
                 };
-                areas.push(TextArea {
-                    buffer: &self.recent_bufs[i],
-                    left: text_left,
-                    top: recent_y0 + i as f32 * recent_row_h,
-                    scale: 1.0,
-                    bounds,
-                    default_color: color,
-                    custom_glyphs: &[],
-                });
-            }
-        }
-
-        // Safety: glyphon needs buffers that were set; empty areas ok.
-        // Shell page: title, subtitle, rows, message, hint.
-        let shell_p = shell_layout(w, h, shell_item_count);
-        if let Some(ref sh) = hud.shell {
-            let text_left = shell_p.x + PANEL_PAD_X;
-            areas.push(TextArea {
-                buffer: &self.shell_title_buf,
-                left: text_left,
-                top: shell_p.y + 26.0,
-                scale: 1.0,
-                bounds,
-                default_color: Color::rgb(240, 238, 232),
-                custom_glyphs: &[],
-            });
-            areas.push(TextArea {
-                buffer: &self.shell_sub_buf,
-                left: text_left,
-                top: shell_p.y + 78.0,
-                scale: 1.0,
-                bounds,
-                default_color: Color::rgb(130, 136, 148),
-                custom_glyphs: &[],
-            });
-            for i in 0..shell_item_count {
-                let logical = sh.scroll + i;
-                let color = if logical == sh.selected {
-                    Color::rgb(255, 226, 140)
+                push_rect_px(&mut verts, r.x, r.y, r.w, r.h, w, h, fill);
+                let edge = if focused {
+                    C_ACCENT
                 } else {
-                    Color::rgb(198, 202, 210)
+                    [1.0, 1.0, 1.0, 0.05]
                 };
+                push_rect_px(&mut verts, r.x, r.y, r.w, 1.0, w, h, edge);
+                push_rect_px(&mut verts, r.x, r.y + r.h - 1.0, r.w, 1.0, w, h, edge);
+                push_rect_px(&mut verts, r.x, r.y, 1.0, r.h, w, h, edge);
+                push_rect_px(&mut verts, r.x + r.w - 1.0, r.y, 1.0, r.h, w, h, edge);
+                let bwid = line_width(&self.button_bufs[i]);
                 areas.push(TextArea {
-                    buffer: &self.shell_bufs[i],
-                    left: text_left + 14.0,
-                    top: shell_p.items_y0 + i as f32 * shell_p.row_h + 4.0,
+                    buffer: &self.button_bufs[i],
+                    left: r.x + (r.w - bwid) * 0.5,
+                    top: r.y + 8.0,
                     scale: 1.0,
                     bounds,
-                    default_color: color,
+                    default_color: if focused || hovered {
+                        TXT_LABEL_SEL
+                    } else {
+                        TXT_LABEL
+                    },
                     custom_glyphs: &[],
                 });
             }
-            let msg_y = shell_p.items_y0 + shell_item_count as f32 * shell_p.row_h + 16.0;
-            if sh.message.is_some() {
-                areas.push(TextArea {
-                    buffer: &self.shell_msg_buf,
-                    left: text_left,
-                    top: msg_y,
-                    scale: 1.0,
-                    bounds,
-                    default_color: Color::rgb(232, 138, 116),
-                    custom_glyphs: &[],
-                });
-            }
-            areas.push(TextArea {
-                buffer: &self.shell_hint_buf,
-                left: text_left,
-                top: msg_y + 26.0,
-                scale: 1.0,
-                bounds,
-                default_color: Color::rgb(118, 124, 136),
-                custom_glyphs: &[],
-            });
+        } else if let Some((bx, by, bw, bh)) = info_box {
+            // Light box behind the run/CP/ghost readout — enough contrast to
+            // stay legible over bright geometry without hiding the map.
+            push_rect_px(
+                &mut verts,
+                bx,
+                by,
+                bw,
+                bh,
+                w,
+                h,
+                [0.008, 0.010, 0.014, 0.46],
+            );
+            let edge = [1.0, 1.0, 1.0, 0.10];
+            push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, edge);
+            push_rect_px(&mut verts, bx, by + bh - 1.0, bw, 1.0, w, h, edge);
+            push_rect_px(&mut verts, bx, by, 1.0, bh, w, h, edge);
+            push_rect_px(&mut verts, bx + bw - 1.0, by, 1.0, bh, w, h, edge);
         }
 
         let _ = self.text_renderer.prepare(
@@ -1219,127 +1555,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             areas,
             &mut self.swash_cache,
         );
-
-        let mut verts: Vec<HudVert> = Vec::new();
-        if let Some(ref sh) = hud.shell {
-            // Near-opaque over the live world behind it: the world reads as a
-            // backdrop, not as something you could still be playing.
-            push_rect_ndc(&mut verts, -1.0, -1.0, 2.0, 2.0, [0.03, 0.035, 0.045, 0.90]);
-            push_rect_px(&mut verts, shell_p.x, shell_p.y, shell_p.w, shell_p.h, w, h, [0.09, 0.095, 0.12, 0.95]);
-            push_rect_px(&mut verts, shell_p.x, shell_p.y, shell_p.w, 2.0, w, h, [0.95, 0.78, 0.32, 0.95]);
-            if let Some(hov) = sh.hovered {
-                if hov >= sh.scroll && hov - sh.scroll < shell_item_count && hov != sh.selected {
-                    push_rect_px(
-                        &mut verts,
-                        shell_p.x + 10.0,
-                        shell_p.items_y0 + (hov - sh.scroll) as f32 * shell_p.row_h,
-                        shell_p.w - 20.0,
-                        shell_p.row_h,
-                        w,
-                        h,
-                        [1.0, 1.0, 1.0, 0.05],
-                    );
-                }
-            }
-            if sh.selected >= sh.scroll && sh.selected - sh.scroll < shell_item_count {
-                let sel_y = shell_p.items_y0 + (sh.selected - sh.scroll) as f32 * shell_p.row_h;
-                push_rect_px(&mut verts, shell_p.x + 10.0, sel_y, shell_p.w - 20.0, shell_p.row_h, w, h, [1.0, 0.88, 0.40, 0.10]);
-                push_rect_px(&mut verts, shell_p.x + 10.0, sel_y + 5.0, 3.0, shell_p.row_h - 10.0, w, h, [1.0, 0.86, 0.35, 0.95]);
-            }
-        } else if menu_open {
-            if let Some(ref menu) = hud.menu {
-                // Soft full-screen dim.
-                push_rect_ndc(&mut verts, -1.0, -1.0, 2.0, 2.0, [0.02, 0.02, 0.04, 0.62]);
-                // Both panels: fill, top accent (brighter on the focused one),
-                // hover wash, then the selection band and tick.
-                for (panel, geom, count) in [
-                    (&menu.main, main_p, menu_item_count),
-                    (&menu.locs, locs_p, locs_item_count),
-                ] {
-                    push_rect_px(
-                        &mut verts,
-                        geom.x,
-                        geom.y,
-                        geom.w,
-                        geom.h,
-                        w,
-                        h,
-                        [0.09, 0.095, 0.12, 0.94],
-                    );
-                    let accent = if panel.focused {
-                        [0.95, 0.78, 0.32, 0.95]
-                    } else {
-                        [0.55, 0.47, 0.26, 0.75]
-                    };
-                    push_rect_px(&mut verts, geom.x, geom.y, geom.w, 2.0, w, h, accent);
-
-                    if let Some(hov) = panel.hovered {
-                        if hov < count && Some(hov) != Some(panel.selected) {
-                            push_rect_px(
-                                &mut verts,
-                                geom.x + 10.0,
-                                geom.items_y0 + hov as f32 * geom.row_h,
-                                geom.w - 20.0,
-                                geom.row_h,
-                                w,
-                                h,
-                                [1.0, 1.0, 1.0, 0.05],
-                            );
-                        }
-                    }
-
-                    if panel.selected < count {
-                        let sel_y = geom.items_y0 + panel.selected as f32 * geom.row_h;
-                        let (band, tick) = if panel.focused {
-                            ([1.0, 0.88, 0.40, 0.10], [1.0, 0.86, 0.35, 0.95])
-                        } else {
-                            ([1.0, 0.88, 0.40, 0.05], [1.0, 0.86, 0.35, 0.45])
-                        };
-                        push_rect_px(
-                            &mut verts,
-                            geom.x + 10.0,
-                            sel_y,
-                            geom.w - 20.0,
-                            geom.row_h,
-                            w,
-                            h,
-                            band,
-                        );
-                        push_rect_px(
-                            &mut verts,
-                            geom.x + 10.0,
-                            sel_y + 5.0,
-                            3.0,
-                            geom.row_h - 10.0,
-                            w,
-                            h,
-                            tick,
-                        );
-                    }
-                }
-                // Hairline above the recent section (settings panel only).
-                let sep_y = hint_y + hint_h + 12.0;
-                push_rect_px(
-                    &mut verts,
-                    main_p.x + panel_pad_x,
-                    sep_y,
-                    main_p.w - panel_pad_x * 2.0,
-                    1.0,
-                    w,
-                    h,
-                    [1.0, 1.0, 1.0, 0.08],
-                );
-            }
-        } else if let Some((bx, by, bw, bh)) = info_box {
-            // Light box behind the run/CP/ghost readout — enough contrast to
-            // stay legible over bright geometry without hiding the map.
-            push_rect_px(&mut verts, bx, by, bw, bh, w, h, [0.06, 0.07, 0.09, 0.42]);
-            let edge = [1.0, 1.0, 1.0, 0.10];
-            push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, edge);
-            push_rect_px(&mut verts, bx, by + bh - 1.0, bw, 1.0, w, h, edge);
-            push_rect_px(&mut verts, bx, by, 1.0, bh, w, h, edge);
-            push_rect_px(&mut verts, bx + bw - 1.0, by, 1.0, bh, w, h, edge);
-        }
 
         let count = verts.len().min(self.bar_capacity as usize) as u32;
         if count > 0 {
@@ -1353,7 +1568,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     }
 
     pub fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        // Quads first (dim/panel/bars), then text on top.
+        // Procedural backdrop, then quads (panels/bars), then text.
+        self.backdrop.draw(pass);
         if self.bar_vert_count > 0 {
             pass.set_pipeline(&self.bar_pipeline);
             pass.set_vertex_buffer(0, self.bar_vbo.slice(..));
@@ -1422,7 +1638,7 @@ fn push_rect_px(
     }
 }
 
-fn format_hud_time(secs: f32) -> String {
+pub fn format_hud_time(secs: f32) -> String {
     let ms_total = (secs.max(0.0) * 1000.0).round() as u32;
     let millis = ms_total % 1000;
     let total_secs = ms_total / 1000;
@@ -1444,69 +1660,106 @@ fn format_hud_delta(delta: f32) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn panels_sit_side_by_side_without_overlapping() {
-        let l = menu_layout(1920.0, 1080.0, 18, 8, 5);
-        assert!(l.main.x + l.main.w <= l.locs.x, "panels overlap");
-        assert!(l.locs.x + l.locs.w <= 1920.0, "locs panel off-screen");
-        assert_eq!(l.main.y, l.locs.y, "panels should be top-aligned");
-        // Group is centred: equal margins either side.
-        let left = l.main.x;
-        let right = 1920.0 - (l.locs.x + l.locs.w);
-        assert!(
-            (left - right).abs() < 1.0,
-            "group not centred: {left} vs {right}"
-        );
-    }
-
-    #[test]
-    fn narrow_windows_shrink_panels_instead_of_dropping_them() {
-        let l = menu_layout(900.0, 700.0, 18, 8, 5);
-        assert!(l.main.x >= 0.0);
-        assert!(
-            l.locs.x + l.locs.w <= 900.0,
-            "locs panel must stay on-screen"
-        );
-        assert!(
-            l.main.x + l.main.w <= l.locs.x,
-            "panels overlap when narrow"
-        );
+    fn spec(rows: usize) -> PageSpec {
+        PageSpec {
+            rows,
+            tabs: 3,
+            buttons: 4,
+            wide: false,
+        }
     }
 
     #[test]
     fn row_hit_test_matches_drawn_rows() {
-        let l = menu_layout(1920.0, 1080.0, 18, 6, 5);
-        let p = l.locs;
-        // Centre of each row hits that row.
+        let l = page_layout(1920.0, 1080.0, spec(12));
+        let p = l.panel;
+        assert_eq!(p.rows, 12, "all 12 rows should fit at 1080p");
         for i in 0..p.rows {
             let y = p.items_y0 + (i as f32 + 0.5) * p.row_h;
             assert_eq!(p.row_at(p.x + 20.0, y), Some(i), "row {i}");
         }
-        // Just above the first row, and past the last, hit nothing.
         assert_eq!(p.row_at(p.x + 20.0, p.items_y0 - 1.0), None);
         let past = p.items_y0 + p.rows as f32 * p.row_h + 1.0;
         assert_eq!(p.row_at(p.x + 20.0, past), None);
-        // Horizontally outside the panel hits nothing, even at a valid row y.
         let y = p.items_y0 + p.row_h * 0.5;
         assert_eq!(p.row_at(p.x - 5.0, y), None);
         assert_eq!(p.row_at(p.x + p.w + 5.0, y), None);
     }
 
+    /// The whole point of computing capacity from the window: a long list on a
+    /// short window must scroll, not run off the bottom into the buttons.
     #[test]
-    fn clicks_on_one_panel_never_hit_the_other() {
-        let l = menu_layout(1920.0, 1080.0, 18, 10, 5);
-        let y = l.main.items_y0 + l.main.row_h * 0.5;
-        // A point in the gap belongs to neither panel.
-        let gap_x = l.main.x + l.main.w + 2.0;
-        assert!(gap_x < l.locs.x);
-        assert_eq!(l.main.row_at(gap_x, y), None);
-        assert_eq!(l.locs.row_at(gap_x, y), None);
+    fn a_long_list_on_a_short_window_is_capped_above_the_buttons() {
+        let l = page_layout(1280.0, 620.0, spec(40));
+        let p = l.panel;
+        assert!(p.rows < 40, "list should have been capped, got {}", p.rows);
+        assert!(p.rows > 0, "at least some rows must be drawn");
+        let list_bottom = p.items_y0 + p.rows as f32 * p.row_h;
+        let first_button = l.buttons[0];
+        assert!(
+            list_bottom <= first_button.y,
+            "rows ({list_bottom}) overlap the button bar ({})",
+            first_button.y
+        );
+        assert!(
+            first_button.y + first_button.h <= 620.0,
+            "buttons fall off the bottom of the window"
+        );
     }
 
     #[test]
-    fn empty_locs_panel_has_no_rows_to_hit() {
-        let l = menu_layout(1920.0, 1080.0, 18, 0, 5);
-        assert_eq!(l.locs.rows, 0);
-        assert_eq!(l.locs.row_at(l.locs.x + 10.0, l.locs.items_y0 + 5.0), None);
+    fn tabs_and_buttons_tile_the_panel_without_overlapping() {
+        let l = page_layout(1600.0, 900.0, spec(10));
+        for strip in [&l.tabs, &l.buttons] {
+            for pair in strip.windows(2) {
+                assert!(
+                    pair[0].x + pair[0].w <= pair[1].x + 0.01,
+                    "strip entries overlap"
+                );
+            }
+            let first = strip.first().unwrap();
+            let last = strip.last().unwrap();
+            assert!(first.x >= l.panel.x, "strip starts outside the panel");
+            assert!(
+                last.x + last.w <= l.panel.x + l.panel.w + 0.01,
+                "strip ends outside the panel"
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_stays_on_screen_on_a_narrow_window() {
+        let l = page_layout(700.0, 560.0, spec(20));
+        assert!(l.panel.x >= 0.0);
+        assert!(l.panel.x + l.panel.w <= 700.0);
+        assert!(l.panel.y + l.panel.h <= 560.0 + 1.0);
+    }
+
+    /// Clicking a label must not move a slider — only the track half does.
+    #[test]
+    fn the_slider_track_is_the_right_half_of_the_row() {
+        let p = page_layout(1600.0, 900.0, spec(6)).panel;
+        let (x0, x1) = p.slider_track();
+        assert!(x0 > p.x + p.w * 0.4, "track starts too far left");
+        assert!(x1 <= p.x + p.w, "track runs past the panel");
+        assert_eq!(
+            p.slider_frac_at(p.x + 20.0),
+            None,
+            "label half must not drag"
+        );
+        assert_eq!(p.slider_frac_at(x0), Some(0.0));
+        assert_eq!(p.slider_frac_at(x1), Some(1.0));
+        let mid = p.slider_frac_at((x0 + x1) * 0.5).unwrap();
+        assert!(
+            (mid - 0.5).abs() < 0.01,
+            "midpoint should be 0.5, got {mid}"
+        );
+    }
+
+    #[test]
+    fn headers_are_not_selectable_but_items_are() {
+        assert!(!RowKind::Header.selectable());
+        assert!(RowKind::Item.selectable());
+        assert!(RowKind::Slider(0.5).selectable());
     }
 }
