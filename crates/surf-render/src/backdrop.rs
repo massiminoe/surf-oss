@@ -8,6 +8,10 @@
 //! accent, ordered dither reserved for the sky) so the menus and the eventual
 //! Blueprint look are the same family.
 //!
+//! Direction "Instrument" (Max, 2026-09-02): a one-point-perspective grid with
+//! a horizon and ruled major rows, a dithered dot-field sky, and one ramp
+//! *section* standing on the plane instead of tilted slabs floating in it.
+//!
 //! Everything is analytic in the fragment shader — no textures, no vertex
 //! buffer, one fullscreen triangle. Cost is a single dependent-free pass.
 
@@ -73,13 +77,12 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(q.x * q.y);
 }
 
-/// Signed distance to a box rotated by `rot` radians about `centre`.
-fn sd_ramp(p: vec2<f32>, centre: vec2<f32>, half: vec2<f32>, rot: f32) -> f32 {
-    let c = cos(rot);
-    let s = sin(rot);
-    let d = p - centre;
-    let q = abs(vec2<f32>(d.x * c + d.y * s, -d.x * s + d.y * c)) - half;
-    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0);
+/// Distance from `p` to the segment `a`–`b`, in the same units as `p`.
+fn sd_seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * t);
 }
 
 @fragment
@@ -89,36 +92,40 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     let p = vec2<f32>((v.uv.x - 0.5) * aspect, v.uv.y - 0.5);
     let px = vec2<f32>(v.uv.x * u.width, v.uv.y * u.height);
     let t = u.time;
+    let one_px = 1.0 / max(u.height, 1.0);
 
     // Linear values for the intended sRGB swatches — the target is an sRGB
-    // surface, so writing #0A0D12 as 0.039 would come out three stops light.
-    let ink      = vec3<f32>(0.00304, 0.00402, 0.00605); // #0A0D12
-    let ink_high = vec3<f32>(0.00802, 0.01161, 0.01938); // #161C26
-    let accent   = vec3<f32>(0.02843, 0.52100, 0.21223); // #2FBF7F
+    // surface, so writing #0C1012 as 0.047 would come out three stops light.
+    let ground = vec3<f32>(0.00335, 0.00518, 0.00605); // #0C1012
+    let ink    = vec3<f32>(0.82279, 0.87137, 0.84652); // #E9EEEC
+    let accent = vec3<f32>(0.02843, 0.52100, 0.21223); // #2FBF7F
 
-    let horizon = 0.66;
+    // The horizon sits a little above centre so the ground plane carries the
+    // composition and the panels float against the quiet sky.
+    let horizon = 0.54;
+    var col = ground;
 
-    // --- sky: vertical gradient, dithered ---
-    var col = mix(ink, ink_high, smoothstep(-0.15, horizon, v.uv.y));
-    // A wide, soft glow sitting on the horizon, off to one side so the
-    // composition isn't symmetric.
-    let glow_c = vec2<f32>(0.20 * aspect, horizon - 0.5);
-    let gd = p - glow_c;
-    col += accent * exp(-dot(gd, gd) * 7.0) * 0.030;
-    // Ordered dither, sky only. At these levels a smooth gradient bands hard on
-    // an 8-bit target; a ±1/255 pattern is the cheapest honest fix and it is
-    // the texture the art direction reserves for the sky anyway.
-    if v.uv.y < horizon {
-        col += (bayer4(px) - 0.5) * 0.0016;
-    }
+    // --- sky: a sparse ordered dot field that thins toward the horizon ---
+    // 1-bit dither is the one texture the art direction reserves for the sky.
+    // Sampled on a 4px lattice so the dots read as a pattern, not as noise.
+    let cell = floor(px / 4.0);
+    let on_lattice = step(0.5, 1.0 - abs(fract(px.x / 4.0 + 0.5) * 2.0 - 1.0))
+        * step(0.5, 1.0 - abs(fract(px.y / 4.0 + 0.5) * 2.0 - 1.0));
+    let alt = fract(cell.y * 0.5) * 2.0;           // checkerboard offset row
+    let lx = fract(cell.x * 0.5 + alt * 0.5) * 2.0; // 0 or 1
+    let height = clamp(1.0 - v.uv.y / horizon, 0.0, 1.0);
+    let density = height * height * 0.38;
+    let dot_on = step(hash21(cell), density) * lx;
+    let sky = step(v.uv.y, horizon);
+    col += ink * dot_on * on_lattice * sky * 0.07;
 
-    // --- receding blueprint grid below the horizon ---
+    // --- ground plane: a true one-point perspective grid ---
     // Derivatives must be evaluated in uniform control flow, so the grid is
     // computed for every pixel and masked afterwards rather than branched on.
     let d = max(v.uv.y - horizon, 0.0009);
-    let z = 0.9 / d;
-    let gx = (v.uv.x - 0.5) * z * 3.0;
-    let gz = z - t * 0.5;
+    let z = 0.42 / d;                    // depth, 1 = nearest row
+    let gx = (v.uv.x - 0.5) * z * 4.0;   // lateral, in cells
+    let gz = z - t * 0.35;               // rows glide toward the viewer
     let wx = fwidth(gx);
     let wz = fwidth(gz);
     // Distance to the nearest cell boundary, in cell units: 0 on a line,
@@ -126,54 +133,49 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     // fills every cell solid and reads as a flat wash, not a grid.
     let ex = 0.5 - abs(fract(gx) - 0.5);
     let ez = 0.5 - abs(fract(gz) - 0.5);
-    let lx = 1.0 - smoothstep(0.0, wx, ex);
-    let lz = 1.0 - smoothstep(0.0, wz, ez);
+    let lx_ = 1.0 - smoothstep(0.0, wx * 1.2, ex);
+    let lz_ = 1.0 - smoothstep(0.0, wz * 1.2, ez);
+    // Every fifth depth row is a ruled major line, like a tick on a scale.
+    let major = step(0.5 - abs(fract(gz / 5.0) - 0.5), wz * 0.24);
     // Once a cell is narrower than a pixel the "line" saturates to solid — that
     // is aliasing, not geometry, so fade the grid out as it becomes unresolvable
-    // rather than letting it wash the lower half green.
-    let resolve = (1.0 - smoothstep(0.08, 0.35, wx)) * (1.0 - smoothstep(0.08, 0.35, wz));
-    let line = clamp(max(lx, lz), 0.0, 1.0) * resolve;
-    let below = step(horizon, v.uv.y);
-    // Strongest near the viewer; the only fade is at the horizon, where the
-    // cells stop being resolvable.
-    let gfade = below * smoothstep(0.0, 0.03, d);
-    col += accent * line * gfade * 0.085;
+    // rather than letting it wash the horizon flat.
+    let resolve = (1.0 - smoothstep(0.10, 0.45, wx)) * (1.0 - smoothstep(0.10, 0.45, wz));
+    let below = 1.0 - sky;
+    let line = clamp(max(lx_ * 0.85, lz_ * (0.8 + major * 1.4)), 0.0, 2.2) * resolve;
+    col += ink * line * below * 0.085;
 
     // --- horizon rule ---
-    let hl = 1.0 - smoothstep(0.0, 2.0 / u.height, abs(v.uv.y - horizon));
-    col += accent * hl * 0.09;
+    let hl = 1.0 - smoothstep(0.0, 1.5 * one_px, abs(v.uv.y - horizon));
+    col += ink * hl * 0.22;
 
-    // --- ramp wedges, drifting slowly in parallax ---
-    // Three depth layers: the far one is barely separated from the sky, the
-    // near one is a hard silhouette. Same idea as the map behind a real surf
-    // horizon, without pretending to be a render of one.
-    let drift = sin(t * 0.05) * 0.010;
-    var centres = array<vec2<f32>, 3>(
-        vec2<f32>(-0.44 * aspect + drift,        0.11),
-        vec2<f32>( 0.42 * aspect - drift * 0.7,  0.20),
-        vec2<f32>(-0.02 * aspect + drift * 0.4,  0.31),
-    );
-    var halves = array<vec2<f32>, 3>(
-        vec2<f32>(0.24, 0.021),
-        vec2<f32>(0.20, 0.018),
-        vec2<f32>(0.16, 0.015),
-    );
-    var rots = array<f32, 3>(-0.34, 0.30, -0.18);
-    var edges = array<f32, 3>(0.34, 0.24, 0.17);
-    for (var i = 0; i < 3; i = i + 1) {
-        let sd = sd_ramp(p, centres[i], halves[i], rots[i]);
-        let body = 1.0 - smoothstep(0.0, 0.003, sd);
-        col = mix(col, ink * 0.4, body * 0.9);
-        // Accent edge: on the world the accent marks surf ramps and nothing
-        // else, and the same rule holds here.
-        let edge = 1.0 - smoothstep(0.0012, 0.0042, abs(sd));
-        col += accent * edge * edges[i];
-    }
+    // --- one ramp profile, standing on the plane, right of centre ---
+    // Drawn as a section, not a slab: two accent faces, a plain base rule and
+    // a square at each vertex — the same triangle every settings screen
+    // could dimension. Vertices in aspect-corrected units, y down.
+    let base_y = horizon - 0.5 + 0.30;
+    let a = vec2<f32>(0.20 * aspect, base_y);
+    let apex = vec2<f32>(0.30 * aspect, base_y - 0.22);
+    let b = vec2<f32>(0.40 * aspect, base_y);
+    let w1 = 1.6 * one_px;
+    let face = 1.0 - smoothstep(w1, w1 + 1.5 * one_px, min(sd_seg(p, a, apex), sd_seg(p, apex, b)));
+    let base = 1.0 - smoothstep(0.6 * one_px, 1.8 * one_px, sd_seg(p, a, b));
+    // Interior is knocked back to the ground so the grid does not run through.
+    let inside = step(0.0, (apex.x - a.x) * (p.y - a.y) - (apex.y - a.y) * (p.x - a.x))
+        * step(0.0, (b.x - apex.x) * (p.y - apex.y) - (b.y - apex.y) * (p.x - apex.x))
+        * step(p.y, base_y);
+    col = mix(col, ground, inside * 0.92);
+    col += ink * base * 0.35;
+    col += accent * face;
+    let vs = 2.5 * one_px;
+    let vert = step(max(abs(p.x - a.x), abs(p.y - a.y)), vs)
+        + step(max(abs(p.x - apex.x), abs(p.y - apex.y)), vs)
+        + step(max(abs(p.x - b.x), abs(p.y - b.y)), vs);
+    col = mix(col, ink, clamp(vert, 0.0, 1.0));
 
-    // --- grain + vignette ---
-    col += (hash21(px + floor(t * 12.0)) - 0.5) * 0.0012;
-    let vig = 1.0 - smoothstep(0.30, 0.95, length(vec2<f32>(p.x / max(aspect, 0.001), p.y)) * 1.6);
-    col *= mix(0.35, 1.0, vig);
+    // --- vignette ---
+    let vig = 1.0 - smoothstep(0.40, 1.05, length(vec2<f32>(p.x / max(aspect, 0.001), p.y)) * 1.6);
+    col *= mix(0.55, 1.0, vig);
 
     return vec4<f32>(max(col, vec3<f32>(0.0)), clamp(u.fade, 0.0, 1.0));
 }

@@ -87,7 +87,10 @@ fn main() {
             continue;
         }
         let name = ent.prop("targetname").unwrap_or("");
-        let solidity = ent.prop("Solidity").unwrap_or("");
+        let solidity = ent
+            .properties()
+            .find_map(|(k, v)| k.eq_ignore_ascii_case("solidity").then_some(v))
+            .unwrap_or("");
         let extra = if model.starts_with('*') {
             let idx: usize = model[1..].parse().unwrap_or(0);
             match bsp.models.get(idx) {

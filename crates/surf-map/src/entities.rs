@@ -6,7 +6,7 @@ use surf_core::math::{Angle, Vec3};
 use surf_core::{Aabb, Brush, Plane};
 use vbsp::Bsp;
 
-use crate::collision::{brush_from_bsp, collect_model_brushes};
+use crate::collision::{brush_from_bsp, build_player_brushes, collect_model_brushes};
 use crate::leaves::LeafBrushRange;
 use crate::MapError;
 
@@ -103,9 +103,13 @@ pub struct ParsedEntities {
     pub pushes: Vec<PushTrigger>,
     pub gravities: Vec<GravityTrigger>,
     pub fields: Vec<FieldTrigger>,
-    /// Brush models to render in addition to world (func_illusionary / never-solid func_brush).
+    /// Brush models to render in addition to world (func_illusionary / every func_brush).
     /// `(model_index, entity origin)` — bmodel verts are local to origin.
     pub render_models: Vec<(usize, Vec3)>,
+    /// Player-solid brushes from solid brush entities (`func_brush` with
+    /// Solidity Toggle-and-enabled or Always Solid), already shifted into
+    /// world space. Appended to the world collision set.
+    pub solid_brushes: Vec<Brush>,
 }
 
 pub fn parse_entities(
@@ -125,6 +129,7 @@ pub fn parse_entities(
     let mut name_filters: HashMap<String, NameFilter> = HashMap::new();
     let mut named: HashMap<String, NamedEntity> = HashMap::new();
     let mut render_models = Vec::new();
+    let mut solid_models: Vec<(usize, Vec3)> = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
     let mut start_volumes: Vec<Aabb> = Vec::new();
 
@@ -215,7 +220,7 @@ pub fn parse_entities(
             }
             "trigger_teleport" => {
                 let start_disabled =
-                    ent.prop("StartDisabled").map(|v| v == "1").unwrap_or(false);
+                    trigger_start_disabled(&ent);
                 let target = ent.prop("target").unwrap_or("").to_string();
                 // filter_activator_name (e.g. filter_fail) needs trigger_multiple
                 // AddOutput targetname — skip until that path exists. Unfiltered
@@ -236,7 +241,7 @@ pub fn parse_entities(
             }
             "trigger_push" => {
                 let start_disabled =
-                    ent.prop("StartDisabled").map(|v| v == "1").unwrap_or(false);
+                    trigger_start_disabled(&ent);
                 if start_disabled {
                     continue;
                 }
@@ -266,7 +271,7 @@ pub fn parse_entities(
             }
             "trigger_gravity" => {
                 let start_disabled =
-                    ent.prop("StartDisabled").map(|v| v == "1").unwrap_or(false);
+                    trigger_start_disabled(&ent);
                 if start_disabled {
                     continue;
                 }
@@ -288,12 +293,22 @@ pub fn parse_entities(
                 }
             }
             "func_brush" => {
-                // Solidity 1 = Never Solid (render only).
-                let solidity = ent.prop("Solidity").unwrap_or("1");
-                if solidity == "1" {
-                    if let Some(model) = ent.prop("model").and_then(parse_model_index) {
-                        if model > 0 {
-                            render_models.push((model, origin));
+                // `Solidity`: 0 = Toggle (solid unless the brush starts
+                // disabled), 1 = Never Solid, 2 = Always Solid. The FGD
+                // default is 0, so an absent key means *solid* — and the key
+                // is stored lowercase, which a literal `prop("Solidity")`
+                // never matched (andromeda's start platform fell through).
+                let solidity = prop_ci(&ent, "Solidity").map(str::trim).unwrap_or("0");
+                let solid = match solidity {
+                    "1" => false,
+                    "2" => true,
+                    _ => !trigger_start_disabled(&ent),
+                };
+                if let Some(model) = ent.prop("model").and_then(parse_model_index) {
+                    if model > 0 {
+                        render_models.push((model, origin));
+                        if solid {
+                            solid_models.push((model, origin));
                         }
                     }
                 }
@@ -395,6 +410,22 @@ pub fn parse_entities(
         });
     }
 
+    // `MX_SURF_NO_FUNC_BRUSH_SOLID=1` restores the old behaviour (every
+    // func_brush render-only) for A/B and for the guard test.
+    if std::env::var_os("MX_SURF_NO_FUNC_BRUSH_SOLID").is_some() {
+        solid_models.clear();
+    }
+    let mut solid_brushes = Vec::new();
+    for (model_idx, origin) in solid_models {
+        let Some(model) = bsp.models.get(model_idx) else {
+            continue;
+        };
+        let indices = collect_model_brushes(bsp, leaf_ranges, model.head_node);
+        for brush in build_player_brushes(bsp, &indices, world_bounds) {
+            solid_brushes.push(translate_brush(brush, origin));
+        }
+    }
+
     Ok(ParsedEntities {
         spawn,
         teleports,
@@ -402,6 +433,7 @@ pub fn parse_entities(
         gravities,
         fields,
         render_models,
+        solid_brushes,
     })
 }
 

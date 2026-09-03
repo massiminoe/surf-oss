@@ -7,7 +7,10 @@
 
 use surf_core::math::Vec3;
 use surf_map::LoadedMap;
-use surf_render::{HudState, MenuPage, MenuPanel, MenuRow, Offscreen, RowTone, ViewParams};
+use surf_render::{
+    HudState, HudTimerPhase, MenuPage, MenuPanel, MenuRow, Offscreen, RowTone, ShowKeysState,
+    ViewParams,
+};
 
 fn rows(v: Vec<MenuRow>) -> MenuPanel {
     MenuPanel {
@@ -246,6 +249,33 @@ fn main() {
             },
         ),
     ];
+
+    // In-run HUD, no page: the readout the player actually surfs with.
+    {
+        let hud = HudState {
+            speed: 1842.0,
+            sync: 78.0,
+            grounded: false,
+            time_secs: Some(31.42),
+            pb_delta_secs: Some(-0.18),
+            timer_phase: HudTimerPhase::Running,
+            show_sync_bar: true,
+            show_keys: Some(ShowKeysState {
+                forward: true,
+                left: true,
+                ..Default::default()
+            }),
+            stage_line: Some("CP 2 / 4".into()),
+            ghost_time_delta: Some(0.41),
+            ghost_speed_delta: Some(62.0),
+            time: 3.0,
+            ..HudState::default()
+        };
+        let rgba = off.capture_with_hud(eye, angles, ViewParams::default(), Some(hud));
+        let path = out_dir.join("hud_run.png");
+        image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).expect("write png");
+        println!("wrote {}", path.display());
+    }
 
     for (name, page) in pages {
         let hud = HudState {

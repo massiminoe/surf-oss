@@ -1089,18 +1089,21 @@ impl App {
     }
 
     /// Is backing out of this page a harmless click target? On the title
-    /// screen "back" is *quit*, so a stray click off the panel — or a
-    /// right-click — must not trigger it. Esc still can, deliberately.
+    /// screen there is nowhere to go back to, and a load must not be
+    /// interrupted by a stray click off the panel or a right-click.
     fn back_is_click_safe(&self) -> bool {
         !matches!(self.mode, Mode::MainMenu | Mode::Loading { .. })
     }
 
     /// Esc / right-click / Back.
-    fn page_back(&mut self, event_loop: &ActiveEventLoop) {
+    ///
+    /// Esc never quits (Max, 2026-09-02): backing out of nested menus with a
+    /// run of Esc presses used to fall through the title screen and close the
+    /// game. Quit is a deliberate row / button only.
+    fn page_back(&mut self, _event_loop: &ActiveEventLoop) {
         match &self.mode {
             Mode::MainMenu => {
                 self.persist_settings();
-                event_loop.exit();
             }
             Mode::MapPicker | Mode::Settings | Mode::Leaderboard { map: None } => {
                 self.persist_settings();

@@ -21,6 +21,15 @@ use crate::backdrop::Backdrop;
 
 const FONT_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Medium.ttf");
 const FONT_FAMILY: &str = "JetBrains Mono";
+/// Menu type (direction "Instrument", Max 2026-09-02): a humanist sans for
+/// titles and labels, the mono kept for every number, tab and key hint so
+/// digits stay tabular. Three static instances — cosmic-text does not drive a
+/// variable weight axis.
+const FONT_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/InstrumentSans-Regular.ttf");
+const FONT_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/InstrumentSans-Medium.ttf");
+const FONT_SANS_SEMIBOLD: &[u8] =
+    include_bytes!("../../../assets/fonts/InstrumentSans-SemiBold.ttf");
+const SANS_FAMILY: &str = "Instrument Sans";
 
 /// Timer phase for HUD labels (mirrors app timer without coupling crates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -274,12 +283,18 @@ pub struct PageSpec {
     pub wide: bool,
 }
 
-const PANEL_PAD_X: f32 = 26.0;
+const PANEL_PAD_X: f32 = 30.0;
+/// Room left of the label column for the selection mark.
+const CURSOR_INSET: f32 = 14.0;
 /// Width reserved at the right of a row for its value text.
-const VALUE_GUTTER: f32 = 62.0;
-const ROW_H: f32 = 27.0;
+const VALUE_GUTTER: f32 = 66.0;
+const ROW_H: f32 = 28.0;
 const TAB_H: f32 = 30.0;
-const BUTTON_H: f32 = 32.0;
+const BUTTON_H: f32 = 34.0;
+/// Tabs and buttons are text with an underline, sized to a fixed column and
+/// left-aligned — a strip of equal boxes read as a toolbar, not a menu.
+const TAB_W: f32 = 112.0;
+const BUTTON_W: f32 = 118.0;
 
 /// Hard cap on drawn rows — must stay <= the renderer's row buffer pool.
 pub const PANEL_ROWS_MAX: usize = 22;
@@ -297,14 +312,14 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
     let px = ((w - pw) * 0.5).max(12.0);
     let py = (h * 0.11).max(26.0);
 
-    let title_y = py + 24.0;
-    let subtitle_y = py + 70.0;
+    let title_y = py + 26.0;
+    let subtitle_y = py + 60.0;
     let has_tabs = spec.tabs > 0;
-    let tabs_y = py + 98.0;
+    let tabs_y = py + 92.0;
     let items_y0 = if has_tabs {
-        tabs_y + TAB_H + 18.0
+        tabs_y + TAB_H + 14.0
     } else {
-        py + 104.0
+        py + 98.0
     };
 
     // Reserve the space below the list before deciding how many rows fit.
@@ -324,11 +339,10 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
     let inner_w = pw - PANEL_PAD_X * 2.0;
 
     let tabs = if has_tabs {
-        let gap = 8.0;
-        let tw = (inner_w - gap * (spec.tabs as f32 - 1.0)) / spec.tabs as f32;
+        let tw = TAB_W.min(inner_w / spec.tabs as f32);
         (0..spec.tabs)
             .map(|i| Rect {
-                x: inner_x + i as f32 * (tw + gap),
+                x: inner_x + i as f32 * tw,
                 y: tabs_y,
                 w: tw,
                 h: TAB_H,
@@ -339,15 +353,10 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
     };
 
     let buttons = if spec.buttons > 0 {
-        let gap = 8.0;
-        // Cap the width so a single "Back" is a button, not a banner, then
-        // centre whatever the strip comes to.
-        let bw = ((inner_w - gap * (spec.buttons as f32 - 1.0)) / spec.buttons as f32).min(168.0);
-        let strip_w = bw * spec.buttons as f32 + gap * (spec.buttons as f32 - 1.0);
-        let bx = inner_x + (inner_w - strip_w) * 0.5;
+        let bw = BUTTON_W.min(inner_w / spec.buttons as f32);
         (0..spec.buttons)
             .map(|i| Rect {
-                x: bx + i as f32 * (bw + gap),
+                x: inner_x + i as f32 * bw,
                 y: buttons_y,
                 w: bw,
                 h: BUTTON_H,
@@ -484,18 +493,34 @@ struct HudVert {
 // values of the intended swatches — spelling #2FBF7F as 0.184 would come out
 // three stops light.
 const C_ACCENT: [f32; 4] = [0.02843, 0.521, 0.21223, 1.0]; // #2FBF7F
-const TXT_TITLE: Color = Color::rgb(238, 242, 240);
-const TXT_SUB: Color = Color::rgb(122, 132, 140);
-const TXT_HEADER: Color = Color::rgb(96, 150, 124);
-const TXT_LABEL: Color = Color::rgb(200, 206, 212);
-const TXT_LABEL_SEL: Color = Color::rgb(244, 250, 246);
-const TXT_VALUE: Color = Color::rgb(146, 154, 164);
-const TXT_ACCENT: Color = Color::rgb(72, 200, 138);
-const TXT_GOOD: Color = Color::rgb(110, 230, 140);
+// Direction "Instrument" swatches: ink #E9EEEC on ground #0C1012, two greys
+// biased toward the accent (#8C9A96 / #4E5A57), accent #2FBF7F used only for
+// the cursor mark, the selected value and slider fill.
+const TXT_TITLE: Color = Color::rgb(233, 238, 236);
+const TXT_SUB: Color = Color::rgb(140, 154, 150);
+const TXT_HEADER: Color = Color::rgb(110, 122, 118);
+const TXT_LABEL: Color = Color::rgb(196, 204, 201);
+const TXT_LABEL_SEL: Color = Color::rgb(255, 255, 255);
+const TXT_VALUE: Color = Color::rgb(233, 238, 236);
+const TXT_ACCENT: Color = Color::rgb(47, 191, 127);
+const TXT_GOOD: Color = Color::rgb(47, 191, 127);
 const TXT_WARN: Color = Color::rgb(240, 170, 90);
-const TXT_DIM: Color = Color::rgb(112, 120, 130);
-const TXT_HINT: Color = Color::rgb(112, 120, 132);
+const TXT_DIM: Color = Color::rgb(110, 122, 118);
+const TXT_HINT: Color = Color::rgb(110, 122, 118);
 const TXT_ERR: Color = Color::rgb(232, 138, 116);
+/// Linear #E9EEEC (ink) and #0C1012 (ground) for the quad pass — the surface
+/// is sRGB, so the byte values would come out three stops light.
+const C_INK: [f32; 3] = [0.82279, 0.87137, 0.84652];
+const C_GROUND: [f32; 3] = [0.00335, 0.00518, 0.00605];
+fn ink(a: f32) -> [f32; 4] {
+    [C_INK[0], C_INK[1], C_INK[2], a]
+}
+fn ground(a: f32) -> [f32; 4] {
+    [C_GROUND[0], C_GROUND[1], C_GROUND[2], a]
+}
+fn accent(a: f32) -> [f32; 4] {
+    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], a]
+}
 
 pub struct HudRenderer {
     font_system: FontSystem,
@@ -539,6 +564,9 @@ impl HudRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(FONT_MEDIUM.to_vec());
+        font_system.db_mut().load_font_data(FONT_SANS_REGULAR.to_vec());
+        font_system.db_mut().load_font_data(FONT_SANS_MEDIUM.to_vec());
+        font_system.db_mut().load_font_data(FONT_SANS_SEMIBOLD.to_vec());
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
@@ -548,8 +576,8 @@ impl HudRenderer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
         // Speed is the headline read — everything else is deliberately quieter.
-        let speed_buf = Buffer::new(&mut font_system, Metrics::new(58.0, 66.0));
-        let time_buf = Buffer::new(&mut font_system, Metrics::new(20.0, 26.0));
+        let speed_buf = Buffer::new(&mut font_system, Metrics::new(44.0, 50.0));
+        let time_buf = Buffer::new(&mut font_system, Metrics::new(30.0, 36.0));
         let delta_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
         let phase_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
         let pb_abs_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
@@ -560,23 +588,23 @@ impl HudRenderer {
         let keys_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 22.0));
         let perf_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 16.0));
 
-        let page_title_buf = Buffer::new(&mut font_system, Metrics::new(34.0, 40.0));
-        let page_sub_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
+        let page_title_buf = Buffer::new(&mut font_system, Metrics::new(24.0, 30.0));
+        let page_sub_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
         let page_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
-        let page_msg_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 19.0));
+        let page_msg_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 18.0));
         let tab_bufs = (0..MAX_TABS)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(12.0, 16.0)))
             .collect();
         let mk_rows = |fs: &mut FontSystem, size: f32| {
             (0..PANEL_ROWS_MAX)
                 .map(|_| Buffer::new(fs, Metrics::new(size, size + 5.0)))
                 .collect::<Vec<_>>()
         };
-        let label_bufs = mk_rows(&mut font_system, 16.0);
-        let note_bufs = mk_rows(&mut font_system, 14.0);
-        let value_bufs = mk_rows(&mut font_system, 15.0);
+        let label_bufs = mk_rows(&mut font_system, 15.0);
+        let note_bufs = mk_rows(&mut font_system, 12.0);
+        let value_bufs = mk_rows(&mut font_system, 13.0);
         let button_bufs = (0..MAX_BUTTONS)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(12.0, 16.0)))
             .collect();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -720,6 +748,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         let attrs = Attrs::new()
             .family(Family::Name(FONT_FAMILY))
             .weight(Weight::MEDIUM);
+        let sans = Attrs::new()
+            .family(Family::Name(SANS_FAMILY))
+            .weight(Weight::NORMAL);
+        let sans_title = Attrs::new()
+            .family(Family::Name(SANS_FAMILY))
+            .weight(Weight::MEDIUM);
 
         let bounds = TextBounds {
             left: 0,
@@ -753,7 +787,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
         let time_label = hud
             .time_secs
-            .map(|t| format!("Time: {}", format_hud_time(t)));
+            .map(format_hud_time);
         if let Some(ref t) = time_label {
             set_buf_text(&mut self.font_system, &mut self.time_buf, t, attrs, w, 30.0);
         }
@@ -869,7 +903,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
 
         let sync_label = if hud.show_sync_bar {
-            Some(format!("Sync: {:.0}%", hud.sync.clamp(0.0, 100.0)))
+            Some(format!("sync {:.0}", hud.sync.clamp(0.0, 100.0)))
         } else {
             None
         };
@@ -907,7 +941,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 &mut self.font_system,
                 &mut self.page_title_buf,
                 &page.title,
-                attrs,
+                sans_title,
                 w,
                 44.0,
             );
@@ -931,7 +965,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 &mut self.font_system,
                 &mut self.page_msg_buf,
                 page.message.as_deref().unwrap_or(""),
-                attrs,
+                sans,
                 w,
                 20.0,
             );
@@ -961,7 +995,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     &mut self.font_system,
                     &mut self.label_bufs[i],
                     &row.label,
-                    attrs,
+                    if row.kind == RowKind::Header { attrs } else { sans },
                     col_w,
                     22.0,
                 );
@@ -1000,47 +1034,56 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             }
         }
 
-        let speed_color = if hud.grounded {
-            Color::rgb(245, 245, 247)
-        } else {
-            Color::rgb(140, 210, 255)
-        };
+        // In-run readout: ink for the facts, accent / warm red only for a
+        // delta's sign, warn orange only for practice. Airborne no longer tints
+        // the speed — the bar under it carries that.
+        let behind = Color::rgb(232, 120, 104);
+        let speed_color = TXT_TITLE;
         let time_color = if hud.timer_phase == HudTimerPhase::Finished && !hud.practice {
-            Color::rgb(255, 210, 90)
+            TXT_ACCENT
         } else {
-            Color::rgb(230, 232, 238)
+            TXT_TITLE
         };
         let phase_color = if hud.practice {
-            Color::rgb(255, 170, 80)
+            TXT_WARN
         } else if hud.practice_mode {
             Color::rgb(190, 165, 120)
         } else {
-            Color::rgb(150, 155, 165)
+            TXT_LABEL
         };
-        let pb_abs_color = Color::rgb(170, 175, 185);
+        let pb_abs_color = TXT_SUB;
         let delta_color = match hud.pb_delta_secs {
             Some(d) if d < 0.0 => TXT_GOOD,
-            Some(d) if d > 0.0 => Color::rgb(240, 110, 110),
-            _ => Color::rgb(180, 180, 190),
+            Some(d) if d > 0.0 => behind,
+            _ => TXT_SUB,
         };
         let split_color = match hud.split_line.as_deref() {
             Some(s) if s.contains(" -") => TXT_GOOD,
-            Some(s) if s.contains(" +") => Color::rgb(240, 110, 110),
-            _ => Color::rgb(210, 215, 225),
+            Some(s) if s.contains(" +") => behind,
+            _ => TXT_LABEL,
         };
         let ghost_color = match hud.ghost_time_delta {
             Some(d) if d < 0.0 => TXT_GOOD,
-            Some(d) if d > 0.0 => Color::rgb(240, 110, 110),
-            _ => Color::rgb(160, 200, 220),
+            Some(d) if d > 0.0 => behind,
+            _ => TXT_SUB,
         };
 
         let mut areas: Vec<TextArea> = Vec::with_capacity(96);
-        let mut info_box: Option<(f32, f32, f32, f32)> = None;
+
+        // Speed bar + sync bar geometry, drawn into the quad pass below.
+        let mut speed_bar: Option<(f32, f32, f32, f32)> = None; // x, y, w, frac
+        let mut sync_bar: Option<(f32, f32, f32, f32)> = None;
+        let mut crosshair = false;
+        // Soft ground washes behind the two text blocks so they stay legible
+        // over a bright sky or floor. No frame — the text is the shape.
+        let mut washes: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(2);
 
         if !page_open {
-            // Headline speed: large, centered, just above the info box.
+            // Headline speed: top centre, with a hairline bar under it that
+            // fills toward speed_scale. The edges of the screen carry the
+            // rest, so the middle stays clear for the map.
             let speed_w = line_width(&self.speed_buf);
-            let speed_top = h * 0.40;
+            let speed_top = 30.0;
             areas.push(TextArea {
                 buffer: &self.speed_buf,
                 left: (w - speed_w) * 0.5,
@@ -1050,58 +1093,72 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 default_color: speed_color,
                 custom_glyphs: &[],
             });
+            let bar_w = 200.0;
+            speed_bar = Some((
+                (w - bar_w) * 0.5,
+                speed_top + 58.0,
+                bar_w,
+                (hud.speed / hud.speed_scale.max(1.0)).clamp(0.0, 1.0),
+            ));
+            crosshair = true;
 
+            // Timer block, bottom-left: the clock large, then its context
+            // lines beneath it in reading order.
             let mut rows: Vec<(&Buffer, Color, f32)> = Vec::with_capacity(8);
             if time_label.is_some() {
-                rows.push((&self.time_buf, time_color, 27.0));
-            }
-            if hud.split_line.is_some() {
-                rows.push((&self.split_buf, split_color, 23.0));
-            }
-            if phase_label.is_some() {
-                rows.push((&self.phase_buf, phase_color, 22.0));
-            }
-            if pb_abs_label.is_some() {
-                rows.push((&self.pb_abs_buf, pb_abs_color, 22.0));
+                rows.push((&self.time_buf, time_color, 36.0));
             }
             if delta_label.is_some() {
-                rows.push((&self.delta_buf, delta_color, 23.0));
+                rows.push((&self.delta_buf, delta_color, 21.0));
+            }
+            if hud.split_line.is_some() {
+                rows.push((&self.split_buf, split_color, 21.0));
             }
             if ghost_label.is_some() {
-                rows.push((&self.ghost_buf, ghost_color, 22.0));
+                rows.push((&self.ghost_buf, ghost_color, 20.0));
             }
-            if sync_label.is_some() {
-                rows.push((&self.sync_buf, Color::rgb(200, 185, 140), 22.0));
+            if pb_abs_label.is_some() {
+                rows.push((&self.pb_abs_buf, pb_abs_color, 20.0));
             }
-
+            let block_h: f32 = rows.iter().map(|(_, _, lh)| *lh).sum();
+            let block_w = rows
+                .iter()
+                .map(|(b, _, _)| line_width(b))
+                .fold(0.0f32, f32::max);
+            let mut y = h - 56.0 - block_h;
             if !rows.is_empty() {
-                let pad_x = 24.0;
-                let pad_y = 14.0;
-                let content_w = rows
-                    .iter()
-                    .map(|(b, _, _)| line_width(b))
-                    .fold(0.0f32, f32::max);
-                let content_h: f32 = rows.iter().map(|(_, _, lh)| *lh).sum();
-                let box_w = (content_w + pad_x * 2.0).min(w - 24.0);
-                let box_h = content_h + pad_y * 2.0;
-                let box_x = (w - box_w) * 0.5;
-                let box_y = (h * 0.60).max(speed_top + 80.0);
-                info_box = Some((box_x, box_y, box_w, box_h));
+                washes.push((44.0 - 14.0, y - 10.0, block_w + 28.0, block_h + 20.0));
+            }
+            washes.push((
+                (w - speed_w.max(bar_w)) * 0.5 - 20.0,
+                speed_top - 8.0,
+                speed_w.max(bar_w) + 40.0,
+                76.0,
+            ));
+            for (buf, color, lh) in rows {
+                areas.push(TextArea {
+                    buffer: buf,
+                    left: 44.0,
+                    top: y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: color,
+                    custom_glyphs: &[],
+                });
+                y += lh;
+            }
 
-                let mut y = box_y + pad_y;
-                for (buf, color, lh) in rows {
-                    let lw = line_width(buf);
-                    areas.push(TextArea {
-                        buffer: buf,
-                        left: (w - lw) * 0.5,
-                        top: y,
-                        scale: 1.0,
-                        bounds,
-                        default_color: color,
-                        custom_glyphs: &[],
-                    });
-                    y += lh;
-                }
+            // Phase / stage / practice: top-left, small caps.
+            if phase_label.is_some() {
+                areas.push(TextArea {
+                    buffer: &self.phase_buf,
+                    left: 44.0,
+                    top: 36.0,
+                    scale: 1.0,
+                    bounds,
+                    default_color: phase_color,
+                    custom_glyphs: &[],
+                });
             }
 
             if hud.pb_flash {
@@ -1109,12 +1166,33 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 areas.push(TextArea {
                     buffer: &self.flash_buf,
                     left: (w - fw) * 0.5,
-                    top: speed_top - 54.0,
+                    top: speed_top + 84.0,
                     scale: 1.0,
                     bounds,
-                    default_color: Color::rgb(255, 220, 100),
+                    default_color: TXT_ACCENT,
                     custom_glyphs: &[],
                 });
+            }
+
+            // Sync, bottom-right above the perf line, with a hairline bar.
+            if sync_label.is_some() {
+                let sw = line_width(&self.sync_buf);
+                let sy = h - 56.0 - 30.0;
+                areas.push(TextArea {
+                    buffer: &self.sync_buf,
+                    left: w - 44.0 - sw,
+                    top: sy,
+                    scale: 1.0,
+                    bounds,
+                    default_color: TXT_SUB,
+                    custom_glyphs: &[],
+                });
+                sync_bar = Some((
+                    w - 44.0 - 160.0,
+                    sy + 26.0,
+                    160.0,
+                    (hud.sync / 100.0).clamp(0.0, 1.0),
+                ));
             }
 
             if keys_label.is_some() {
@@ -1122,10 +1200,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 areas.push(TextArea {
                     buffer: &self.keys_buf,
                     left: (w - kw) * 0.5,
-                    top: h - 48.0,
+                    top: h - 56.0,
                     scale: 1.0,
                     bounds,
-                    default_color: Color::rgb(200, 205, 215),
+                    default_color: TXT_LABEL,
                     custom_glyphs: &[],
                 });
             }
@@ -1140,7 +1218,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 top: h - 28.0,
                 scale: 1.0,
                 bounds,
-                default_color: Color::rgb(160, 165, 175),
+                default_color: TXT_DIM,
                 custom_glyphs: &[],
             });
         }
@@ -1152,98 +1230,95 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             let text_left = p.x + PANEL_PAD_X;
             let value_right = p.x + p.w - PANEL_PAD_X;
 
-            // Backdrop pages own the frame; the pause overlay only dims it.
-            if page.backdrop {
-                // A touch of extra darkening under the panel column so text has
-                // guaranteed contrast whatever the backdrop is doing.
+            let inner_w = p.w - PANEL_PAD_X * 2.0;
+            let label_x = text_left + CURSOR_INSET;
+
+            // Backdrop pages own the frame; the pause overlay dims the world
+            // first. Either way the panel is a translucent sheet of ground with
+            // a hairline frame and four corner ticks — no fill colour of its
+            // own, no accent rule.
+            if !page.backdrop {
+                push_rect_ndc(&mut verts, -1.0, -1.0, 2.0, 2.0, ground(0.60));
+            }
+            push_rect_px(&mut verts, p.x, p.y, p.w, p.h, w, h, ground(0.93));
+            let frame = ink(0.12);
+            push_rect_px(&mut verts, p.x, p.y, p.w, 1.0, w, h, frame);
+            push_rect_px(&mut verts, p.x, p.y + p.h - 1.0, p.w, 1.0, w, h, frame);
+            push_rect_px(&mut verts, p.x, p.y, 1.0, p.h, w, h, frame);
+            push_rect_px(&mut verts, p.x + p.w - 1.0, p.y, 1.0, p.h, w, h, frame);
+            let tick = 10.0;
+            let tick_c = ink(1.0);
+            for (cx, cy, dx, dy) in [
+                (p.x, p.y, 1.0, 1.0),
+                (p.x + p.w, p.y, -1.0, 1.0),
+                (p.x, p.y + p.h, 1.0, -1.0),
+                (p.x + p.w, p.y + p.h, -1.0, -1.0),
+            ] {
+                let hx = if dx > 0.0 { cx } else { cx - tick };
+                let vy = if dy > 0.0 { cy } else { cy - tick };
+                let hy = if dy > 0.0 { cy } else { cy - 1.0 };
+                let vx = if dx > 0.0 { cx } else { cx - 1.0 };
+                push_rect_px(&mut verts, hx, hy, tick, 1.0, w, h, tick_c);
+                push_rect_px(&mut verts, vx, vy, 1.0, tick, w, h, tick_c);
+            }
+
+            // Tab strip: text with a hairline under the strip and a solid
+            // underline under the active tab.
+            if tab_count > 0 {
                 push_rect_px(
                     &mut verts,
-                    p.x,
-                    p.y,
-                    p.w,
-                    p.h,
+                    text_left,
+                    layout.tabs[0].y + TAB_H - 1.0,
+                    inner_w,
+                    1.0,
                     w,
                     h,
-                    [0.00335, 0.00478, 0.007, 0.88], // #0B0F14
-                );
-            } else {
-                push_rect_ndc(
-                    &mut verts,
-                    -1.0,
-                    -1.0,
-                    2.0,
-                    2.0,
-                    [0.0, 0.0006, 0.0012, 0.90],
-                );
-                push_rect_px(
-                    &mut verts,
-                    p.x,
-                    p.y,
-                    p.w,
-                    p.h,
-                    w,
-                    h,
-                    [0.00605, 0.00802, 0.01161, 0.95], // #12161C
+                    ink(0.12),
                 );
             }
-            // Top accent rule.
-            push_rect_px(&mut verts, p.x, p.y, p.w, 2.0, w, h, C_ACCENT);
-
-            // Tab strip.
             for (i, r) in layout.tabs.iter().take(tab_count).enumerate() {
                 let active = i == page.tab;
                 let hovered = page.tab_hovered == Some(i);
-                let fill = if active {
-                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.16]
-                } else if hovered {
-                    [1.0, 1.0, 1.0, 0.02]
-                } else {
-                    [1.0, 1.0, 1.0, 0.006]
-                };
-                push_rect_px(&mut verts, r.x, r.y, r.w, r.h, w, h, fill);
-                if active {
-                    push_rect_px(&mut verts, r.x, r.y + r.h - 2.0, r.w, 2.0, w, h, C_ACCENT);
-                }
                 let tw = line_width(&self.tab_bufs[i]);
+                if active {
+                    push_rect_px(&mut verts, r.x, r.y + r.h - 1.0, tw, 1.0, w, h, ink(1.0));
+                }
                 areas.push(TextArea {
                     buffer: &self.tab_bufs[i],
-                    left: r.x + (r.w - tw) * 0.5,
-                    top: r.y + 7.0,
+                    left: r.x,
+                    top: r.y + 8.0,
                     scale: 1.0,
                     bounds,
-                    default_color: if active { TXT_TITLE } else { TXT_DIM },
+                    default_color: if active {
+                        TXT_TITLE
+                    } else if hovered {
+                        TXT_LABEL
+                    } else {
+                        TXT_DIM
+                    },
                     custom_glyphs: &[],
                 });
             }
 
-            // Selection band + hover wash.
+            // Cursor: a 5px accent square in the gutter left of the label.
+            // No selection band — the row reads as selected from the mark,
+            // the brighter label and the accent value.
             let start = page.panel.scroll;
             let sel_drawn = page.panel.selected.checked_sub(start);
             if let Some(sd) = sel_drawn.filter(|d| *d < drawn_rows) {
                 let selectable = page.panel.rows[page.panel.selected].kind.selectable();
                 if selectable {
                     let sel_y = p.items_y0 + sd as f32 * p.row_h;
-                    let a = if page.panel.focused { 0.14 } else { 0.06 };
+                    let a = if page.panel.focused { 1.0 } else { 0.45 };
                     push_rect_px(
                         &mut verts,
-                        p.x + 10.0,
-                        sel_y,
-                        p.w - 20.0,
-                        p.row_h,
+                        text_left,
+                        sel_y + (p.row_h - 5.0) * 0.5,
+                        5.0,
+                        5.0,
                         w,
                         h,
-                        [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], a],
-                    );
-                    let tick_a = if page.panel.focused { 1.0 } else { 0.45 };
-                    push_rect_px(
-                        &mut verts,
-                        p.x + 10.0,
-                        sel_y + 4.0,
-                        3.0,
-                        p.row_h - 8.0,
-                        w,
-                        h,
-                        [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], tick_a],
+                        accent(a),
                     );
                 }
             }
@@ -1252,13 +1327,13 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     if hv != page.panel.selected && page.panel.rows[hv].kind.selectable() {
                         push_rect_px(
                             &mut verts,
-                            p.x + 10.0,
+                            text_left,
                             p.items_y0 + hd as f32 * p.row_h,
-                            p.w - 20.0,
+                            inner_w,
                             p.row_h,
                             w,
                             h,
-                            [1.0, 1.0, 1.0, 0.012],
+                            ink(0.025),
                         );
                     }
                 }
@@ -1272,21 +1347,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 let selected = start + i == page.panel.selected;
                 match row.kind {
                     RowKind::Header => {
-                        // Headers sit lower in their row with a hairline above.
-                        push_rect_px(
-                            &mut verts,
-                            text_left,
-                            y + 6.0,
-                            p.w - PANEL_PAD_X * 2.0,
-                            1.0,
-                            w,
-                            h,
-                            [1.0, 1.0, 1.0, 0.02],
-                        );
+                        // Headers are small mono captions sitting low in their
+                        // row, with no rule of their own.
                         areas.push(TextArea {
                             buffer: &self.label_bufs[i],
                             left: text_left,
-                            top: y + 11.0,
+                            top: y + 12.0,
                             scale: 1.0,
                             bounds,
                             default_color: TXT_HEADER,
@@ -1295,56 +1361,51 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                         continue;
                     }
                     RowKind::Slider(frac) => {
-                        let ty = y + p.row_h - 7.0;
+                        let ty = y + p.row_h * 0.5;
                         push_rect_px(
                             &mut verts,
                             track_x0,
                             ty,
                             track_x1 - track_x0,
-                            2.0,
+                            1.0,
                             w,
                             h,
-                            [1.0, 1.0, 1.0, 0.035],
+                            ink(0.14),
                         );
                         let fill = (track_x1 - track_x0) * frac.clamp(0.0, 1.0);
+                        let c = if selected { accent(1.0) } else { ink(0.9) };
+                        push_rect_px(&mut verts, track_x0, ty, fill.max(1.0), 1.0, w, h, c);
+                        // Thumb: a hairline tick, 2px when it is the live row.
+                        let tw = if selected { 2.0 } else { 1.0 };
                         push_rect_px(
                             &mut verts,
-                            track_x0,
-                            ty,
-                            fill.max(1.0),
-                            2.0,
-                            w,
-                            h,
-                            [
-                                C_ACCENT[0],
-                                C_ACCENT[1],
-                                C_ACCENT[2],
-                                if selected { 1.0 } else { 0.6 },
-                            ],
-                        );
-                        // Knob, so the affordance reads as draggable.
-                        push_rect_px(
-                            &mut verts,
-                            track_x0 + fill - 2.0,
+                            track_x0 + fill - tw * 0.5,
                             ty - 4.0,
-                            4.0,
-                            10.0,
+                            tw,
+                            9.0,
                             w,
                             h,
-                            [
-                                C_ACCENT[0],
-                                C_ACCENT[1],
-                                C_ACCENT[2],
-                                if selected { 1.0 } else { 0.7 },
-                            ],
+                            c,
                         );
                     }
                     _ => {}
                 }
 
+                // Hairline under every item row.
+                push_rect_px(
+                    &mut verts,
+                    text_left,
+                    y + p.row_h - 1.0,
+                    inner_w,
+                    1.0,
+                    w,
+                    h,
+                    ink(0.045),
+                );
+
                 areas.push(TextArea {
                     buffer: &self.label_bufs[i],
-                    left: text_left,
+                    left: label_x,
                     top: y + 4.0,
                     scale: 1.0,
                     bounds,
@@ -1352,10 +1413,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     custom_glyphs: &[],
                 });
                 if !row.note.is_empty() {
+                    let lw = line_width(&self.label_bufs[i]);
                     areas.push(TextArea {
                         buffer: &self.note_bufs[i],
-                        left: p.x + p.w * 0.46,
-                        top: y + 6.0,
+                        left: label_x + lw + 10.0,
+                        top: y + 7.0,
                         scale: 1.0,
                         bounds,
                         default_color: TXT_DIM,
@@ -1367,7 +1429,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     areas.push(TextArea {
                         buffer: &self.value_bufs[i],
                         left: value_right - vw,
-                        top: y + 5.0,
+                        top: y + 6.0,
                         scale: 1.0,
                         bounds,
                         default_color: match row.tone {
@@ -1377,7 +1439,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                             RowTone::Dim => TXT_DIM,
                             RowTone::Normal => {
                                 if selected {
-                                    TXT_LABEL_SEL
+                                    TXT_ACCENT
                                 } else {
                                     TXT_VALUE
                                 }
@@ -1397,27 +1459,27 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 let t = (start as f32 / max_scroll.max(1.0)).clamp(0.0, 1.0);
                 push_rect_px(
                     &mut verts,
-                    p.x + p.w - 6.0,
+                    p.x + p.w - 8.0,
                     p.items_y0,
-                    2.0,
+                    1.0,
                     track_h,
                     w,
                     h,
-                    [1.0, 1.0, 1.0, 0.02],
+                    ink(0.10),
                 );
                 push_rect_px(
                     &mut verts,
-                    p.x + p.w - 6.0,
+                    p.x + p.w - 8.0,
                     p.items_y0 + (track_h - thumb_h) * t,
-                    2.0,
+                    1.0,
                     thumb_h,
                     w,
                     h,
-                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.55],
+                    ink(0.8),
                 );
             }
 
-            // Title / subtitle.
+            // Title left, subtitle (mono, dim) on the same baseline at right.
             areas.push(TextArea {
                 buffer: &self.page_title_buf,
                 left: text_left,
@@ -1427,10 +1489,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 default_color: TXT_TITLE,
                 custom_glyphs: &[],
             });
+            let sw = line_width(&self.page_sub_buf);
             areas.push(TextArea {
                 buffer: &self.page_sub_buf,
-                left: text_left,
-                top: layout.subtitle_y,
+                left: (value_right - sw).max(text_left),
+                top: layout.title_y + 10.0,
                 scale: 1.0,
                 bounds,
                 default_color: TXT_SUB,
@@ -1442,17 +1505,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             // would be a lie — this only says "still working".
             if page.busy {
                 let bx = text_left;
-                let bw = p.w - PANEL_PAD_X * 2.0;
-                push_rect_px(
-                    &mut verts,
-                    bx,
-                    layout.busy_y,
-                    bw,
-                    3.0,
-                    w,
-                    h,
-                    [1.0, 1.0, 1.0, 0.02],
-                );
+                let bw = inner_w;
+                push_rect_px(&mut verts, bx, layout.busy_y, bw, 1.0, w, h, ink(0.12));
                 let seg = bw * 0.28;
                 let phase = (hud.time * 0.55).fract();
                 // Ease so it decelerates at the ends instead of wrapping harshly.
@@ -1462,10 +1516,10 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     bx + (bw - seg) * eased,
                     layout.busy_y,
                     seg,
-                    3.0,
+                    1.0,
                     w,
                     h,
-                    C_ACCENT,
+                    ink(1.0),
                 );
             }
 
@@ -1490,60 +1544,65 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 custom_glyphs: &[],
             });
 
-            // Button bar.
+            // Button bar: a hairline above, text below it, the focused one
+            // underlined in accent.
+            if button_count > 0 {
+                push_rect_px(
+                    &mut verts,
+                    p.x,
+                    layout.buttons[0].y - 2.0,
+                    p.w,
+                    1.0,
+                    w,
+                    h,
+                    ink(0.12),
+                );
+            }
             for (i, r) in layout.buttons.iter().take(button_count).enumerate() {
                 let focused = page.button_selected == Some(i);
                 let hovered = page.button_hovered == Some(i);
-                let fill = if focused {
-                    [C_ACCENT[0], C_ACCENT[1], C_ACCENT[2], 0.20]
-                } else if hovered {
-                    [1.0, 1.0, 1.0, 0.03]
-                } else {
-                    [1.0, 1.0, 1.0, 0.010]
-                };
-                push_rect_px(&mut verts, r.x, r.y, r.w, r.h, w, h, fill);
-                let edge = if focused {
-                    C_ACCENT
-                } else {
-                    [1.0, 1.0, 1.0, 0.05]
-                };
-                push_rect_px(&mut verts, r.x, r.y, r.w, 1.0, w, h, edge);
-                push_rect_px(&mut verts, r.x, r.y + r.h - 1.0, r.w, 1.0, w, h, edge);
-                push_rect_px(&mut verts, r.x, r.y, 1.0, r.h, w, h, edge);
-                push_rect_px(&mut verts, r.x + r.w - 1.0, r.y, 1.0, r.h, w, h, edge);
                 let bwid = line_width(&self.button_bufs[i]);
+                if focused {
+                    push_rect_px(&mut verts, r.x, r.y + r.h - 8.0, bwid, 1.0, w, h, accent(1.0));
+                }
                 areas.push(TextArea {
                     buffer: &self.button_bufs[i],
-                    left: r.x + (r.w - bwid) * 0.5,
-                    top: r.y + 8.0,
+                    left: r.x,
+                    top: r.y + 10.0,
                     scale: 1.0,
                     bounds,
-                    default_color: if focused || hovered {
-                        TXT_LABEL_SEL
-                    } else {
+                    default_color: if focused {
+                        TXT_TITLE
+                    } else if hovered {
                         TXT_LABEL
+                    } else {
+                        TXT_SUB
                     },
                     custom_glyphs: &[],
                 });
             }
-        } else if let Some((bx, by, bw, bh)) = info_box {
-            // Light box behind the run/CP/ghost readout — enough contrast to
-            // stay legible over bright geometry without hiding the map.
-            push_rect_px(
-                &mut verts,
-                bx,
-                by,
-                bw,
-                bh,
-                w,
-                h,
-                [0.008, 0.010, 0.014, 0.46],
-            );
-            let edge = [1.0, 1.0, 1.0, 0.10];
-            push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, edge);
-            push_rect_px(&mut verts, bx, by + bh - 1.0, bw, 1.0, w, h, edge);
-            push_rect_px(&mut verts, bx, by, 1.0, bh, w, h, edge);
-            push_rect_px(&mut verts, bx + bw - 1.0, by, 1.0, bh, w, h, edge);
+        } else {
+            for (bx, by, bw, bh) in washes {
+                push_rect_px(&mut verts, bx, by, bw, bh, w, h, ground(0.30));
+            }
+            if let Some((bx, by, bw, frac)) = speed_bar {
+                push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, ink(0.14));
+                push_rect_px(&mut verts, bx, by - 1.0, (bw * frac).max(1.0), 3.0, w, h, ink(1.0));
+            }
+            if let Some((bx, by, bw, frac)) = sync_bar {
+                push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, ink(0.14));
+                push_rect_px(&mut verts, bx, by - 1.0, (bw * frac).max(1.0), 3.0, w, h, ink(1.0));
+            }
+            if crosshair {
+                // 1px hairline cross, 14px, with a 2px gap at the centre.
+                let cx = (w * 0.5).floor();
+                let cy = (h * 0.5).floor();
+                let c = ink(0.9);
+                push_rect_px(&mut verts, cx - 7.0, cy, 5.0, 1.0, w, h, c);
+                push_rect_px(&mut verts, cx + 3.0, cy, 5.0, 1.0, w, h, c);
+                push_rect_px(&mut verts, cx, cy - 7.0, 1.0, 5.0, w, h, c);
+                push_rect_px(&mut verts, cx, cy + 3.0, 1.0, 5.0, w, h, c);
+            }
         }
 
         let _ = self.text_renderer.prepare(

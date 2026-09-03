@@ -320,6 +320,8 @@ pub fn extract_prop_collision(
         }
         let local_tris = &collision.tris;
         let from_phy = collision.from_phy;
+        // A/B lever shared with `phy::decode_collision`: the old behaviour.
+        let phy_raw = std::env::var_os("MX_SURF_PHY_RAW").is_some();
 
         let inst_start = out.len();
         let entry = stats
@@ -339,8 +341,12 @@ pub fn extract_prop_collision(
             let b = origin + rotate_source(positions[1], prop.angles);
             let c = origin + rotate_source(positions[2], prop.angles);
             let n = (b - a).cross(c - a);
-            // Flip so the face normal points upward when the tri is a ramp top.
-            let (a, b, c) = if n.z < 0.0 { (a, c, b) } else { (a, b, c) };
+            // A `.phy` triangle already faces out of its convex piece (see
+            // `phy::surface_of`); flipping it by z would turn a seam cap or an
+            // underside into a wall facing oncoming traffic. The render-mesh
+            // fallback has no reliable winding, so there we still flip so the
+            // face normal points upward when the tri is a ramp top.
+            let (a, b, c) = if (!from_phy || phy_raw) && n.z < 0.0 { (a, c, b) } else { (a, b, c) };
             let n = (b - a).cross(c - a);
             let len = n.length();
             if len < 1e-5 {

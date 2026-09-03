@@ -126,7 +126,10 @@ impl LoadedMap {
 
         let world_brush_indices =
             collision::collect_model_brushes(&bsp, &leaf_ranges, world_model.head_node);
-        let brushes = collision::build_player_brushes(&bsp, &world_brush_indices, world_bounds);
+        let mut brushes = collision::build_player_brushes(&bsp, &world_brush_indices, world_bounds);
+        let ents = entities::parse_entities(&bsp, &leaf_ranges, world_bounds)?;
+        // Solid brush entities (func_brush) are part of the walkable world.
+        brushes.extend(ents.solid_brushes.iter().cloned());
 
         let pak = pak::PakFs::from_bsp(&bsp);
         let stock = stock::StockFs::from_env();
@@ -149,7 +152,6 @@ impl LoadedMap {
         coll_tris.extend(prop_tris);
         let world = World::with_tris(brushes, coll_tris, disp::TRI_GRID_CELL);
 
-        let ents = entities::parse_entities(&bsp, &leaf_ranges, world_bounds)?;
         let mut mesh = mesh::build_mesh(&bsp, &ents.render_models, &mut materials, &mut lightmaps);
         mesh.tris.extend(disps.render);
         let (_, render_bounds) =

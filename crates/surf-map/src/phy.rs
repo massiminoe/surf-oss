@@ -81,14 +81,18 @@ impl FromBitsPreserve for f32 {
 /// Returns `None` when the file is not a usable compact surface; callers should
 /// fall back to their previous source of collision rather than treating a prop
 /// as non-solid.
-pub fn decode_collision(data: &[u8]) -> Option<Vec<[Vec3; 3]>> {
+/// One convex piece of a `.phy` solid, as raw (unoriented) triangles.
+pub type Ledge = Vec<[Vec3; 3]>;
+
+/// Decode every ledge of every solid, triangles in file winding.
+pub fn decode_ledges(data: &[u8]) -> Option<Vec<Ledge>> {
     let header_size = i32_at(data, 0)? as i64;
     let solid_count = i32_at(data, 8)?;
     if header_size <= 0 || !(0..=4096).contains(&solid_count) {
         return None;
     }
 
-    let mut out: Vec<[Vec3; 3]> = Vec::new();
+    let mut out: Vec<Ledge> = Vec::new();
     let mut off = header_size;
 
     for _ in 0..solid_count {
@@ -115,10 +119,111 @@ pub fn decode_collision(data: &[u8]) -> Option<Vec<[Vec3; 3]>> {
         off += block_size + 4;
     }
 
+    out.retain(|l| !l.is_empty());
     if out.is_empty() {
         return None;
     }
     Some(out)
+}
+
+/// The collision surface of a `.phy`: every ledge's triangles, wound so the
+/// face normal points **out of its own convex piece**, with the faces two
+/// pieces share along a seam removed.
+///
+/// A `$concave` model is stored as several convex ledges that touch (and
+/// often overlap) face to face. The seam faces are real data — each piece is
+/// a closed convex — but they are *interior* to the union: nothing in Source
+/// ever collides with them, because a hull would have to be inside the
+/// neighbouring piece first. Traced as standalone thin prisms they are walls
+/// standing across the ramp. aquaflow's `u_ramps/01_ramp_final` is a curved
+/// half-pipe of 16 such pieces, and the WR line hit a seam cap at tick 51
+/// (878 → 290 u/s) — the "artifacts registered as ramps" Max reported.
+///
+/// `MX_SURF_PHY_RAW=1` returns the ledges as stored (winding untouched, seams
+/// kept) for A/B.
+pub fn decode_collision(data: &[u8]) -> Option<Vec<[Vec3; 3]>> {
+    let ledges = decode_ledges(data)?;
+    if std::env::var_os("MX_SURF_PHY_RAW").is_some() {
+        return Some(ledges.into_iter().flatten().collect());
+    }
+    Some(surface_of(&ledges))
+}
+
+/// Outward-orient every triangle against its ledge's centroid and drop the
+/// faces whose outer side lies inside another ledge.
+pub fn surface_of(ledges: &[Ledge]) -> Vec<[Vec3; 3]> {
+    struct Piece {
+        tris: Vec<[Vec3; 3]>,
+        planes: Vec<(Vec3, f32)>,
+        mins: Vec3,
+        maxs: Vec3,
+    }
+    let mut pieces: Vec<Piece> = Vec::with_capacity(ledges.len());
+    for ledge in ledges {
+        let mut centroid = Vec3::ZERO;
+        let mut n_pts = 0.0f32;
+        let mut mins = Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut maxs = Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+        for tri in ledge {
+            for p in tri {
+                centroid = centroid + *p;
+                n_pts += 1.0;
+                mins = Vec3::new(mins.x.min(p.x), mins.y.min(p.y), mins.z.min(p.z));
+                maxs = Vec3::new(maxs.x.max(p.x), maxs.y.max(p.y), maxs.z.max(p.z));
+            }
+        }
+        if n_pts == 0.0 {
+            continue;
+        }
+        let centroid = centroid * (1.0 / n_pts);
+        let mut tris = Vec::with_capacity(ledge.len());
+        let mut planes = Vec::with_capacity(ledge.len());
+        for tri in ledge {
+            let [a, b, c] = *tri;
+            let n = (b - a).cross(c - a);
+            let len = n.length();
+            if len < 1e-6 {
+                continue;
+            }
+            let n = n * (1.0 / len);
+            // A convex piece's centroid is inside it, so "outward" is the side
+            // the centroid is not on. A flat (all-coplanar) ledge has no
+            // inside; keep the file winding there.
+            let flip = n.dot(centroid - a) > 1e-3;
+            let (n, tri) = if flip { (-n, [a, c, b]) } else { (n, [a, b, c]) };
+            tris.push(tri);
+            planes.push((n, n.dot(a)));
+        }
+        pieces.push(Piece { tris, planes, mins, maxs });
+    }
+
+    // Seam test: the face centroid, nudged just outside its own piece, is
+    // inside some other piece (behind every one of its planes).
+    const NUDGE: f32 = 0.5;
+    const EPS: f32 = 0.05;
+    let mut out = Vec::new();
+    for (i, piece) in pieces.iter().enumerate() {
+        for (tri, (n, _)) in piece.tris.iter().zip(&piece.planes) {
+            let probe = (tri[0] + tri[1] + tri[2]) * (1.0 / 3.0) + *n * NUDGE;
+            let interior = pieces.iter().enumerate().any(|(j, other)| {
+                if j == i
+                    || probe.x < other.mins.x - EPS
+                    || probe.y < other.mins.y - EPS
+                    || probe.z < other.mins.z - EPS
+                    || probe.x > other.maxs.x + EPS
+                    || probe.y > other.maxs.y + EPS
+                    || probe.z > other.maxs.z + EPS
+                {
+                    return false;
+                }
+                other.planes.iter().all(|(pn, pd)| pn.dot(probe) - pd <= EPS)
+            });
+            if !interior {
+                out.push(*tri);
+            }
+        }
+    }
+    out
 }
 
 /// Walk the ledge tree iteratively and emit each leaf ledge's triangles.
@@ -127,7 +232,7 @@ fn collect_ledges(
     root: i64,
     surface: i64,
     surface_end: i64,
-    out: &mut Vec<[Vec3; 3]>,
+    out: &mut Vec<Ledge>,
 ) -> Option<()> {
     let mut stack = vec![root];
     let mut visited = 0usize;
@@ -165,7 +270,7 @@ fn read_ledge(
     ledge: i64,
     surface: i64,
     surface_end: i64,
-    out: &mut Vec<[Vec3; 3]>,
+    out: &mut Vec<Ledge>,
 ) -> Option<()> {
     if ledge < surface || ledge >= surface_end {
         return Some(());
@@ -183,8 +288,10 @@ fn read_ledge(
     // not by this ledge's own size_div_16.
     let max_vert = (surface_end - verts) / VERT_SIZE;
 
+    let mut tris: Ledge = Vec::with_capacity(n_tri as usize);
+    let already: usize = out.iter().map(|l| l.len()).sum();
     for t in 0..n_tri {
-        if out.len() >= MAX_TRIS {
+        if already + tris.len() >= MAX_TRIS {
             return None;
         }
         let tri = ledge + LEDGE_HEADER_SIZE + t * TRI_SIZE;
@@ -206,15 +313,78 @@ fn read_ledge(
             *pt = Vec3::new(x * IVP_TO_SOURCE, z * IVP_TO_SOURCE, -y * IVP_TO_SOURCE);
         }
         if ok {
-            out.push(pts);
+            tris.push(pts);
         }
     }
+    out.push(tris);
     Some(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cube(min: Vec3, max: Vec3, inward: bool) -> Ledge {
+        let v = |x: bool, y: bool, z: bool| {
+            Vec3::new(
+                if x { max.x } else { min.x },
+                if y { max.y } else { min.y },
+                if z { max.z } else { min.z },
+            )
+        };
+        // Six quads, each two triangles, wound outward.
+        let quads = [
+            [v(false, false, false), v(false, true, false), v(true, true, false), v(true, false, false)], // -z
+            [v(false, false, true), v(true, false, true), v(true, true, true), v(false, true, true)],     // +z
+            [v(false, false, false), v(true, false, false), v(true, false, true), v(false, false, true)], // -y
+            [v(false, true, false), v(false, true, true), v(true, true, true), v(true, true, false)],     // +y
+            [v(false, false, false), v(false, false, true), v(false, true, true), v(false, true, false)], // -x
+            [v(true, false, false), v(true, true, false), v(true, true, true), v(true, false, true)],     // +x
+        ];
+        let mut out = Vec::new();
+        for q in quads {
+            for tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+                out.push(if inward { [tri[0], tri[2], tri[1]] } else { tri });
+            }
+        }
+        out
+    }
+
+    fn outward_normal(tri: &[Vec3; 3]) -> Vec3 {
+        let n = (tri[1] - tri[0]).cross(tri[2] - tri[0]);
+        n * (1.0 / n.length())
+    }
+
+    /// Whatever winding the file used, every emitted face points away from its
+    /// own piece — the old code flipped by z, which turned seam caps and
+    /// undersides into walls facing oncoming traffic.
+    #[test]
+    fn surface_faces_point_out_of_their_own_piece() {
+        let c = Vec3::new(5.0, 5.0, 5.0);
+        for inward in [false, true] {
+            let tris = surface_of(&[cube(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0), inward)]);
+            assert_eq!(tris.len(), 12);
+            for tri in &tris {
+                let n = outward_normal(tri);
+                assert!(n.dot(tri[0] - c) > 0.0, "inward face {tri:?} (inward={inward})");
+            }
+        }
+    }
+
+    /// Two cubes sharing the x=10 face: the four seam triangles are interior to
+    /// the union and must go; the 20 outer faces stay.
+    #[test]
+    fn shared_seam_faces_between_touching_pieces_are_dropped() {
+        let a = cube(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0), false);
+        let b = cube(Vec3::new(10.0, 0.0, 0.0), Vec3::new(20.0, 10.0, 10.0), true);
+        let tris = surface_of(&[a, b]);
+        assert_eq!(tris.len(), 20, "seam faces survived");
+        for tri in &tris {
+            let n = outward_normal(tri);
+            let on_seam = tri.iter().all(|p| (p.x - 10.0).abs() < 1e-3);
+            assert!(!on_seam, "seam face kept: {tri:?} n={n:?}");
+        }
+    }
 
     #[test]
     fn rejects_garbage_without_panicking() {

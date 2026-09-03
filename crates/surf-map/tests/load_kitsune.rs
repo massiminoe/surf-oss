@@ -1,5 +1,7 @@
 //! Integration: load a real corpus map and sanity-check collision/mesh.
 
+use std::path::PathBuf;
+
 use surf_core::math::Vec3;
 use surf_map::LoadedMap;
 
@@ -291,12 +293,14 @@ fn boreas_prop_collision_comes_from_phy_hulls() {
     let map = LoadedMap::load_path(path).expect("load boreas");
 
     let prop_tris = map.world.tris.len() - map.prop_tri_start;
-    // 11 solid props: 1 deck (72 tris) + 10 ramps (80 or 128 each) = 1208.
+    // 11 solid props: 1 deck (72 tris) + 10 ramps (80 or 128 each) = 1208 raw
+    // `.phy` triangles, of which 272 are seam faces between convex pieces that
+    // `phy::surface_of` drops (2026-09-03) — 936 remain.
     assert!(
-        (1100..1350).contains(&prop_tris),
-        "expected ~1208 .phy collision tris for boreas' solid props, got {prop_tris} \
+        (850..1000).contains(&prop_tris),
+        "expected ~936 .phy collision tris for boreas' solid props, got {prop_tris} \
          (the render-mesh fallback would give ~6098; a ledge tree collapsed by the \
-         wrong leaf test gives ~679)"
+         wrong leaf test gives ~679; seams kept gives 1208)"
     );
 }
 
@@ -352,4 +356,80 @@ fn boreas_does_not_draw_its_3d_skybox_props_as_world_geometry() {
         "boreas mesh is {} tris, expected the skybox forest to be gone",
         map.mesh.tris.len()
     );
+}
+
+/// andromeda's start platform is a `func_brush` with `solidity=0` (Toggle —
+/// solid unless disabled). The key is stored lowercase, and a literal
+/// `Solidity` lookup never matched, so the plate was drawn but not collided:
+/// the player fell 31u through it onto the lumpy rock displacement beneath,
+/// with the world-brush rim still at the real height.
+#[test]
+fn andromeda_start_platform_func_brush_is_solid() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/maps/surf_andromeda.bsp"
+    );
+    let map = LoadedMap::load_path(path).expect("load andromeda");
+    let hull_mins = Vec3::new(-16.0, -16.0, 0.0);
+    let hull_maxs = Vec3::new(16.0, 16.0, 62.0);
+    // Sample the plate away from the rim, not just the spawn point.
+    for (x, y) in [
+        (-8000.0, 0.0),
+        (-8200.0, -300.0),
+        (-7900.0, 350.0),
+        (-8300.0, 0.0),
+    ] {
+        let from = Vec3::new(x, y, 7500.0);
+        let tr = surf_core::trace::trace_box(
+            &map.world,
+            from,
+            from - Vec3::new(0.0, 0.0, 4096.0),
+            hull_mins,
+            hull_maxs,
+        );
+        assert!(!tr.startsolid, "hull wedged at ({x},{y})");
+        let normal = tr.hit.as_ref().expect("floor").normal;
+        assert!(
+            normal.z > 0.999,
+            "platform not flat at ({x},{y}): {normal:?}"
+        );
+        assert!(
+            (tr.endpos.z - 7392.0).abs() < 0.5,
+            "landed at z={:.1} at ({x},{y}); the func_brush plate top is 7392",
+            tr.endpos.z
+        );
+    }
+}
+
+/// Max (2026-09-03): "overgrowth loads into something broken". The map is a
+/// jail-style course: five `jailtele_*` teleports covering most of the play
+/// space start disabled and are only enabled by the round logic. The loader
+/// read `StartDisabled` case-sensitively against the lowercase key these BSPs
+/// store, so all of them were live — `jailtele_4` alone spans x −1760..9504,
+/// y ±15200, z ±12544 — and the first drop below the start bowl put you in the
+/// jail at (−5152, −64, 792). Overgrowth has 11 such teleports.
+#[test]
+fn overgrowth_start_disabled_jail_teleports_are_not_live() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/maps/surf_overgrowth.bsp");
+    if !path.is_file() {
+        eprintln!("surf_overgrowth.bsp absent; skipping");
+        return;
+    }
+    let map = LoadedMap::load_path(path).expect("load surf_overgrowth");
+    // `jailequip_1..5`, `jaillose`, `jailwin` are the only destinations the
+    // start-disabled teleports target.
+    let jail_x = -5152.0;
+    let live_jail: Vec<_> = map
+        .teleports
+        .iter()
+        .filter(|t| (t.dest_origin.x - jail_x).abs() < 1.0 && (t.dest_origin.z - 791.62).abs() < 1.0)
+        .map(|t| t.dest_origin)
+        .collect();
+    assert!(
+        live_jail.is_empty(),
+        "start-disabled jail teleports are live: {live_jail:?}"
+    );
+    // And the course teleports the run actually uses are still there.
+    assert!(map.teleports.len() >= 20, "only {} teleports loaded", map.teleports.len());
 }
