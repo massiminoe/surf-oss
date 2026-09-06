@@ -1,8 +1,11 @@
 # Fonts
 
-- **JetBrains Mono Medium** — OFL-1.1  
+- **JetBrains Mono** Regular / Medium — OFL-1.1  
   https://github.com/JetBrains/JetBrainsMono  
-  Used by the in-game HUD (speed / timer).
-- **Instrument Sans** Regular / Medium / SemiBold — OFL-1.1  
-  https://github.com/Instrument/instrument-sans (static instances via Google Fonts)  
-  Used for menu titles, labels and row text. Numbers stay in JetBrains Mono.
+  Every number: the in-game speed / timer readout and menu values, so digits
+  stay tabular.
+- **Oswald** Regular / Medium / Bold — OFL-1.1  
+  https://github.com/googlefonts/OswaldFont (static instances from `fonts/ttf/`)  
+  The condensed grotesk Max picked from the ESL "surf n chill" title cards
+  (2026-09-03). Titles are Bold, labels Regular, tabs / buttons / headers Medium.
+  Static instances on purpose: cosmic-text does not drive a variable weight axis.

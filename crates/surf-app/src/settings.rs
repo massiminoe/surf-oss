@@ -5,6 +5,7 @@
 //! `slope_tint` / `edge_highlight` readability toggles) be ignored rather than
 //! failing the whole file to parse.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -46,6 +47,10 @@ pub struct Settings {
     /// Failure treatment: `"rewind"` or `"dissolve"`. Neither is punishing;
     /// which wears better over a grind session is an open question.
     pub wipe_style: String,
+    /// Key table, bind name → winit key name. See [`crate::binds`].
+    pub binds: BTreeMap<String, String>,
+    /// Degrees per second while a turn bind (Q / E) is held — `cl_yawspeed`.
+    pub turn_speed: f32,
 }
 
 impl Default for Settings {
@@ -65,6 +70,8 @@ impl Default for Settings {
             audio_air: 1.0,
             audio_sub: 1.0,
             wipe_style: "rewind".into(),
+            binds: crate::binds::Binds::default().to_map(),
+            turn_speed: crate::binds::DEFAULT_TURN_SPEED,
         }
     }
 }
@@ -85,6 +92,10 @@ impl Settings {
         s.audio_core = Self::clamp_audio_level(s.audio_core);
         s.audio_air = Self::clamp_audio_level(s.audio_air);
         s.audio_sub = Self::clamp_audio_level(s.audio_sub);
+        s.turn_speed = Self::clamp_turn_speed(s.turn_speed);
+        // Normalise: unknown names dropped, missing binds filled in, so the
+        // file on disk always shows the whole table.
+        s.binds = crate::binds::Binds::from_map(&s.binds).to_map();
         Ok(s)
     }
 
@@ -127,6 +138,13 @@ impl Settings {
             v = 0.7;
         }
         v.clamp(0.0, 1.0)
+    }
+
+    pub fn clamp_turn_speed(mut v: f32) -> f32 {
+        if !v.is_finite() {
+            v = crate::binds::DEFAULT_TURN_SPEED;
+        }
+        v.clamp(30.0, 720.0)
     }
 
     /// Per-layer trims go above 1.0 so a layer that reads too quiet on a given
@@ -173,6 +191,8 @@ mod tests {
             audio_air: 0.4,
             audio_sub: 0.0,
             wipe_style: "dissolve".into(),
+            binds: BTreeMap::new(),
+            turn_speed: 300.0,
         };
         s.save_path(&path).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
@@ -190,6 +210,31 @@ mod tests {
         assert!((loaded.shadow_lift - 0.3).abs() < 1e-5);
         assert_eq!(loaded.ghost, "off");
         assert!(!loaded.ghost_trail);
+        assert!((loaded.turn_speed - 300.0).abs() < 1e-5);
+        // An empty bind map on disk comes back as the full default table.
+        assert_eq!(loaded.binds, crate::binds::Binds::default().to_map());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn binds_survive_a_round_trip_and_partial_files_keep_defaults() {
+        use crate::binds::{Bind, Binds};
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mx-surf-settings-binds-{stamp}.json"));
+        fs::write(
+            &path,
+            r#"{"binds":{"turn_left":"KeyZ","bogus":"KeyX","jump":"Escape"},"turn_speed":1e40}"#,
+        )
+        .unwrap();
+        let loaded = Settings::load_path(&path).unwrap();
+        let b = Binds::from_map(&loaded.binds);
+        assert_eq!(b.key(Bind::TurnLeft), winit::keyboard::KeyCode::KeyZ);
+        assert_eq!(b.key(Bind::Jump), winit::keyboard::KeyCode::Space);
+        assert!(!loaded.binds.contains_key("bogus"));
+        assert_eq!(loaded.turn_speed, crate::binds::DEFAULT_TURN_SPEED);
         let _ = fs::remove_file(&path);
     }
 

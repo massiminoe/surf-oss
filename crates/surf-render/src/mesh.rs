@@ -18,12 +18,20 @@ pub struct GpuMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
+    /// Indices `0..opaque_index_count` are the opaque world; the rest are the
+    /// `$additive` triangles, drawn afterwards with `dst += src` and no depth
+    /// write. Triangle order in the source mesh is untouched (prop ranges
+    /// still index it); only the index buffer is partitioned.
+    pub opaque_index_count: u32,
 }
 
 impl GpuMesh {
-    pub fn from_graybox(device: &wgpu::Device, mesh: &GrayboxMesh) -> Self {
+    /// `additive_layers[tex]` says whether a texture-array layer is additive;
+    /// an empty slice means nothing is (the graybox arena).
+    pub fn from_graybox(device: &wgpu::Device, mesh: &GrayboxMesh, additive_layers: &[bool]) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let mut additive = Vec::new();
         for tri in &mesh.tris {
             let base = vertices.len() as u32;
             let corners = [
@@ -41,8 +49,12 @@ impl GpuMesh {
                     _pad: 0.0,
                 });
             }
-            indices.extend_from_slice(&[base, base + 1, base + 2]);
+            let is_additive = additive_layers.get(tri.tex as usize).copied().unwrap_or(false);
+            let list = if is_additive { &mut additive } else { &mut indices };
+            list.extend_from_slice(&[base, base + 1, base + 2]);
         }
+        let opaque_index_count = indices.len() as u32;
+        indices.extend_from_slice(&additive);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_verts"),
             contents: bytemuck::cast_slice(&vertices),
@@ -57,6 +69,7 @@ impl GpuMesh {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
+            opaque_index_count,
         }
     }
 }

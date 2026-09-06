@@ -31,7 +31,6 @@ fn page(backdrop: bool) -> MenuPage {
             rows: vec![MenuRow::item("Play", ""), MenuRow::item("Quit", "")],
             ..Default::default()
         },
-        hint: "hint".into(),
         backdrop,
         ..Default::default()
     }

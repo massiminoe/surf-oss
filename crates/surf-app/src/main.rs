@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use surf_app::binds::{key_label, turn_delta, Bind, Binds};
 use surf_app::leaderboard::{self, MapStanding};
 use surf_app::locs::{self, Loc, GRAYBOX_MAP};
 use surf_app::menu::{
@@ -271,6 +272,10 @@ struct App {
     /// A world has been entered at least once, so "Resume" is meaningful.
     entered_world: bool,
     settings: Settings,
+    /// Decoded form of `settings.binds`; the map is rewritten from this.
+    binds: Binds,
+    /// A KEYBINDS row is waiting for its next key press.
+    rebinding: Option<Bind>,
     last_frame: Instant,
     hud_timer: f32,
     pb_store: Option<PbStore>,
@@ -310,6 +315,7 @@ impl App {
             }
         };
         let mut settings = Settings::load_default();
+        let binds = Binds::from_map(&settings.binds);
         if let Some(v) = vsync {
             settings.vsync = v;
         }
@@ -360,6 +366,8 @@ impl App {
             dragging: None,
             entered_world: false,
             settings,
+            binds,
+            rebinding: None,
             last_frame: Instant::now(),
             hud_timer: 0.0,
             pb_store,
@@ -612,8 +620,16 @@ impl App {
             .map(|e| match e {
                 SettingsEntry::Header(h) => (MenuRow::header(*h), RowAction::None),
                 SettingsEntry::Set(s) => (self.setting_row(*s), RowAction::Adjust(*s)),
+                SettingsEntry::Bind(b) => (self.bind_row(*b), RowAction::Rebind(*b)),
             })
             .collect()
+    }
+
+    fn bind_row(&self, b: Bind) -> MenuRow {
+        if self.rebinding == Some(b) {
+            return MenuRow::item(b.label(), "press a key").with_tone(RowTone::Warn);
+        }
+        MenuRow::item(b.label(), key_label(self.binds.key(b)).unwrap_or("?"))
     }
 
     fn setting_row(&self, s: Setting) -> MenuRow {
@@ -624,6 +640,7 @@ impl App {
             let text = match s {
                 Setting::Airaccel => format!("{v:.0}"),
                 Setting::Sens => format!("{v:.1}"),
+                Setting::TurnSpeed => format!("{v:.0}°/s"),
                 _ => format!("{v:.2}"),
             };
             return MenuRow::slider(label, text, range.frac_of(v));
@@ -681,6 +698,7 @@ impl App {
             Setting::AudioAir => "Air level",
             Setting::AudioSub => "Sub level",
             Setting::Wipe => "Wipe sound",
+            Setting::TurnSpeed => "Turn speed",
         }
     }
 
@@ -802,53 +820,49 @@ impl App {
         }
     }
 
-    fn page_title(&self) -> (String, String, String) {
+    /// Title and subtitle. There is deliberately no key-hint line (Max,
+    /// 2026-09-03): how to drive a list is implicit in the design.
+    fn page_title(&self) -> (String, String) {
         match &self.mode {
             Mode::MainMenu => (
                 "MX-SURF".into(),
                 "source-faithful surf · single player".into(),
-                "↑↓ select   enter choose   or click a row".into(),
             ),
             Mode::MapPicker => (
                 "SELECT MAP".into(),
                 format!("{} available", self.map_list.len()),
-                "↑↓ select   enter load   esc back".into(),
             ),
             Mode::Settings => (
                 "SETTINGS".into(),
-                "saved on close".into(),
-                "←→ or drag adjusts   wheel over a row   esc back".into(),
+                if self.rebinding.is_some() {
+                    "press a key · esc cancels".into()
+                } else {
+                    "saved on close".into()
+                },
             ),
             Mode::Leaderboard { map: None } => (
                 "LEADERBOARD".into(),
                 "your PB against the imported KSF record".into(),
-                "enter opens a map's records   esc back".into(),
             ),
             Mode::Leaderboard { map: Some(m) } => (
                 m.strip_prefix("surf_").unwrap_or(m).to_uppercase(),
                 "ksf records · your runs".into(),
-                "esc back".into(),
             ),
             Mode::Loading { name, started, .. } => (
                 "LOADING".into(),
-                name.clone(),
-                format!("{:.1}s elapsed", started.elapsed().as_secs_f32()),
+                format!("{name} · {:.1}s", started.elapsed().as_secs_f32()),
             ),
-            Mode::Playing => {
-                let hint = match self.pause_tab {
-                    PauseTab::Settings => "←→ or drag adjusts   wheel over a row   tab: actions",
-                    PauseTab::Locs => "click picks · enter loads · x deletes",
-                    PauseTab::Times => "esc resumes",
-                };
-                (
-                    self.session.level.short_name().to_uppercase(),
+            Mode::Playing => (
+                self.session.level.short_name().to_uppercase(),
+                if self.rebinding.is_some() {
+                    "press a key · esc cancels".into()
+                } else {
                     match self.session.pb_time {
                         Some(t) => format!("paused · pb {}", format_time(t)),
                         None => "paused · no pb yet".into(),
-                    },
-                    hint.into(),
-                )
-            }
+                    }
+                },
+            ),
         }
     }
 
@@ -860,7 +874,7 @@ impl App {
         let entries = self.page_entries();
         let rows: Vec<MenuRow> = entries.iter().map(|(r, _)| r.clone()).collect();
         let selected = self.selected_row().min(rows.len().saturating_sub(1));
-        let (title, subtitle, hint) = self.page_title();
+        let (title, subtitle) = self.page_title();
         let playing = matches!(self.mode, Mode::Playing);
         let wide = matches!(self.mode, Mode::Leaderboard { .. })
             || (playing && self.pause_tab == PauseTab::Times);
@@ -903,10 +917,10 @@ impl App {
             button_selected: (self.focus == Focus::Buttons).then_some(self.button_selected),
             button_hovered: None,
             message: self.load_error.clone(),
-            hint,
             wide,
             backdrop: !playing,
             busy: matches!(self.mode, Mode::Loading { .. }),
+            large: matches!(self.mode, Mode::MainMenu),
         };
         let layout = surf_render::layout_for(self.screen().0, self.screen().1, &page);
         page.panel.scroll = locs::scroll_window_start(
@@ -985,6 +999,8 @@ impl App {
         let Some(action) = self.action_at(row) else {
             return;
         };
+        // Clicking anywhere else abandons a pending key capture.
+        self.rebinding = None;
         match action {
             RowAction::None => {}
             // Toggles and cyclers flip on Enter/click; sliders need ←→, the
@@ -995,6 +1011,7 @@ impl App {
                     self.adjust_setting(s, 1);
                 }
             }
+            RowAction::Rebind(b) => self.rebinding = Some(b),
             RowAction::MainResume => self.resume_world(),
             RowAction::MainPlay => self.open_picker(),
             RowAction::MainLeaderboard => self.open_leaderboard(),
@@ -1101,6 +1118,10 @@ impl App {
     /// run of Esc presses used to fall through the title screen and close the
     /// game. Quit is a deliberate row / button only.
     fn page_back(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.rebinding.take().is_some() {
+            // Esc during a key capture only cancels the capture.
+            return;
+        }
         match &self.mode {
             Mode::MainMenu => {
                 self.persist_settings();
@@ -1443,6 +1464,7 @@ impl App {
     }
 
     fn close_menu(&mut self, recapture: bool) {
+        self.rebinding = None;
         self.menu_open = false;
         self.dragging = None;
         self.persist_settings();
@@ -1461,6 +1483,7 @@ impl App {
             Setting::AudioCore => self.settings.audio_core,
             Setting::AudioAir => self.settings.audio_air,
             Setting::AudioSub => self.settings.audio_sub,
+            Setting::TurnSpeed => self.settings.turn_speed,
             _ => 0.0,
         }
     }
@@ -1478,6 +1501,7 @@ impl App {
             Setting::AudioCore => self.settings.audio_core = Settings::clamp_audio_level(v),
             Setting::AudioAir => self.settings.audio_air = Settings::clamp_audio_level(v),
             Setting::AudioSub => self.settings.audio_sub = Settings::clamp_audio_level(v),
+            Setting::TurnSpeed => self.settings.turn_speed = Settings::clamp_turn_speed(v),
             _ => return,
         }
         self.apply_audio_settings();
@@ -1741,8 +1765,8 @@ impl App {
             config.width, config.height, config.alpha_mode
         );
 
-        let mesh = GpuMesh::from_graybox(&device, self.session.level.mesh());
         let atlas = self.session.level.materials();
+        let mesh = GpuMesh::from_graybox(&device, self.session.level.mesh(), &atlas.additive_layers);
         let lightmaps = self.session.level.lightmaps();
         let sky = self.session.level.skybox();
         let renderer = Renderer::new(device, queue, config, mesh, &atlas, &lightmaps, &sky);
@@ -1778,25 +1802,51 @@ impl App {
     fn build_cmd(&self) -> UserCmd {
         let mut forward = 0.0;
         let mut side = 0.0;
-        if self.keys.contains(&KeyCode::KeyW) {
+        if self.held(Bind::Forward) {
             forward += 1.0;
         }
-        if self.keys.contains(&KeyCode::KeyS) {
+        if self.held(Bind::Back) {
             forward -= 1.0;
         }
-        if self.keys.contains(&KeyCode::KeyD) {
+        if self.held(Bind::Right) {
             side += 1.0;
         }
-        if self.keys.contains(&KeyCode::KeyA) {
+        if self.held(Bind::Left) {
             side -= 1.0;
         }
         UserCmd {
             viewangles: self.session.player.viewangles,
             forward_move: forward,
             side_move: side,
-            jump: self.keys.contains(&KeyCode::Space),
-            duck: self.keys.contains(&KeyCode::ControlLeft)
-                || self.keys.contains(&KeyCode::ControlRight),
+            jump: self.held(Bind::Jump),
+            duck: self.held(Bind::Duck),
+        }
+    }
+
+    fn held(&self, b: Bind) -> bool {
+        self.keys.contains(&self.binds.key(b))
+    }
+
+    /// Keyboard turning (`+left` / `+right`), one tick's worth, applied before
+    /// the command is built so the recorded viewangles carry it and a replay
+    /// resims identically.
+    fn apply_turn_binds(&mut self, dt: f32) {
+        let d = turn_delta(
+            self.held(Bind::TurnLeft),
+            self.held(Bind::TurnRight),
+            self.settings.turn_speed,
+            dt,
+        );
+        if d == 0.0 {
+            return;
+        }
+        let yaw = &mut self.session.player.viewangles.yaw;
+        *yaw += d;
+        if *yaw > 180.0 {
+            *yaw -= 360.0;
+        }
+        if *yaw < -180.0 {
+            *yaw += 360.0;
         }
     }
 
@@ -1812,6 +1862,7 @@ impl App {
         while self.session.accumulator >= tick_dt {
             self.session.prev_origin = self.session.player.origin;
             let prev_vel = self.session.player.velocity;
+            self.apply_turn_binds(tick_dt);
             let cmd = self.build_cmd();
             let wishing = cmd.forward_move.abs() + cmd.side_move.abs() > 0.0;
             self.session.player = tick(
@@ -1985,11 +2036,11 @@ impl App {
         let speed = self.session.player.velocity.length_2d();
         let show_keys = if self.settings.show_keys && !self.page_open() {
             Some(ShowKeysState {
-                forward: self.keys.contains(&KeyCode::KeyW),
-                back: self.keys.contains(&KeyCode::KeyS),
-                left: self.keys.contains(&KeyCode::KeyA),
-                right: self.keys.contains(&KeyCode::KeyD),
-                jump: self.keys.contains(&KeyCode::Space),
+                forward: self.held(Bind::Forward),
+                back: self.held(Bind::Back),
+                left: self.held(Bind::Left),
+                right: self.held(Bind::Right),
+                jump: self.held(Bind::Jump),
             })
         } else {
             None
@@ -2490,6 +2541,18 @@ impl ApplicationHandler for App {
                     // Any open page owns input entirely: no capture, no loc
                     // binds, no player keys.
                     if self.page_open() {
+                        if let Some(b) = self.rebinding.take() {
+                            if repeat {
+                                self.rebinding = Some(b);
+                            } else if code != KeyCode::Escape && self.binds.set(b, code) {
+                                self.settings.binds = self.binds.to_map();
+                                self.persist_settings();
+                            } else if code != KeyCode::Escape {
+                                // Not a bindable key: keep waiting.
+                                self.rebinding = Some(b);
+                            }
+                            return;
+                        }
                         let repeatable = matches!(
                             code,
                             KeyCode::ArrowUp
@@ -2507,6 +2570,17 @@ impl ApplicationHandler for App {
                         return;
                     }
                     self.keys.insert(code);
+                    match self.binds.bind_of(code) {
+                        Some(Bind::Reset) => self.reset(),
+                        Some(Bind::ResetStage) => self.reset_stage(),
+                        Some(Bind::Practice) => {
+                            if !repeat {
+                                let on = !self.session.practice_mode;
+                                self.set_practice_mode(on);
+                            }
+                        }
+                        _ => {}
+                    }
                     match code {
                         KeyCode::Escape => {
                             if self.mouse_captured {
@@ -2514,14 +2588,6 @@ impl ApplicationHandler for App {
                             } else {
                                 // Uncaptured + Esc → back to the title screen.
                                 self.leave_to_main_menu();
-                            }
-                        }
-                        KeyCode::KeyR => self.reset(),
-                        KeyCode::KeyT => self.reset_stage(),
-                        KeyCode::KeyP => {
-                            if !repeat {
-                                let on = !self.session.practice_mode;
-                                self.set_practice_mode(on);
                             }
                         }
                         KeyCode::BracketLeft => {

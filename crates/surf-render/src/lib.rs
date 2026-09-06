@@ -12,7 +12,9 @@ mod trail;
 
 pub use camera::Camera;
 pub use ghost::GhostPose;
-pub use hud::{format_hud_time, layout_for, page_layout, PageLayout, PageSpec, PanelLayout, Rect};
+pub use hud::{
+    format_hud_time, layout_for, page_layout, row_height, PageLayout, PageSpec, PanelLayout, Rect,
+};
 pub use hud::{HudRenderer, HudState, HudTimerPhase, ShowKeysState};
 pub use hud::{MenuPage, MenuPanel, MenuRow, RowKind, RowTone, PANEL_ROWS_MAX};
 pub use mesh::{GpuMaterials, GpuMesh, MeshVertex};

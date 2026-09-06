@@ -25,6 +25,9 @@ pub struct MaterialAtlas {
     pub missing_count: u32,
     /// Sample of missing material names (capped) for diagnostics.
     pub missing_names: Vec<String>,
+    /// Per layer: is this an `$additive` material? The renderer draws those in
+    /// a second, blended pass (`dst += src`) after the opaque world.
+    pub additive_layers: Vec<bool>,
     /// Every resolved material name → its layer. "Which texture is that white
     /// wall?" is the question every texture triage starts with, and without
     /// this the atlas is an anonymous pile of images.
@@ -42,6 +45,7 @@ impl MaterialAtlas {
             textured_count: 0,
             missing_count: 0,
             missing_names: Vec::new(),
+            additive_layers: vec![false],
             layer_of: Vec::new(),
         }
     }
@@ -56,6 +60,8 @@ pub struct MaterialBank {
     /// resolved VTF path → layer index (cubemap patches often share one albedo)
     by_texture: HashMap<String, u32>,
     layers: Vec<RgbaImage>,
+    /// Parallel to `layers`.
+    additive: Vec<bool>,
     textured_count: u32,
     missing_count: u32,
     missing_names: Vec<String>,
@@ -86,6 +92,7 @@ impl MaterialBank {
             by_material: HashMap::new(),
             by_texture: HashMap::new(),
             layers: vec![white],
+            additive: vec![false],
             textured_count: 0,
             missing_count: 0,
             missing_names: Vec::new(),
@@ -143,13 +150,15 @@ impl MaterialBank {
                 } else {
                     let id = self.layers.len() as u32;
                     let mut layer = resize_layer(image);
-                    if additive {
-                        key_additive_alpha(&mut layer, alpha_tested);
-                    } else if !alpha_tested {
+                    // An additive layer keeps its VTF alpha only when the
+                    // material also asked for it (`$translucent`/`$alphatest`);
+                    // the additive pass multiplies rgb by it, nothing else does.
+                    if !alpha_tested {
                         force_opaque(&mut layer);
                     }
                     apply_tint(&mut layer, tint);
                     self.layers.push(layer);
+                    self.additive.push(additive);
                     self.by_texture.insert(cache_key, id);
                     self.textured_count += 1;
                     id
@@ -162,12 +171,14 @@ impl MaterialBank {
                 force_opaque(&mut layer);
                 apply_tint(&mut layer, tint);
                 self.layers.push(layer);
+                self.additive.push(additive);
                 id
             }
             Some(LoadedAlbedo::FlatColor(c)) => {
                 self.note_missing(&key);
                 let id = self.layers.len() as u32;
                 self.layers.push(flat_color_layer(c));
+                self.additive.push(additive);
                 id
             }
             None => {
@@ -254,6 +265,7 @@ impl MaterialBank {
             textured_count: self.textured_count,
             missing_count: self.missing_count,
             missing_names: self.missing_names,
+            additive_layers: self.additive,
             layer_of: {
                 let mut v: Vec<_> = self.by_material.into_iter().collect();
                 v.sort();
@@ -270,32 +282,6 @@ fn material_key(path: &str) -> String {
         .or_else(|| key.strip_suffix(".vtf"))
         .unwrap_or(key)
         .to_string()
-}
-
-/// Turn an `$additive` layer's alpha into "how much light does this texel add",
-/// so the shader's uniform cutout erases the parts that add nothing.
-///
-/// Source composites these as `dst += src.rgb` (times `src.a` when the material
-/// also declares `$translucent`/`$alphatest`), which means black is invisible.
-/// With no blended pass, drawing them opaque is what put a black disc over
-/// cyberwave's skyline where an energy ball belongs. Keying on contribution is
-/// the same bargain the Water/Refract stand-ins make: a hard-edged approximation
-/// that can never *hide* something the player is meant to see.
-///
-/// The ×2 puts the shader's 0.5 test at a contribution of ~0.25. It is not a
-/// free parameter: cyberwave's `emp_ball1` peaks at luma 102/255, so testing the
-/// raw luminance at 0.5 would erase the sprite completely.
-fn key_additive_alpha(img: &mut RgbaImage, modulate_by_alpha: bool) {
-    for px in img.pixels_mut() {
-        let [r, g, b, a] = px.0;
-        let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
-        let scale = if modulate_by_alpha {
-            a as f32 / 255.0
-        } else {
-            1.0
-        };
-        px.0[3] = (luma * scale * 2.0).min(255.0) as u8;
-    }
 }
 
 /// Blank the alpha channel so the shader's cutout test can never fire on a

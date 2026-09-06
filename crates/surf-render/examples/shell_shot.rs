@@ -42,6 +42,12 @@ fn settings_rows() -> Vec<MenuRow> {
         MenuRow::item("Audio", "On"),
         MenuRow::slider("Volume", "0.70", 0.7),
         MenuRow::slider("Core level", "1.00", 0.67),
+        MenuRow::header("KEYBINDS"),
+        MenuRow::item("Forward", "W"),
+        MenuRow::item("Jump", "Space"),
+        MenuRow::item("Turn left", "Q"),
+        MenuRow::item("Turn right", "press a key").with_tone(RowTone::Warn),
+        MenuRow::slider("Turn speed", "210°/s", 0.26),
     ]
 }
 
@@ -106,8 +112,8 @@ fn main() {
                     MenuRow::item("Settings", ""),
                     MenuRow::item("Quit", ""),
                 ]),
-                hint: "↑↓ select   enter choose   click anywhere".into(),
                 backdrop: true,
+                large: true,
                 ..Default::default()
             },
         ),
@@ -124,7 +130,6 @@ fn main() {
                     focused: true,
                 },
                 buttons: vec!["Back".into()],
-                hint: "↑↓ select   enter load   esc back".into(),
                 backdrop: true,
                 ..Default::default()
             },
@@ -133,16 +138,16 @@ fn main() {
             "shell_settings",
             MenuPage {
                 title: "SETTINGS".into(),
-                subtitle: "saved on close".into(),
+                subtitle: "press a key · esc cancels".into(),
+                // Scrolled to the KEYBINDS section with a capture pending.
                 panel: MenuPanel {
                     rows: settings_rows(),
-                    selected: 1,
+                    selected: 25,
                     hovered: None,
-                    scroll: 0,
+                    scroll: 11,
                     focused: true,
                 },
                 buttons: vec!["Back".into()],
-                hint: "←→ or drag adjusts   wheel over a row   esc back".into(),
                 backdrop: true,
                 ..Default::default()
             },
@@ -154,7 +159,6 @@ fn main() {
                 subtitle: "ksf records · your runs".into(),
                 panel: rows(board_rows.clone()),
                 buttons: vec!["Back".into()],
-                hint: "esc back".into(),
                 wide: true,
                 backdrop: true,
                 ..Default::default()
@@ -165,7 +169,6 @@ fn main() {
             MenuPage {
                 title: "LOADING".into(),
                 subtitle: "surf_boreas".into(),
-                hint: "1.4s elapsed".into(),
                 backdrop: true,
                 busy: true,
                 ..Default::default()
@@ -192,7 +195,6 @@ fn main() {
                     "Main menu".into(),
                     "Quit".into(),
                 ],
-                hint: "←→ or drag adjusts   wheel over a row   tab: actions".into(),
                 ..Default::default()
             },
         ),
@@ -224,7 +226,6 @@ fn main() {
                     "Main menu".into(),
                     "Quit".into(),
                 ],
-                hint: "click picks · enter loads · x deletes".into(),
                 ..Default::default()
             },
         ),
@@ -243,7 +244,6 @@ fn main() {
                     "Main menu".into(),
                     "Quit".into(),
                 ],
-                hint: "esc resumes".into(),
                 wide: true,
                 ..Default::default()
             },

@@ -96,30 +96,27 @@ fn cyberwave_neon_strips_keep_their_six_colours() {
 }
 
 #[test]
-fn cyberwave_additive_energy_ball_is_not_an_opaque_disc() {
+fn cyberwave_additive_energy_ball_is_flagged_for_the_blended_pass() {
     let Some(map) = load("surf_cyberwave") else {
         return;
     };
     // `effects/emp_ball1` is `$additive`: a blue glow painted on black, drawn
-    // over the ring above the start. Opaque, it is a black disc across the
-    // skyline. Its peak luminance is only ~102/255, so this also pins that the
-    // keying does not simply erase the sprite.
+    // over the ring above the start. Drawn opaque it is a black disc across
+    // the skyline. The renderer now composites additive layers as `dst += src`
+    // in a second pass, so the layer must be flagged for it and its texels
+    // left as painted — the old alpha keying would punch holes in the glow.
     let layer = layer_for(&map.materials, "effects/emp_ball1").expect("emp_ball1 resolved");
+    assert!(
+        map.materials.additive_layers[layer as usize],
+        "emp_ball1 is not flagged additive — it will draw as an opaque black disc"
+    );
     let n = (map.materials.layer_size * map.materials.layer_size) as usize;
     let start = layer as usize * n * 4;
     let px = &map.materials.rgba[start..start + n * 4];
-    let cut = px.chunks_exact(4).filter(|c| c[3] < 128).count() as f32 / n as f32;
-    assert!(
-        cut > 0.20,
-        "only {:.1}% of the energy ball is cut out — an additive sprite drawn \
-         opaque is a black hole in the sky",
-        cut * 100.0
-    );
-    assert!(
-        cut < 0.95,
-        "{:.1}% cut out — the sprite has been erased, not keyed",
-        cut * 100.0
-    );
+    let keyed = px.chunks_exact(4).filter(|c| c[3] < 255).count();
+    assert_eq!(keyed, 0, "{keyed} texels have a keyed alpha; the blend pass needs them opaque");
+    let non_additive = map.materials.additive_layers.iter().filter(|a| !**a).count();
+    assert!(non_additive > 1, "the world itself must not be flagged additive");
 }
 
 #[test]

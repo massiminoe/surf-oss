@@ -21,15 +21,15 @@ use crate::backdrop::Backdrop;
 
 const FONT_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Medium.ttf");
 const FONT_FAMILY: &str = "JetBrains Mono";
-/// Menu type (direction "Instrument", Max 2026-09-02): a humanist sans for
-/// titles and labels, the mono kept for every number, tab and key hint so
-/// digits stay tabular. Three static instances — cosmic-text does not drive a
+/// Menu type (Max, 2026-09-03): Oswald, the condensed grotesk from the ESL
+/// "surf n chill" title cards — Bold for titles, Regular for labels, Medium
+/// for tabs / buttons / headers. The mono is kept for every number so digits
+/// stay tabular. Three static instances — cosmic-text does not drive a
 /// variable weight axis.
-const FONT_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/InstrumentSans-Regular.ttf");
-const FONT_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/InstrumentSans-Medium.ttf");
-const FONT_SANS_SEMIBOLD: &[u8] =
-    include_bytes!("../../../assets/fonts/InstrumentSans-SemiBold.ttf");
-const SANS_FAMILY: &str = "Instrument Sans";
+const FONT_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Oswald-Regular.ttf");
+const FONT_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/Oswald-Medium.ttf");
+const FONT_SANS_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Oswald-Bold.ttf");
+const SANS_FAMILY: &str = "Oswald";
 
 /// Timer phase for HUD labels (mirrors app timer without coupling crates).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -174,7 +174,6 @@ pub struct MenuPage {
     pub button_hovered: Option<usize>,
     /// Status or error line under the list.
     pub message: Option<String>,
-    pub hint: String,
     /// Wider panel, for pages with three real columns (leaderboard).
     pub wide: bool,
     /// Draw the procedural backdrop over the world (shell pages). `false` just
@@ -182,6 +181,9 @@ pub struct MenuPage {
     pub backdrop: bool,
     /// Indeterminate progress bar under the title (loading).
     pub busy: bool,
+    /// Title-screen scale: a bigger title and tall rows. The row list is the
+    /// whole page there, so it gets the room a settings table cannot afford.
+    pub large: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +271,6 @@ pub struct PageLayout {
     pub subtitle_y: f32,
     pub busy_y: f32,
     pub message_y: f32,
-    pub hint_y: f32,
 }
 
 /// Counts a page needs laid out. Kept as a struct so adding a region later
@@ -281,6 +282,7 @@ pub struct PageSpec {
     pub tabs: usize,
     pub buttons: usize,
     pub wide: bool,
+    pub large: bool,
 }
 
 const PANEL_PAD_X: f32 = 30.0;
@@ -289,6 +291,24 @@ const CURSOR_INSET: f32 = 14.0;
 /// Width reserved at the right of a row for its value text.
 const VALUE_GUTTER: f32 = 66.0;
 const ROW_H: f32 = 28.0;
+/// Title-screen rows (`MenuPage::large`).
+const ROW_H_LARGE: f32 = 58.0;
+/// Type sizes, normal / large: title, row label, row value, note.
+const TITLE_PX: f32 = 34.0;
+const TITLE_PX_LARGE: f32 = 72.0;
+const LABEL_PX: f32 = 17.0;
+const LABEL_PX_LARGE: f32 = 34.0;
+const VALUE_PX: f32 = 13.0;
+const VALUE_PX_LARGE: f32 = 18.0;
+
+/// Row height for a page — the app's scroll maths and the renderer share it.
+pub fn row_height(large: bool) -> f32 {
+    if large {
+        ROW_H_LARGE
+    } else {
+        ROW_H
+    }
+}
 const TAB_H: f32 = 30.0;
 const BUTTON_H: f32 = 34.0;
 /// Tabs and buttons are text with an underline, sized to a fixed column and
@@ -302,38 +322,56 @@ pub const PANEL_ROWS_MAX: usize = 22;
 /// Lay out a menu page. Pure: the app calls this to hit-test exactly what the
 /// renderer drew.
 pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
-    let want = if spec.wide { w * 0.62 } else { w * 0.48 };
+    let row_h = row_height(spec.large);
+    let want = if spec.wide {
+        w * 0.62
+    } else if spec.large {
+        w * 0.52
+    } else {
+        w * 0.48
+    };
     let (lo, hi) = if spec.wide {
         (420.0, 900.0)
+    } else if spec.large {
+        (440.0, 760.0)
     } else {
         (360.0, 660.0)
     };
     let pw = want.clamp(lo, hi).min((w - 40.0).max(240.0));
     let px = ((w - pw) * 0.5).max(12.0);
-    let py = (h * 0.11).max(26.0);
+    let py = if spec.large {
+        (h * 0.14).max(26.0)
+    } else {
+        (h * 0.11).max(26.0)
+    };
 
-    let title_y = py + 26.0;
-    let subtitle_y = py + 60.0;
+    // Title block: the title's cap height plus a subtitle line.
+    let title_y = py + if spec.large { 30.0 } else { 22.0 };
+    let title_block = if spec.large {
+        TITLE_PX_LARGE + 40.0
+    } else {
+        TITLE_PX + 30.0
+    };
+    let subtitle_y = title_y + title_block * 0.5;
     let has_tabs = spec.tabs > 0;
-    let tabs_y = py + 92.0;
+    let tabs_y = title_y + title_block;
     let items_y0 = if has_tabs {
         tabs_y + TAB_H + 14.0
     } else {
-        py + 98.0
+        tabs_y + if spec.large { 10.0 } else { 6.0 }
     };
 
     // Reserve the space below the list before deciding how many rows fit.
-    let below = 22.0 /* message */ + 24.0 /* hint */
+    let below = 22.0 /* message */
         + if spec.buttons > 0 { BUTTON_H + 26.0 } else { 14.0 }
         + 24.0;
     let avail = (h - items_y0 - below - 16.0).max(0.0);
-    let fits = (avail / ROW_H).floor().max(0.0) as usize;
+    let fits = (avail / row_h).floor().max(0.0) as usize;
     let rows = spec.rows.min(fits).min(PANEL_ROWS_MAX);
 
-    let items_end = items_y0 + rows as f32 * ROW_H;
+    let items_end = items_y0 + rows as f32 * row_h;
     let message_y = items_end + 12.0;
-    let hint_y = message_y + 24.0;
-    let buttons_y = hint_y + 26.0;
+    let buttons_y = message_y + 26.0;
 
     let inner_x = px + PANEL_PAD_X;
     let inner_w = pw - PANEL_PAD_X * 2.0;
@@ -369,7 +407,7 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
     let bottom = if spec.buttons > 0 {
         buttons_y + BUTTON_H + 22.0
     } else {
-        hint_y + 30.0
+        message_y + 30.0
     };
 
     PageLayout {
@@ -379,7 +417,7 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
             w: pw,
             h: (bottom - py).max(180.0),
             items_y0,
-            row_h: ROW_H,
+            row_h,
             rows,
         },
         tabs,
@@ -388,7 +426,6 @@ pub fn page_layout(w: f32, h: f32, spec: PageSpec) -> PageLayout {
         subtitle_y,
         busy_y: subtitle_y + 30.0,
         message_y,
-        hint_y,
     }
 }
 
@@ -403,6 +440,7 @@ pub fn layout_for(w: f32, h: f32, page: &MenuPage) -> PageLayout {
             tabs: page.tabs.len(),
             buttons: page.buttons.len(),
             wide: page.wide,
+            large: page.large,
         },
     )
 }
@@ -506,7 +544,6 @@ const TXT_ACCENT: Color = Color::rgb(47, 191, 127);
 const TXT_GOOD: Color = Color::rgb(47, 191, 127);
 const TXT_WARN: Color = Color::rgb(240, 170, 90);
 const TXT_DIM: Color = Color::rgb(110, 122, 118);
-const TXT_HINT: Color = Color::rgb(110, 122, 118);
 const TXT_ERR: Color = Color::rgb(232, 138, 116);
 /// Linear #E9EEEC (ink) and #0C1012 (ground) for the quad pass — the surface
 /// is sRGB, so the byte values would come out three stops light.
@@ -542,7 +579,6 @@ pub struct HudRenderer {
     perf_buf: Buffer,
     page_title_buf: Buffer,
     page_sub_buf: Buffer,
-    page_hint_buf: Buffer,
     page_msg_buf: Buffer,
     tab_bufs: Vec<Buffer>,
     label_bufs: Vec<Buffer>,
@@ -566,7 +602,7 @@ impl HudRenderer {
         font_system.db_mut().load_font_data(FONT_MEDIUM.to_vec());
         font_system.db_mut().load_font_data(FONT_SANS_REGULAR.to_vec());
         font_system.db_mut().load_font_data(FONT_SANS_MEDIUM.to_vec());
-        font_system.db_mut().load_font_data(FONT_SANS_SEMIBOLD.to_vec());
+        font_system.db_mut().load_font_data(FONT_SANS_BOLD.to_vec());
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
@@ -588,23 +624,22 @@ impl HudRenderer {
         let keys_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 22.0));
         let perf_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 16.0));
 
-        let page_title_buf = Buffer::new(&mut font_system, Metrics::new(24.0, 30.0));
+        let page_title_buf = Buffer::new(&mut font_system, title_metrics(false));
         let page_sub_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
-        let page_hint_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
         let page_msg_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 18.0));
         let tab_bufs = (0..MAX_TABS)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(12.0, 16.0)))
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
             .collect();
-        let mk_rows = |fs: &mut FontSystem, size: f32| {
+        let mk_rows = |fs: &mut FontSystem, m: Metrics| {
             (0..PANEL_ROWS_MAX)
-                .map(|_| Buffer::new(fs, Metrics::new(size, size + 5.0)))
+                .map(|_| Buffer::new(fs, m))
                 .collect::<Vec<_>>()
         };
-        let label_bufs = mk_rows(&mut font_system, 15.0);
-        let note_bufs = mk_rows(&mut font_system, 12.0);
-        let value_bufs = mk_rows(&mut font_system, 13.0);
+        let label_bufs = mk_rows(&mut font_system, label_metrics(false));
+        let note_bufs = mk_rows(&mut font_system, Metrics::new(12.0, 16.0));
+        let value_bufs = mk_rows(&mut font_system, value_metrics(false));
         let button_bufs = (0..MAX_BUTTONS)
-            .map(|_| Buffer::new(&mut font_system, Metrics::new(12.0, 16.0)))
+            .map(|_| Buffer::new(&mut font_system, Metrics::new(14.0, 18.0)))
             .collect();
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -713,7 +748,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             perf_buf,
             page_title_buf,
             page_sub_buf,
-            page_hint_buf,
             page_msg_buf,
             tab_bufs,
             label_bufs,
@@ -752,6 +786,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             .family(Family::Name(SANS_FAMILY))
             .weight(Weight::NORMAL);
         let sans_title = Attrs::new()
+            .family(Family::Name(SANS_FAMILY))
+            .weight(Weight::BOLD);
+        // Tabs, buttons and section headers: the condensed face at medium
+        // weight, set in caps by the caller.
+        let sans_ui = Attrs::new()
             .family(Family::Name(SANS_FAMILY))
             .weight(Weight::MEDIUM);
 
@@ -937,13 +976,24 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         let mut tab_count = 0usize;
         let mut button_count = 0usize;
         if let Some(ref page) = hud.page {
+            // Sizes follow the page: the title screen is set large.
+            let tm = title_metrics(page.large);
+            self.page_title_buf.set_metrics(&mut self.font_system, tm);
+            let lm = label_metrics(page.large);
+            let vm = value_metrics(page.large);
+            for b in self.label_bufs.iter_mut() {
+                b.set_metrics(&mut self.font_system, lm);
+            }
+            for b in self.value_bufs.iter_mut() {
+                b.set_metrics(&mut self.font_system, vm);
+            }
             set_buf_text(
                 &mut self.font_system,
                 &mut self.page_title_buf,
                 &page.title,
                 sans_title,
                 w,
-                44.0,
+                tm.line_height + 4.0,
             );
             set_buf_text(
                 &mut self.font_system,
@@ -952,14 +1002,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 attrs,
                 w,
                 20.0,
-            );
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.page_hint_buf,
-                &page.hint,
-                attrs,
-                w,
-                18.0,
             );
             set_buf_text(
                 &mut self.font_system,
@@ -979,8 +1021,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 set_buf_text(
                     &mut self.font_system,
                     &mut self.tab_bufs[i],
-                    &page.tabs[i],
-                    attrs,
+                    &page.tabs[i].to_uppercase(),
+                    sans_ui,
                     w,
                     20.0,
                 );
@@ -991,14 +1033,25 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             let col_w = layout.panel.w - PANEL_PAD_X * 2.0;
             for i in 0..drawn_rows {
                 let row = &page.panel.rows[start + i];
-                set_buf_text(
-                    &mut self.font_system,
-                    &mut self.label_bufs[i],
-                    &row.label,
-                    if row.kind == RowKind::Header { attrs } else { sans },
-                    col_w,
-                    22.0,
-                );
+                if row.kind == RowKind::Header {
+                    set_buf_text(
+                        &mut self.font_system,
+                        &mut self.label_bufs[i],
+                        &row.label.to_uppercase(),
+                        sans_ui,
+                        col_w,
+                        lm.line_height + 2.0,
+                    );
+                } else {
+                    set_buf_text(
+                        &mut self.font_system,
+                        &mut self.label_bufs[i],
+                        &row.label,
+                        sans,
+                        col_w,
+                        lm.line_height + 2.0,
+                    );
+                }
                 set_buf_text(
                     &mut self.font_system,
                     &mut self.note_bufs[i],
@@ -1013,7 +1066,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     &row.value,
                     attrs,
                     col_w,
-                    22.0,
+                    vm.line_height + 2.0,
                 );
             }
 
@@ -1026,8 +1079,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 set_buf_text(
                     &mut self.font_system,
                     &mut self.button_bufs[i],
-                    &page.buttons[i],
-                    attrs,
+                    &page.buttons[i].to_uppercase(),
+                    sans_ui,
                     w,
                     20.0,
                 );
@@ -1310,12 +1363,13 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 if selectable {
                     let sel_y = p.items_y0 + sd as f32 * p.row_h;
                     let a = if page.panel.focused { 1.0 } else { 0.45 };
+                    let cs = if page.large { 8.0 } else { 5.0 };
                     push_rect_px(
                         &mut verts,
                         text_left,
-                        sel_y + (p.row_h - 5.0) * 0.5,
-                        5.0,
-                        5.0,
+                        sel_y + (p.row_h - cs) * 0.5,
+                        cs,
+                        cs,
                         w,
                         h,
                         accent(a),
@@ -1341,6 +1395,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 
             // Rows.
             let (track_x0, track_x1) = p.slider_track();
+            let label_lh = label_metrics(page.large).line_height;
+            let value_lh = value_metrics(page.large).line_height;
             for i in 0..drawn_rows {
                 let row = &page.panel.rows[start + i];
                 let y = p.items_y0 + i as f32 * p.row_h;
@@ -1352,7 +1408,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                         areas.push(TextArea {
                             buffer: &self.label_bufs[i],
                             left: text_left,
-                            top: y + 12.0,
+                            top: y + p.row_h - label_lh - 2.0,
                             scale: 1.0,
                             bounds,
                             default_color: TXT_HEADER,
@@ -1406,7 +1462,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 areas.push(TextArea {
                     buffer: &self.label_bufs[i],
                     left: label_x,
-                    top: y + 4.0,
+                    top: y + (p.row_h - label_lh) * 0.5,
                     scale: 1.0,
                     bounds,
                     default_color: if selected { TXT_LABEL_SEL } else { TXT_LABEL },
@@ -1417,7 +1473,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     areas.push(TextArea {
                         buffer: &self.note_bufs[i],
                         left: label_x + lw + 10.0,
-                        top: y + 7.0,
+                        top: y + (p.row_h - 16.0) * 0.5 + 1.0,
                         scale: 1.0,
                         bounds,
                         default_color: TXT_DIM,
@@ -1429,7 +1485,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     areas.push(TextArea {
                         buffer: &self.value_bufs[i],
                         left: value_right - vw,
-                        top: y + 6.0,
+                        top: y + (p.row_h - value_lh) * 0.5,
                         scale: 1.0,
                         bounds,
                         default_color: match row.tone {
@@ -1493,7 +1549,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             areas.push(TextArea {
                 buffer: &self.page_sub_buf,
                 left: (value_right - sw).max(text_left),
-                top: layout.title_y + 10.0,
+                top: layout.subtitle_y,
                 scale: 1.0,
                 bounds,
                 default_color: TXT_SUB,
@@ -1534,15 +1590,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     custom_glyphs: &[],
                 });
             }
-            areas.push(TextArea {
-                buffer: &self.page_hint_buf,
-                left: text_left,
-                top: layout.hint_y,
-                scale: 1.0,
-                bounds,
-                default_color: TXT_HINT,
-                custom_glyphs: &[],
-            });
 
             // Button bar: a hairline above, text below it, the focused one
             // underlined in accent.
@@ -1642,6 +1689,30 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     }
 }
 
+fn title_metrics(large: bool) -> Metrics {
+    if large {
+        Metrics::new(TITLE_PX_LARGE, TITLE_PX_LARGE * 1.15)
+    } else {
+        Metrics::new(TITLE_PX, TITLE_PX * 1.2)
+    }
+}
+
+fn label_metrics(large: bool) -> Metrics {
+    if large {
+        Metrics::new(LABEL_PX_LARGE, LABEL_PX_LARGE + 8.0)
+    } else {
+        Metrics::new(LABEL_PX, LABEL_PX + 5.0)
+    }
+}
+
+fn value_metrics(large: bool) -> Metrics {
+    if large {
+        Metrics::new(VALUE_PX_LARGE, VALUE_PX_LARGE + 6.0)
+    } else {
+        Metrics::new(VALUE_PX, VALUE_PX + 5.0)
+    }
+}
+
 fn set_buf_text(
     font_system: &mut FontSystem,
     buf: &mut Buffer,
@@ -1719,13 +1790,52 @@ fn format_hud_delta(delta: f32) -> String {
 mod tests {
     use super::*;
 
+    /// The embedded faces must resolve as one family at three weights, or
+    /// every title silently falls back to the system sans. This is the guard
+    /// against shipping a variable font (one face, one weight) by mistake.
+    #[test]
+    fn oswald_loads_as_three_static_weights() {
+        let mut fs = FontSystem::new();
+        fs.db_mut().load_font_data(FONT_SANS_REGULAR.to_vec());
+        fs.db_mut().load_font_data(FONT_SANS_MEDIUM.to_vec());
+        fs.db_mut().load_font_data(FONT_SANS_BOLD.to_vec());
+        let mut weights: Vec<u16> = fs
+            .db()
+            .faces()
+            .filter(|f| f.families.iter().any(|(n, _)| n == SANS_FAMILY))
+            .map(|f| f.weight.0)
+            .collect();
+        weights.sort_unstable();
+        assert_eq!(weights, vec![400, 500, 700], "faces under family {SANS_FAMILY:?}");
+    }
+
+
     fn spec(rows: usize) -> PageSpec {
         PageSpec {
             rows,
             tabs: 3,
             buttons: 4,
             wide: false,
+            large: false,
         }
+    }
+
+    /// The title screen's tall rows must still hit-test and fit: the app's
+    /// scroll window is derived from `rows`, so a mismatch here means the
+    /// highlight and the click land on different entries.
+    #[test]
+    fn large_pages_use_tall_rows_and_still_fit_the_window() {
+        let l = page_layout(1512.0, 982.0, PageSpec { rows: 5, tabs: 0, buttons: 0, wide: false, large: true });
+        assert_eq!(l.panel.row_h, row_height(true));
+        assert!(l.panel.row_h > row_height(false) * 1.8);
+        assert_eq!(l.panel.rows, 5);
+        assert!(l.panel.y + l.panel.h < 982.0);
+        let y = l.panel.items_y0 + 4.5 * l.panel.row_h;
+        assert_eq!(l.panel.row_at(l.panel.x + 40.0, y), Some(4));
+        // A short window trims rows rather than overflowing.
+        let s = page_layout(800.0, 400.0, PageSpec { rows: 5, tabs: 0, buttons: 0, wide: false, large: true });
+        assert!(s.panel.rows < 5);
+        assert!(s.panel.y + s.panel.h <= 400.0 + 1.0);
     }
 
     #[test]

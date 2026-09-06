@@ -9,8 +9,8 @@
 //! Blueprint look are the same family.
 //!
 //! Direction "Instrument" (Max, 2026-09-02): a one-point-perspective grid with
-//! a horizon and ruled major rows, a dithered dot-field sky, and one ramp
-//! *section* standing on the plane instead of tilted slabs floating in it.
+//! a horizon and ruled major rows, and a dithered dot-field sky. The ramp
+//! section that used to stand on the plane was dropped (Max, 2026-09-03).
 //!
 //! Everything is analytic in the fragment shader — no textures, no vertex
 //! buffer, one fullscreen triangle. Cost is a single dependent-free pass.
@@ -77,13 +77,6 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(q.x * q.y);
 }
 
-/// Distance from `p` to the segment `a`–`b`, in the same units as `p`.
-fn sd_seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-    let pa = p - a;
-    let ba = b - a;
-    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-    return length(pa - ba * t);
-}
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
@@ -148,30 +141,6 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     // --- horizon rule ---
     let hl = 1.0 - smoothstep(0.0, 1.5 * one_px, abs(v.uv.y - horizon));
     col += ink * hl * 0.22;
-
-    // --- one ramp profile, standing on the plane, right of centre ---
-    // Drawn as a section, not a slab: two accent faces, a plain base rule and
-    // a square at each vertex — the same triangle every settings screen
-    // could dimension. Vertices in aspect-corrected units, y down.
-    let base_y = horizon - 0.5 + 0.30;
-    let a = vec2<f32>(0.20 * aspect, base_y);
-    let apex = vec2<f32>(0.30 * aspect, base_y - 0.22);
-    let b = vec2<f32>(0.40 * aspect, base_y);
-    let w1 = 1.6 * one_px;
-    let face = 1.0 - smoothstep(w1, w1 + 1.5 * one_px, min(sd_seg(p, a, apex), sd_seg(p, apex, b)));
-    let base = 1.0 - smoothstep(0.6 * one_px, 1.8 * one_px, sd_seg(p, a, b));
-    // Interior is knocked back to the ground so the grid does not run through.
-    let inside = step(0.0, (apex.x - a.x) * (p.y - a.y) - (apex.y - a.y) * (p.x - a.x))
-        * step(0.0, (b.x - apex.x) * (p.y - apex.y) - (b.y - apex.y) * (p.x - apex.x))
-        * step(p.y, base_y);
-    col = mix(col, ground, inside * 0.92);
-    col += ink * base * 0.35;
-    col += accent * face;
-    let vs = 2.5 * one_px;
-    let vert = step(max(abs(p.x - a.x), abs(p.y - a.y)), vs)
-        + step(max(abs(p.x - apex.x), abs(p.y - apex.y)), vs)
-        + step(max(abs(p.x - b.x), abs(p.y - b.y)), vs);
-    col = mix(col, ink, clamp(vert, 0.0, 1.0));
 
     // --- vignette ---
     let vig = 1.0 - smoothstep(0.40, 1.05, length(vec2<f32>(p.x / max(aspect, 0.001), p.y)) * 1.6);

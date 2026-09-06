@@ -26,13 +26,17 @@ pub enum Setting {
     AudioAir,
     AudioSub,
     Wipe,
+    TurnSpeed,
 }
 
 pub enum SettingsEntry {
     Header(&'static str),
     Set(Setting),
+    /// A rebindable key: activating it captures the next key press.
+    Bind(Bind),
 }
 
+use crate::binds::Bind;
 use SettingsEntry::{Header, Set};
 
 /// The settings page, in order. Grouped under headings so it reads as sections
@@ -59,6 +63,19 @@ pub const SETTINGS_PAGE: &[SettingsEntry] = &[
     Set(Setting::AudioAir),
     Set(Setting::AudioSub),
     Set(Setting::Wipe),
+    Header("KEYBINDS"),
+    SettingsEntry::Bind(Bind::Forward),
+    SettingsEntry::Bind(Bind::Back),
+    SettingsEntry::Bind(Bind::Left),
+    SettingsEntry::Bind(Bind::Right),
+    SettingsEntry::Bind(Bind::Jump),
+    SettingsEntry::Bind(Bind::Duck),
+    SettingsEntry::Bind(Bind::TurnLeft),
+    SettingsEntry::Bind(Bind::TurnRight),
+    Set(Setting::TurnSpeed),
+    SettingsEntry::Bind(Bind::Reset),
+    SettingsEntry::Bind(Bind::ResetStage),
+    SettingsEntry::Bind(Bind::Practice),
 ];
 
 /// A continuous setting's domain. `log` maps the slider geometrically, which is
@@ -124,6 +141,7 @@ pub fn slider_range(s: Setting) -> Option<SliderRange> {
             log: true,
         },
         Setting::AudioVolume => SliderRange::linear(0.0, 1.0, 0.02),
+        Setting::TurnSpeed => SliderRange::linear(30.0, 720.0, 10.0),
         Setting::AudioCore | Setting::AudioAir | Setting::AudioSub => {
             SliderRange::linear(0.0, 1.5, 0.05)
         }
@@ -161,6 +179,8 @@ pub enum RowAction {
     /// Headers and read-only lines.
     None,
     Adjust(Setting),
+    /// Capture the next key press for this bind.
+    Rebind(Bind),
     MainResume,
     MainPlay,
     MainLeaderboard,
@@ -285,6 +305,7 @@ mod tests {
             Setting::AudioAir,
             Setting::AudioSub,
             Setting::Wipe,
+            Setting::TurnSpeed,
         ];
         for s in all {
             let n = SETTINGS_PAGE
@@ -312,10 +333,23 @@ mod tests {
                 panic!("empty section: {a} is immediately followed by {b}");
             }
         }
-        assert!(matches!(
+        assert!(!matches!(
             SETTINGS_PAGE.last().unwrap(),
-            SettingsEntry::Set(_)
+            SettingsEntry::Header(_)
         ));
+    }
+
+    /// Same trap as the settings: a bind missing from the page has no key the
+    /// player can change and no error to say so.
+    #[test]
+    fn every_bind_appears_on_the_page_exactly_once() {
+        for b in Bind::ALL {
+            let n = SETTINGS_PAGE
+                .iter()
+                .filter(|e| matches!(e, SettingsEntry::Bind(x) if *x == b))
+                .count();
+            assert_eq!(n, 1, "{b:?} appears {n} times on the settings page");
+        }
     }
 
     /// A slider's geometry has to invert exactly, or dragging a knob lands the
