@@ -472,6 +472,22 @@ pub fn layout_for(w: f32, h: f32, page: &MenuPage) -> PageLayout {
 // HUD state
 // ---------------------------------------------------------------------------
 
+/// A replay being watched: what the scrub bar and its caption need.
+#[derive(Clone, Debug, Default)]
+pub struct ReplayHud {
+    /// `KSF #1 FinCS2` / `PB` / `run 3 · 45.239`.
+    pub label: String,
+    /// `1x`, `0.5x`, `PAUSED`.
+    pub transport: String,
+    /// Playhead, 0..1 of the whole run.
+    pub progress: f32,
+    pub total_secs: f32,
+    /// Checkpoint positions, 0..1, drawn as ticks on the bar.
+    pub split_marks: Vec<f32>,
+    /// Chase camera is up: no crosshair, the view is not the runner's.
+    pub chase: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct HudState {
     /// Horizontal speed u/s.
@@ -501,6 +517,8 @@ pub struct HudState {
     pub cp_delta_secs: Option<f32>,
     /// Live 2D speed delta vs the ghost (positive = faster than the ghost).
     pub ghost_speed_delta: Option<f32>,
+    /// A replay is playing: caption top-left, scrub bar along the bottom.
+    pub replay: Option<ReplayHud>,
     /// Pause overlay or shell page. Takes over the frame when present.
     pub page: Option<MenuPage>,
     /// Optional FPS / frame-time / resolution line (bottom-right).
@@ -527,6 +545,7 @@ impl Default for HudState {
             cp_label: None,
             cp_delta_secs: None,
             ghost_speed_delta: None,
+            replay: None,
             page: None,
             perf_line: None,
             time: 0.0,
@@ -548,9 +567,9 @@ struct HudVert {
 // values of the intended swatches — spelling #2FBF7F as 0.184 would come out
 // three stops light.
 const C_ACCENT: [f32; 4] = [0.02843, 0.521, 0.21223, 1.0]; // #2FBF7F
-// Direction "Instrument" swatches: ink #E9EEEC on ground #0C1012, two greys
-// biased toward the accent (#8C9A96 / #4E5A57), accent #2FBF7F used only for
-// the cursor mark, the selected value and slider fill.
+                                                           // Direction "Instrument" swatches: ink #E9EEEC on ground #0C1012, two greys
+                                                           // biased toward the accent (#8C9A96 / #4E5A57), accent #2FBF7F used only for
+                                                           // the cursor mark, the selected value and slider fill.
 const TXT_TITLE: Color = Color::rgb(233, 238, 236);
 const TXT_SUB: Color = Color::rgb(140, 154, 150);
 const TXT_HEADER: Color = Color::rgb(110, 122, 118);
@@ -607,6 +626,8 @@ pub struct HudRenderer {
     notice_buf: Buffer,
     keys_buf: Buffer,
     perf_buf: Buffer,
+    transport_buf: Buffer,
+    total_buf: Buffer,
     page_title_buf: Buffer,
     page_sub_buf: Buffer,
     page_msg_buf: Buffer,
@@ -630,8 +651,12 @@ impl HudRenderer {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let mut font_system = FontSystem::new();
         font_system.db_mut().load_font_data(FONT_MEDIUM.to_vec());
-        font_system.db_mut().load_font_data(FONT_SANS_REGULAR.to_vec());
-        font_system.db_mut().load_font_data(FONT_SANS_MEDIUM.to_vec());
+        font_system
+            .db_mut()
+            .load_font_data(FONT_SANS_REGULAR.to_vec());
+        font_system
+            .db_mut()
+            .load_font_data(FONT_SANS_MEDIUM.to_vec());
         font_system.db_mut().load_font_data(FONT_SANS_BOLD.to_vec());
 
         let swash_cache = SwashCache::new();
@@ -653,6 +678,8 @@ impl HudRenderer {
         let notice_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 21.0));
         let keys_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 22.0));
         let perf_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 16.0));
+        let transport_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
+        let total_buf = Buffer::new(&mut font_system, Metrics::new(14.0, 18.0));
 
         let page_title_buf = Buffer::new(&mut font_system, title_metrics(false));
         let page_sub_buf = Buffer::new(&mut font_system, Metrics::new(12.0, 16.0));
@@ -776,6 +803,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             notice_buf,
             keys_buf,
             perf_buf,
+            transport_buf,
+            total_buf,
             page_title_buf,
             page_sub_buf,
             page_msg_buf,
@@ -876,19 +905,55 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         } else {
             None
         };
-        let phase_label: Option<String> = match (base_phase_label, practice_tag) {
-            (Some(p), Some(tag)) => Some(format!("{p} · {tag}")),
-            (Some(p), None) => Some(p.to_string()),
-            (None, Some(tag)) => Some(tag.to_string()),
-            (None, None) => None,
-        };
+        let phase_label: Option<String> =
+            match (hud.replay.as_ref(), base_phase_label, practice_tag) {
+                // A replay names itself where the phase would go: whose run this
+                // is matters more than that the clock is running.
+                (Some(r), _, _) => Some(format!("REPLAY · {}", r.label)),
+                (None, Some(p), Some(tag)) => Some(format!("{p} · {tag}")),
+                (None, Some(p), None) => Some(p.to_string()),
+                (None, None, Some(tag)) => Some(tag.to_string()),
+                (None, None, None) => None,
+            };
         if let Some(ref p) = phase_label {
-            set_buf_text(&mut self.font_system, &mut self.phase_buf, p, attrs, w, 22.0);
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.phase_buf,
+                p,
+                attrs,
+                w,
+                22.0,
+            );
+        }
+        if let Some(r) = hud.replay.as_ref() {
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.transport_buf,
+                &r.transport,
+                attrs,
+                w,
+                20.0,
+            );
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.total_buf,
+                &format_hud_time(r.total_secs),
+                attrs,
+                w,
+                20.0,
+            );
         }
 
         let stage_label = hud.stage_line.clone();
         if let Some(ref st) = stage_label {
-            set_buf_text(&mut self.font_system, &mut self.stage_buf, st, attrs, w, 20.0);
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.stage_buf,
+                st,
+                attrs,
+                w,
+                20.0,
+            );
         }
 
         // Row under the clock. While the clock is not running it names what
@@ -903,7 +968,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 _ => None,
             }
         } else if finished {
-            hud.pb_delta_secs.map(|d| format!("PB {}", format_hud_delta(d)))
+            hud.pb_delta_secs
+                .map(|d| format!("PB {}", format_hud_delta(d)))
         } else {
             None
         };
@@ -917,7 +983,14 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             None
         };
         if let Some(ref u) = units_label {
-            set_buf_text(&mut self.font_system, &mut self.units_buf, u, attrs, w, 26.0);
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.units_buf,
+                u,
+                attrs,
+                w,
+                26.0,
+            );
         }
 
         let show_pb_abs = matches!(hud.timer_phase, HudTimerPhase::Idle | HudTimerPhase::Armed)
@@ -929,7 +1002,14 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             None
         };
         if let Some(ref p) = pb_abs_label {
-            set_buf_text(&mut self.font_system, &mut self.pb_abs_buf, p, attrs, w, 22.0);
+            set_buf_text(
+                &mut self.font_system,
+                &mut self.pb_abs_buf,
+                p,
+                attrs,
+                w,
+                22.0,
+            );
         }
 
         if hud.pb_flash {
@@ -1137,6 +1217,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         // The timer block's panel: a ground wash with a hairline frame, drawn
         // in the quad pass below. (x, y, w, h)
         let mut timer_box: Option<(f32, f32, f32, f32)> = None;
+        // Replay scrub bar: (x0, x1, y), drawn in the quad pass.
+        let mut replay_bar: Option<(f32, f32, f32)> = None;
 
         if !page_open {
             // Headline speed: top centre, sat down off the edge. Just the
@@ -1287,7 +1369,9 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             // Transient notices sit just above the timer block.
             if hud.notice.is_some() {
                 let nw = line_width(&self.notice_buf);
-                let ny = timer_box.map(|(_, by, _, _)| by - 34.0).unwrap_or(h - 120.0);
+                let ny = timer_box
+                    .map(|(_, by, _, _)| by - 34.0)
+                    .unwrap_or(h - 120.0);
                 areas.push(TextArea {
                     buffer: &self.notice_buf,
                     left: ((w - nw) * 0.5).round(),
@@ -1312,6 +1396,39 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                     default_color: TXT_LABEL,
                     custom_glyphs: &[],
                 });
+            }
+
+            // Replay transport: the rate at the left, the run's length at the
+            // right, the scrub bar between them along the bottom edge. The
+            // chase view has no crosshair — it is not the runner's eye.
+            if let Some(r) = hud.replay.as_ref() {
+                crosshair = !r.chase;
+                let bar_y = (h - 30.0).floor();
+                let tw = line_width(&self.transport_buf);
+                let ow = line_width(&self.total_buf);
+                areas.push(TextArea {
+                    buffer: &self.transport_buf,
+                    left: 44.0,
+                    top: bar_y - 9.0,
+                    scale: 1.0,
+                    bounds,
+                    default_color: if r.transport == "PAUSED" {
+                        TXT_WARN
+                    } else {
+                        TXT_LABEL
+                    },
+                    custom_glyphs: &[],
+                });
+                areas.push(TextArea {
+                    buffer: &self.total_buf,
+                    left: w - 44.0 - ow,
+                    top: bar_y - 9.0,
+                    scale: 1.0,
+                    bounds,
+                    default_color: TXT_SUB,
+                    custom_glyphs: &[],
+                });
+                replay_bar = Some((44.0 + tw + 16.0, w - 44.0 - ow - 16.0, bar_y));
             }
         }
 
@@ -1685,7 +1802,16 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 let hovered = page.button_hovered == Some(i);
                 let bwid = line_width(&self.button_bufs[i]);
                 if focused {
-                    push_rect_px(&mut verts, r.x, r.y + r.h - 8.0, bwid, 1.0, w, h, accent(1.0));
+                    push_rect_px(
+                        &mut verts,
+                        r.x,
+                        r.y + r.h - 8.0,
+                        bwid,
+                        1.0,
+                        w,
+                        h,
+                        accent(1.0),
+                    );
                 }
                 areas.push(TextArea {
                     buffer: &self.button_bufs[i],
@@ -1737,6 +1863,29 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 push_rect_px(&mut verts, cx + 3.0, cy, 5.0, 1.0, w, h, c);
                 push_rect_px(&mut verts, cx, cy - 7.0, 1.0, 5.0, w, h, c);
                 push_rect_px(&mut verts, cx, cy + 3.0, 1.0, 5.0, w, h, c);
+            }
+            // Scrub bar: the slider language — 1px track, ink fill to the
+            // playhead, an accent thumb — with a tick at every checkpoint so
+            // the bar reads as the course, not just a clock.
+            if let (Some((x0, x1, y)), Some(r)) = (replay_bar, hud.replay.as_ref()) {
+                let bw = (x1 - x0).max(1.0);
+                push_rect_px(&mut verts, x0, y, bw, 1.0, w, h, ink(0.14));
+                let fill = bw * r.progress.clamp(0.0, 1.0);
+                push_rect_px(&mut verts, x0, y, fill.max(1.0), 1.0, w, h, ink(0.9));
+                for m in &r.split_marks {
+                    let mx = x0 + bw * m.clamp(0.0, 1.0);
+                    push_rect_px(&mut verts, mx.floor(), y - 3.0, 1.0, 7.0, w, h, ink(0.55));
+                }
+                push_rect_px(
+                    &mut verts,
+                    x0 + fill - 1.0,
+                    y - 5.0,
+                    2.0,
+                    11.0,
+                    w,
+                    h,
+                    accent(1.0),
+                );
             }
         }
 
@@ -1904,9 +2053,12 @@ mod tests {
             .map(|f| f.weight.0)
             .collect();
         weights.sort_unstable();
-        assert_eq!(weights, vec![400, 500, 700], "faces under family {SANS_FAMILY:?}");
+        assert_eq!(
+            weights,
+            vec![400, 500, 700],
+            "faces under family {SANS_FAMILY:?}"
+        );
     }
-
 
     fn spec(rows: usize) -> PageSpec {
         PageSpec {
@@ -1923,7 +2075,17 @@ mod tests {
     /// highlight and the click land on different entries.
     #[test]
     fn large_pages_use_tall_rows_and_still_fit_the_window() {
-        let l = page_layout(1512.0, 982.0, PageSpec { rows: 5, tabs: 0, buttons: 0, wide: false, large: true });
+        let l = page_layout(
+            1512.0,
+            982.0,
+            PageSpec {
+                rows: 5,
+                tabs: 0,
+                buttons: 0,
+                wide: false,
+                large: true,
+            },
+        );
         assert_eq!(l.panel.row_h, row_height(true));
         assert!(l.panel.row_h > row_height(false) * 1.8);
         assert_eq!(l.panel.rows, 5);
@@ -1931,7 +2093,17 @@ mod tests {
         let y = l.panel.items_y0 + 4.5 * l.panel.row_h;
         assert_eq!(l.panel.row_at(l.panel.x + 40.0, y), Some(4));
         // A short window trims rows rather than overflowing.
-        let s = page_layout(800.0, 400.0, PageSpec { rows: 5, tabs: 0, buttons: 0, wide: false, large: true });
+        let s = page_layout(
+            800.0,
+            400.0,
+            PageSpec {
+                rows: 5,
+                tabs: 0,
+                buttons: 0,
+                wide: false,
+                large: true,
+            },
+        );
         assert!(s.panel.rows < 5);
         assert!(s.panel.y + s.panel.h <= 400.0 + 1.0);
     }

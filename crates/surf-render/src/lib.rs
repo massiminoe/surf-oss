@@ -15,7 +15,7 @@ pub use ghost::GhostPose;
 pub use hud::{
     format_hud_time, layout_for, page_layout, row_height, PageLayout, PageSpec, PanelLayout, Rect,
 };
-pub use hud::{HudRenderer, HudState, HudTimerPhase, ShowKeysState};
+pub use hud::{HudRenderer, HudState, HudTimerPhase, ReplayHud, ShowKeysState};
 pub use hud::{MenuPage, MenuPanel, MenuRow, RowKind, RowTone, PANEL_ROWS_MAX};
 pub use mesh::{GpuMaterials, GpuMesh, MeshVertex};
 pub use offscreen::{render_to_png, Offscreen};

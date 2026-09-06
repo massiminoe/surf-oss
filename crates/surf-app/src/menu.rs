@@ -327,6 +327,8 @@ pub enum RowAction {
     PickMap(usize),
     /// Open one map's record list.
     OpenBoard(String),
+    /// Watch a replay — a KSF record, the PB, or one of your runs.
+    Watch(crate::watch::ReplayPick),
     LocPractice,
     Loc(usize),
     LocLoad,
@@ -460,7 +462,11 @@ mod tests {
         let listed = all_entries()
             .filter(|e| matches!(e, SettingsEntry::Set(_)))
             .count();
-        assert_eq!(listed, all.len(), "a section lists a setting not in the test set");
+        assert_eq!(
+            listed,
+            all.len(),
+            "a section lists a setting not in the test set"
+        );
     }
 
     /// A section with nothing in it is a dead end the cursor can still reach.
@@ -558,7 +564,10 @@ mod tests {
         assert!(r.lo <= 0.1 && r.hi >= 10.0, "sens range {}..{}", r.lo, r.hi);
         for v in [1.0f32, 2.0, 3.0, 5.0] {
             let f = r.frac_of(v);
-            assert!((0.0..=0.55).contains(&f), "sens {v} sits at {f} of the track");
+            assert!(
+                (0.0..=0.55).contains(&f),
+                "sens {v} sits at {f} of the track"
+            );
         }
         // Fine enough to land on a two-decimal value from the keyboard.
         assert!(r.step <= 0.05);

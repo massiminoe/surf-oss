@@ -12,4 +12,5 @@ pub mod resim;
 pub mod session;
 pub mod settings;
 pub mod timer;
+pub mod watch;
 pub mod zones;

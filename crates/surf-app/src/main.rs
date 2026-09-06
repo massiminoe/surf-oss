@@ -4,6 +4,7 @@
 //!   cargo run -p surf-app --release
 //!   cargo run -p surf-app --release -- assets/maps/surf_summit.bsp
 //!   cargo run -p surf-app --release -- --ghost path/to/run.osxr
+//!   cargo run -p surf-app --release -- --watch path/to/run.osxr
 //!   cargo run -p surf-app --release -- --perf-secs 8 --size 2560x1440
 //!   cargo run -p surf-app --release -- --no-vsync
 //!
@@ -25,6 +26,13 @@
 //! step the list, right-click to go back (or to delete a loc). Tab moves
 //! keyboard focus between the list and the action bar; ↑↓ / ←→ / Enter drive
 //! whichever has it.
+//!
+//! Replays: every row on a times page (pause menu TIMES, or Leaderboard → map)
+//! that has a file behind it — an imported KSF record, your PB, one of your
+//! runs — plays back when activated. Space pauses, ←→ seek 5 s, ↑↓ change the
+//! rate, `,` `.` step a frame, C swaps first-person for a chase camera (mouse
+//! orbits), the reset bind rewinds, Esc returns to the TIMES tab. The live
+//! attempt is untouched: Resume carries on exactly where you paused.
 //!
 //! Perf line logs to stdout once per second; `--perf-secs N` exits after N.
 //!
@@ -49,6 +57,7 @@ use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay};
 use surf_app::session::{load_level, Level, Session};
 use surf_app::settings::{Settings, GHOST_AUTO, GHOST_OFF, GHOST_PB};
 use surf_app::timer::{format_split_line, format_time, split_label, SplitEvent, TimerPhase};
+use surf_app::watch::{ReplayPick, ReplayWatch, SEEK_SECS};
 use surf_app::zones::{MapZones, TrackType};
 use surf_audio::{
     AudioEngine, AudioEvent, Levels as AudioLevels, Observation, Params as AudioParams, WipeStyle,
@@ -58,7 +67,7 @@ use surf_core::movement::{Hull, MoveVars, PlayerState, UserCmd};
 use surf_core::{air_strafe_sync, is_on_surf_ramp, tick};
 use surf_render::{
     Camera, GhostPose, GpuMesh, HudState, HudTimerPhase, MenuPage, MenuPanel, MenuRow, PageLayout,
-    Renderer, RowKind, RowTone, ShowKeysState, TrailPoint, ViewParams,
+    Renderer, ReplayHud, RowKind, RowTone, ShowKeysState, TrailPoint, ViewParams,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -192,6 +201,8 @@ struct LaunchOpts {
     vsync: Option<bool>,
     /// Optional `.osxr` ghost (overrides PB ghost). Used for KSF imports.
     ghost_path: Option<PathBuf>,
+    /// Open straight into a replay: loads the map its header names, then plays.
+    watch_path: Option<PathBuf>,
 }
 
 /// Average FPS of the slowest 1% of frames in `dts` (seconds).
@@ -300,6 +311,10 @@ struct App {
     cursor_px: (f32, f32),
     /// Wall clock since launch — drives the menu backdrop and the busy bar.
     start_time: Instant,
+    /// A replay being watched. The session underneath is paused, not changed.
+    watch: Option<ReplayWatch>,
+    /// A replay to start once the map it needs has loaded.
+    pending_watch: Option<ReplayPick>,
 }
 
 impl App {
@@ -311,6 +326,7 @@ impl App {
             perf_secs,
             vsync,
             ghost_path,
+            watch_path,
         } = opts;
 
         let pb_store = match PbStore::open_default() {
@@ -388,11 +404,38 @@ impl App {
             audio,
             cursor_px: (0.0, 0.0),
             start_time: Instant::now(),
+            watch: None,
+            pending_watch: None,
         };
 
         // `mx-surf <map>` skips the shell, as it always has.
         if let Some(path) = map_path {
             app.begin_load(path);
+        }
+        // `--watch run.osxr`: the header names the map, so nothing else is
+        // needed on the command line.
+        if let Some(path) = watch_path {
+            match Replay::load(&path) {
+                Ok(replay) => {
+                    let stem = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("replay")
+                        .to_string();
+                    // A KSF file names itself by its record when the manifest
+                    // knows it; anything else is called by its file name.
+                    let label = leaderboard::ksf_records_by_stem(&replay.header.map)
+                        .get(&stem)
+                        .map(|r| format!("KSF #{} {}", r.rank, r.name))
+                        .unwrap_or(stem);
+                    app.start_watch(ReplayPick {
+                        map: replay.header.map.clone(),
+                        path,
+                        label,
+                    });
+                }
+                Err(e) => eprintln!("--watch: {e}"),
+            }
         }
         app
     }
@@ -450,9 +493,13 @@ impl App {
                     self.pb_store.as_ref(),
                     Some(self.session.vars.airaccelerate),
                 ));
+                if let Some(pick) = self.pending_watch.take() {
+                    self.begin_watch(pick);
+                }
             }
             Err(e) => {
                 eprintln!("load failed: {e}");
+                self.pending_watch = None;
                 self.load_error = Some(e);
                 self.mode = Mode::MapPicker;
             }
@@ -463,6 +510,7 @@ impl App {
     /// GPU buffers, ghost catalogue, PB footer, window title, audio baseline.
     fn enter_session(&mut self, session: Session) {
         self.session = session;
+        self.watch = None;
         self.mode = Mode::Playing;
         self.menu_open = false;
         self.entered_world = true;
@@ -784,6 +832,8 @@ impl App {
     }
 
     /// Times for one map: the imported KSF records, then the player's own.
+    /// Every row with a replay on disk plays it when activated; the note says
+    /// which those are, so a row without one is not a dead click.
     fn record_entries(&self, map: &str) -> Vec<(MenuRow, RowAction)> {
         let mut out: Vec<(MenuRow, RowAction)> = Vec::new();
         let records = leaderboard::ksf_records(map);
@@ -791,6 +841,17 @@ impl App {
             .pb_store
             .as_ref()
             .and_then(|s| s.get(map).ok().flatten());
+        let watch_note = |extra: &str, pick: &Option<ReplayPick>| -> String {
+            match (extra.is_empty(), pick.is_some()) {
+                (true, true) => "replay".into(),
+                (false, true) => format!("{extra} · replay"),
+                (_, false) => extra.to_string(),
+            }
+        };
+        let action = |pick: Option<ReplayPick>| match pick {
+            Some(p) => RowAction::Watch(p),
+            None => RowAction::None,
+        };
 
         out.push((MenuRow::header("WORLD RECORDS · KSF"), RowAction::None));
         if records.is_empty() {
@@ -801,10 +862,12 @@ impl App {
         }
         for r in records.iter().take(15) {
             let beat = pb.is_some_and(|p| p <= r.time);
+            let pick = ReplayPick::ksf(map, r);
             out.push((
                 MenuRow::text(format!("#{:<2} {}", r.rank, r.name), format_time(r.time))
+                    .with_note(watch_note("", &pick))
                     .with_tone(if beat { RowTone::Good } else { RowTone::Normal }),
-                RowAction::None,
+                action(pick),
             ));
         }
 
@@ -815,11 +878,12 @@ impl App {
                     .first()
                     .map(|wr| format!("{:+.3} vs wr", t - wr.time))
                     .unwrap_or_default();
+                let pick = ReplayPick::pb(map);
                 out.push((
                     MenuRow::text("PB", format_time(t))
-                        .with_note(note)
+                        .with_note(watch_note(&note, &pick))
                         .with_tone(RowTone::Accent),
-                    RowAction::None,
+                    action(pick),
                 ));
             }
             None => out.push((
@@ -833,11 +897,12 @@ impl App {
             .and_then(|s| s.list_recent(map, 8).ok())
             .unwrap_or_default();
         for (i, r) in recent.iter().enumerate() {
+            let pick = ReplayPick::run(map, r, i + 1);
             out.push((
                 MenuRow::text(format!("run {}", i + 1), format_time(r.time_secs))
-                    .with_note(if r.is_pb { "pb".into() } else { String::new() })
+                    .with_note(watch_note(if r.is_pb { "pb" } else { "" }, &pick))
                     .with_tone(if r.is_pb { RowTone::Good } else { RowTone::Dim }),
-                RowAction::None,
+                action(pick),
             ));
         }
         out
@@ -1093,6 +1158,7 @@ impl App {
                 self.mode = Mode::Leaderboard { map: Some(map) };
                 self.nav.set(PageId::Records, 0);
             }
+            RowAction::Watch(pick) => self.start_watch(pick),
             RowAction::LocPractice => {
                 let on = !self.session.practice_mode;
                 self.set_practice_mode(on);
@@ -1377,6 +1443,128 @@ impl App {
             }
         }
         self.session.pb_splits = replay.header.splits;
+    }
+
+    // -- replay viewer -----------------------------------------------------
+
+    /// Play `pick`. If its map is not the one loaded, load it first and start
+    /// once the session is in — from the Leaderboard this is the normal case.
+    fn start_watch(&mut self, pick: ReplayPick) {
+        if self.session.level.map_name() == Some(pick.map.as_str()) {
+            self.begin_watch(pick);
+            return;
+        }
+        let path = self
+            .map_list
+            .iter()
+            .find(|m| m.name == pick.map)
+            .and_then(|m| m.path.clone())
+            .unwrap_or_else(|| surf_app::assets::resolve_map_arg(&pick.map));
+        self.pending_watch = Some(pick);
+        self.begin_load(path);
+    }
+
+    /// Open the file and take over the view. The session is left exactly as it
+    /// is — paused under the replay — so stopping returns to the same attempt.
+    fn begin_watch(&mut self, pick: ReplayPick) {
+        let replay = match Replay::load(&pick.path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("replay load failed ({}): {e}", pick.path.display());
+                self.load_error = Some(format!("replay: {e}"));
+                return;
+            }
+        };
+        if replay.frames.is_empty() {
+            self.load_error = Some("replay has no frames".into());
+            return;
+        }
+        println!(
+            "Watching {} — {} frames, {} ({})",
+            pick.label,
+            replay.header.frame_count,
+            format_time(replay.header.time_secs),
+            pick.path.display()
+        );
+        let watch = ReplayWatch::new(pick, replay, self.session.level.world());
+        self.watch = Some(watch);
+        self.load_error = None;
+        self.commit_edit();
+        self.rebinding = None;
+        self.dragging = None;
+        self.mode = Mode::Playing;
+        self.menu_open = false;
+        self.entered_world = true;
+        self.keys.clear();
+        self.set_capture(true);
+        // The voice follows the replay from here: start it clean.
+        if let Some(audio) = self.audio.as_ref() {
+            audio.set_params(AudioParams::default());
+            audio.push(AudioEvent::Rearm);
+        }
+    }
+
+    /// Esc while watching: back to the TIMES tab of the pause menu, over the
+    /// attempt that was in progress before the replay.
+    fn end_watch(&mut self) {
+        if self.watch.take().is_none() {
+            return;
+        }
+        // The session's own detector never saw the replay; only the audio
+        // thread needs to forget it.
+        if let Some(audio) = self.audio.as_ref() {
+            audio.set_params(AudioParams::default());
+            audio.push(AudioEvent::Rearm);
+        }
+        self.pause_tab = PauseTab::Times;
+        self.open_menu();
+    }
+
+    /// Per frame while watching: move the clip on and drive the audio from
+    /// the recorded run, the way the sim does from the live one.
+    fn advance_watch(&mut self, dt_real: f32) {
+        let Some(w) = self.watch.as_mut() else {
+            return;
+        };
+        let events = w.advance(dt_real);
+        let speed = w.speed();
+        let on_ramp = w.on_ramp() && !w.paused;
+        if let Some(audio) = self.audio.as_ref() {
+            for ev in events {
+                audio.push(ev);
+            }
+            audio.set_params(AudioParams {
+                speed: if w.paused { 0.0 } else { speed },
+                // No strafe-sync reading for a recording: let the core sit at
+                // its resting Q rather than pretend.
+                sync: 0.0,
+                contact: if on_ramp { 1.0 } else { 0.0 },
+            });
+        }
+    }
+
+    /// Keys while a replay is up. Everything is transport; nothing reaches
+    /// the player.
+    fn watch_key(&mut self, code: KeyCode) {
+        let reset_key = self.binds.key(Bind::Reset);
+        let Some(w) = self.watch.as_mut() else {
+            return;
+        };
+        match code {
+            KeyCode::Escape => self.end_watch(),
+            KeyCode::Space => w.toggle_pause(),
+            KeyCode::ArrowLeft => w.seek_by(-SEEK_SECS),
+            KeyCode::ArrowRight => w.seek_by(SEEK_SECS),
+            KeyCode::ArrowUp => w.rate_step(1),
+            KeyCode::ArrowDown => w.rate_step(-1),
+            KeyCode::Comma => w.step(-1),
+            KeyCode::Period => w.step(1),
+            KeyCode::KeyC => w.toggle_camera(),
+            KeyCode::Home => w.seek_secs(0.0),
+            KeyCode::End => w.seek_frac(1.0),
+            c if c == reset_key => w.seek_secs(0.0),
+            _ => {}
+        }
     }
 
     /// Freeze pose + velocity + run clock into a new numbered loc.
@@ -2037,7 +2225,7 @@ impl App {
     }
 
     fn simulate(&mut self, dt_real: f32) {
-        if self.menu_open || !matches!(self.mode, Mode::Playing) {
+        if self.menu_open || self.watch.is_some() || !matches!(self.mode, Mode::Playing) {
             return;
         }
         let tick_dt = self.session.vars.tick_interval;
@@ -2220,84 +2408,161 @@ impl App {
             return;
         }
 
-        let origin = self
-            .session
-            .prev_origin
-            .lerp(self.session.player.origin, self.session.alpha);
-        let eye = origin + Vec3::new(0.0, 0.0, self.session.player.hull().eye_height);
-        let speed = self.session.player.velocity.length_2d();
-        let show_keys = if self.settings.show_keys && !self.page_open() {
-            Some(ShowKeysState {
-                forward: self.held(Bind::Forward),
-                back: self.held(Bind::Back),
-                left: self.held(Bind::Left),
-                right: self.held(Bind::Right),
-                jump: self.held(Bind::Jump),
-            })
-        } else {
-            None
-        };
         let page = self.build_page();
-        let timer_phase = self.hud_timer_phase();
         let perf_line = self.frame_stats.line();
-        let racing = self.session.run_timer.phase == TimerPhase::Running
-            && self
-                .session
-                .pb_ghost
-                .as_ref()
-                .map(|g| g.active)
-                .unwrap_or(false);
-        let (ghost_speed_delta, ghost_pose, trail_pts) = if racing {
-            let g = self.session.pb_ghost.as_ref().unwrap();
-            let sd = g.current_speed_2d().map(|gs| speed - gs);
-            let pose = g
-                .sample(self.session.alpha)
-                .map(|(o, _, ducked)| GhostPose { origin: o, ducked });
-            let trail = if self.settings.ghost_trail {
-                g.trail_to_current()
-                    .into_iter()
-                    .map(|(origin, on_ramp)| TrailPoint { origin, on_ramp })
-                    .collect::<Vec<_>>()
+        let now = self.start_time.elapsed().as_secs_f32();
+        let trail_of = |pts: Vec<(Vec3, bool)>| {
+            pts.into_iter()
+                .map(|(origin, on_ramp)| TrailPoint { origin, on_ramp })
+                .collect::<Vec<_>>()
+        };
+
+        // A replay owns the frame: its eye, its speed, its clock, its keys.
+        // The session under it is drawn nowhere, which is the point — you are
+        // watching someone else's run, not yours with a ghost in it.
+        let (eye, viewangles, speed, hud, ghost_pose, trail_pts) =
+            if let Some(w) = self.watch.as_ref() {
+                let (eye, angles) = if w.third_person {
+                    w.chase_eye(self.session.level.world())
+                } else {
+                    w.eye()
+                };
+                let (f, b, l, r, j) = w.keys();
+                let staged = self.session.run_timer.track_type == TrackType::Staged;
+                let n = w.splits_passed();
+                let cp_label = (n > 0).then(|| {
+                    split_label(
+                        SplitEvent {
+                            index: n,
+                            time_secs: w.splits[n - 1],
+                            delta_vs_pb: None,
+                        },
+                        staged,
+                    )
+                });
+                let pose = w.third_person.then(|| GhostPose {
+                    origin: w.origin(),
+                    ducked: w.ducked(),
+                });
+                let trail = if self.settings.ghost_trail {
+                    trail_of(w.trail())
+                } else {
+                    Vec::new()
+                };
+                let hud = HudState {
+                    speed: w.speed(),
+                    grounded: w.frame().grounded,
+                    time_secs: Some(w.time_secs()),
+                    timer_phase: HudTimerPhase::Running,
+                    show_keys: Some(ShowKeysState {
+                        forward: f,
+                        back: b,
+                        left: l,
+                        right: r,
+                        jump: j,
+                    }),
+                    cp_label,
+                    replay: Some(ReplayHud {
+                        label: w.pick.label.clone(),
+                        transport: w.transport_text(),
+                        progress: w.progress(),
+                        total_secs: w.total_secs,
+                        split_marks: w
+                            .splits
+                            .iter()
+                            .map(|s| (s / w.total_secs.max(1e-3)).clamp(0.0, 1.0))
+                            .collect(),
+                        chase: w.third_person,
+                    }),
+                    page,
+                    time: now,
+                    ..HudState::default()
+                };
+                (eye, angles, w.speed(), hud, pose, trail)
             } else {
-                Vec::new()
+                let origin = self
+                    .session
+                    .prev_origin
+                    .lerp(self.session.player.origin, self.session.alpha);
+                let eye = origin + Vec3::new(0.0, 0.0, self.session.player.hull().eye_height);
+                let speed = self.session.player.velocity.length_2d();
+                let show_keys = if self.settings.show_keys && !self.page_open() {
+                    Some(ShowKeysState {
+                        forward: self.held(Bind::Forward),
+                        back: self.held(Bind::Back),
+                        left: self.held(Bind::Left),
+                        right: self.held(Bind::Right),
+                        jump: self.held(Bind::Jump),
+                    })
+                } else {
+                    None
+                };
+                let timer_phase = self.hud_timer_phase();
+                let racing = self.session.run_timer.phase == TimerPhase::Running
+                    && self
+                        .session
+                        .pb_ghost
+                        .as_ref()
+                        .map(|g| g.active)
+                        .unwrap_or(false);
+                let (ghost_speed_delta, ghost_pose, trail_pts) = if racing {
+                    let g = self.session.pb_ghost.as_ref().unwrap();
+                    let sd = g.current_speed_2d().map(|gs| speed - gs);
+                    let pose = g
+                        .sample(self.session.alpha)
+                        .map(|(o, _, ducked)| GhostPose { origin: o, ducked });
+                    let trail = if self.settings.ghost_trail {
+                        trail_of(g.trail_to_current())
+                    } else {
+                        Vec::new()
+                    };
+                    (sd, pose, trail)
+                } else {
+                    (None, None, Vec::new())
+                };
+                let notice = if self.session.notice_left > 0.0 {
+                    self.session.notice_line.clone()
+                } else {
+                    None
+                };
+                let stage_line = self
+                    .session
+                    .zones
+                    .as_ref()
+                    .and_then(|z| self.session.run_timer.stage_hud_label(z));
+                let hud = HudState {
+                    speed,
+                    grounded: self.session.player.grounded,
+                    time_secs: self.session.run_timer.display_time(),
+                    pb_time_secs: self.session.pb_time,
+                    pb_delta_secs: self.session.pb_delta,
+                    timer_phase,
+                    show_keys,
+                    pb_flash: self.session.pb_flash_left > 0.0,
+                    notice,
+                    stage_line,
+                    practice: self.session.run_timer.practice,
+                    practice_mode: self.session.practice_mode,
+                    cp_label: self.session.cp_label.clone(),
+                    cp_delta_secs: self.session.cp_delta,
+                    ghost_speed_delta,
+                    replay: None,
+                    page,
+                    perf_line,
+                    time: now,
+                };
+                (
+                    eye,
+                    self.session.player.viewangles,
+                    speed,
+                    hud,
+                    ghost_pose,
+                    trail_pts,
+                )
             };
-            (sd, pose, trail)
-        } else {
-            (None, None, Vec::new())
-        };
-        let notice = if self.session.notice_left > 0.0 {
-            self.session.notice_line.clone()
-        } else {
-            None
-        };
-        let stage_line = self
-            .session
-            .zones
-            .as_ref()
-            .and_then(|z| self.session.run_timer.stage_hud_label(z));
-        let hud = HudState {
-            speed,
-            grounded: self.session.player.grounded,
-            time_secs: self.session.run_timer.display_time(),
-            pb_time_secs: self.session.pb_time,
-            pb_delta_secs: self.session.pb_delta,
-            timer_phase,
-            show_keys,
-            pb_flash: self.session.pb_flash_left > 0.0,
-            notice,
-            stage_line,
-            practice: self.session.run_timer.practice,
-            practice_mode: self.session.practice_mode,
-            cp_label: self.session.cp_label.clone(),
-            cp_delta_secs: self.session.cp_delta,
-            ghost_speed_delta,
-            page,
-            perf_line,
-            time: self.start_time.elapsed().as_secs_f32(),
-        };
-        let viewangles = self.session.player.viewangles;
         let title_base = self.session.title_base.clone();
         let menu_open = self.menu_open;
+        let watching = self.watch.is_some();
         let grounded = self.session.player.grounded;
         let time_label = self.session.run_timer.display_time().map(format_time);
         let aa = self.session.vars.airaccelerate;
@@ -2337,7 +2602,13 @@ impl App {
             self.hud_timer = 0.0;
             let g = if grounded { "G" } else { "A" };
             let t = time_label.unwrap_or_else(|| "-".into());
-            let pause = if menu_open { " PAUSED" } else { "" };
+            let pause = if watching {
+                " REPLAY"
+            } else if menu_open {
+                " PAUSED"
+            } else {
+                ""
+            };
             window.set_title(&format!(
                 "{title_base}{pause}  |  {speed:7.1} u/s  t {t}  [{g}]  aa {aa:.0}  sens {sens:.1}",
             ));
@@ -2764,6 +3035,13 @@ impl ApplicationHandler for App {
                         }
                         return;
                     }
+                    if self.watch.is_some() {
+                        // Transport only; held keys never reach the player.
+                        if !repeat || matches!(code, KeyCode::Comma | KeyCode::Period) {
+                            self.watch_key(code);
+                        }
+                        return;
+                    }
                     self.keys.insert(code);
                     match self.binds.bind_of(code) {
                         Some(Bind::Reset) => self.reset(),
@@ -2835,6 +3113,20 @@ impl ApplicationHandler for App {
                         MouseButton::Right => self.page_right_click(event_loop),
                         _ => {}
                     }
+                } else if let Some(w) = self.watch.as_mut() {
+                    // A click on the clip is play / pause; a right click ends
+                    // it. Never a loc bind — the player is not here.
+                    match button {
+                        MouseButton::Left => {
+                            if self.mouse_captured {
+                                w.toggle_pause();
+                            } else {
+                                self.set_capture(true);
+                            }
+                        }
+                        MouseButton::Right => self.end_watch(),
+                        _ => {}
+                    }
                 } else if !self.mouse_captured {
                     if button == MouseButton::Left {
                         self.set_capture(true);
@@ -2859,6 +3151,7 @@ impl ApplicationHandler for App {
                     self.session.notice_left = (self.session.notice_left - dt).max(0.0);
                 }
                 let t0 = Instant::now();
+                self.advance_watch(dt);
                 self.simulate(dt);
                 let sim_ms = t0.elapsed().as_secs_f32() * 1000.0;
                 let t1 = Instant::now();
@@ -2914,6 +3207,13 @@ impl ApplicationHandler for App {
             }
             let yaw_scale = self.settings.mouse_sens * MOUSE_YAW_SCALE;
             let pitch_scale = self.settings.mouse_sens * MOUSE_PITCH_SCALE;
+            if let Some(w) = self.watch.as_mut() {
+                // First person is the recorded view; the chase camera orbits.
+                if w.third_person {
+                    w.orbit_by(-(dx as f32) * yaw_scale, dy as f32 * pitch_scale);
+                }
+                return;
+            }
             self.session.player.viewangles.yaw -= dx as f32 * yaw_scale;
             self.session.player.viewangles.pitch += dy as f32 * pitch_scale;
             self.session.player.viewangles.pitch =
@@ -3013,6 +3313,7 @@ fn parse_args() -> LaunchOpts {
     let mut vsync: Option<bool> = None;
     let mut map_path: Option<PathBuf> = None;
     let mut ghost_path: Option<PathBuf> = None;
+    let mut watch_path: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -3031,6 +3332,14 @@ fn parse_args() -> LaunchOpts {
                     std::process::exit(2);
                 };
                 ghost_path = Some(PathBuf::from(v));
+                i += 2;
+            }
+            "--watch" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--watch needs a .osxr path");
+                    std::process::exit(2);
+                };
+                watch_path = Some(PathBuf::from(v));
                 i += 2;
             }
             "--perf-secs" => {
@@ -3076,6 +3385,7 @@ fn parse_args() -> LaunchOpts {
         perf_secs,
         vsync,
         ghost_path,
+        watch_path,
     }
 }
 

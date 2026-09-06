@@ -7,6 +7,7 @@
 
 use surf_core::math::Vec3;
 use surf_map::LoadedMap;
+use surf_render::ReplayHud;
 use surf_render::{
     HudState, HudTimerPhase, MenuPage, MenuPanel, MenuRow, Offscreen, RowTone, ShowKeysState,
     ViewParams,
@@ -93,7 +94,6 @@ fn main() {
         ("frost", "—", "wr 1:21.550"),
         ("lovetunnel", "—", "wr 55.201"),
         ("summit", "44.312", "wr 41.475"),
-        
     ]
     .iter()
     .map(|(a, b, note)| MenuRow::item(*a, *b).with_note(*note))
@@ -101,17 +101,19 @@ fn main() {
 
     let board_rows: Vec<MenuRow> = vec![
         MenuRow::header("WORLD RECORDS · KSF"),
-        MenuRow::text("#1  FinCS2", "41.475"),
-        MenuRow::text("#2  jonkler", "41.910"),
+        MenuRow::text("#1  FinCS2", "41.475").with_note("replay"),
+        MenuRow::text("#2  jonkler", "41.910").with_note("replay"),
         MenuRow::text("#3  vaporeon", "42.203"),
         MenuRow::header("YOUR TIMES"),
         MenuRow::text("PB", "44.312")
-            .with_note("+2.837 vs wr")
+            .with_note("+2.837 vs wr · replay")
             .with_tone(RowTone::Accent),
         MenuRow::text("run 1", "44.312")
-            .with_note("pb")
+            .with_note("pb · replay")
             .with_tone(RowTone::Good),
-        MenuRow::text("run 2", "46.008").with_tone(RowTone::Dim),
+        MenuRow::text("run 2", "46.008")
+            .with_note("replay")
+            .with_tone(RowTone::Dim),
     ];
 
     let pages: Vec<(&str, MenuPage)> = vec![
@@ -296,6 +298,36 @@ fn main() {
         };
         let rgba = off.capture_with_hud(eye, angles, ViewParams::default(), Some(hud));
         let path = out_dir.join("hud_run.png");
+        image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).expect("write png");
+        println!("wrote {}", path.display());
+    }
+
+    // Replay viewer HUD: the caption, the recorded keys, the scrub bar with
+    // its checkpoint ticks.
+    {
+        let hud = HudState {
+            speed: 2210.0,
+            time_secs: Some(18.765),
+            timer_phase: HudTimerPhase::Running,
+            show_keys: Some(ShowKeysState {
+                forward: true,
+                right: true,
+                ..Default::default()
+            }),
+            cp_label: Some("CP2".into()),
+            replay: Some(ReplayHud {
+                label: "KSF #1 FinCS2".into(),
+                transport: "1x".into(),
+                progress: 18.765 / 41.475,
+                total_secs: 41.475,
+                split_marks: vec![0.21, 0.44, 0.63, 0.85],
+                chase: false,
+            }),
+            time: 3.0,
+            ..HudState::default()
+        };
+        let rgba = off.capture_with_hud(eye, angles, ViewParams::default(), Some(hud));
+        let path = out_dir.join("hud_replay.png");
         image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8).expect("write png");
         println!("wrote {}", path.display());
     }
