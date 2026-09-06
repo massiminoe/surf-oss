@@ -120,17 +120,23 @@ fn cyberwave_additive_energy_ball_is_flagged_for_the_blended_pass() {
 }
 
 #[test]
-fn hourglass_flat_colour_sky_is_not_blown_out_by_the_shader_scale() {
-    let Some(map) = load("surf_hourglass") else {
+fn demise_flat_colour_sky_is_not_blown_out_by_the_shader_scale() {
+    let Some(map) = load("surf_demise") else {
         return;
     };
-    // `masog/surf_time/unlitflatsky` is `$color {220 220 220}` with no
-    // basetexture at all. The fragment shader draws textured surfaces as
-    // `albedo * light * 2`, so a layer stored at face value clips to pure
-    // white. Stored halved, it comes back as the overcast grey the author
-    // asked for.
-    let layer =
-        layer_for(&map.materials, "masog/surf_time/unlitflatsky").expect("unlitflatsky resolved");
+    // `elly/fakeskies/sky_demise_05_red` is a `$color` with no basetexture at
+    // all — the map's fake red sky. The fragment shader draws textured surfaces
+    // as `albedo * light * 2`, so a layer stored at face value clips to pure
+    // white and the sky reads as a flat glare. Stored halved, the brightest
+    // channel comes back through the x2 at just under 1.0, which is the colour
+    // the author actually asked for.
+    //
+    // (This guard used to run on hourglass' `{220 220 220}` overcast sky; that
+    // map left the corpus on 2026-09-06. demise is the stronger fixture anyway:
+    // its red channel sits exactly at the clipping boundary, so an unhalved
+    // layer cannot sneak past.)
+    let layer = layer_for(&map.materials, "elly/fakeskies/sky_demise_05_red")
+        .expect("sky_demise_05_red resolved");
     assert_ne!(layer, 0, "a $color-only material still needs a real layer");
     let (rgb, _) = layer_stats(&map.materials, layer);
     let doubled = |c: f32| {
@@ -147,11 +153,13 @@ fn hourglass_flat_colour_sky_is_not_blown_out_by_the_shader_scale() {
             "the stored layer is already {c:.0}/255 — doubling it in the \
              shader can only clip"
         );
-        let out = doubled(c);
-        assert!(
-            (out - 0.7).abs() < 0.15,
-            "after the shader's x2 this reads {out:.2} linear; {{220 220 220}} \
-             should land near 0.70"
-        );
     }
+    // The red channel is the one that would clip: halved it doubles back to
+    // ~1.0, unhalved it would have been driven to 2.0 and flattened to white.
+    let out = doubled(rgb[0]);
+    assert!(
+        (0.85..=1.0).contains(&out),
+        "after the shader's x2 the red channel reads {out:.2} linear; a $color \
+         sky stored halved should land just under 1.0"
+    );
 }

@@ -9,7 +9,7 @@ and surf-map tests are all keyed to those exact recompiles.
 Usage:
   python3 tools/fetch_maps.py --all              # whole corpus (~1.4 GB)
   python3 tools/fetch_maps.py --batch core       # maps the test suite needs
-  python3 tools/fetch_maps.py surf_nyx surf_boreas
+  python3 tools/fetch_maps.py surf_boreas surf_frost
   python3 tools/fetch_maps.py --verify           # check what's on disk, no network
 """
 

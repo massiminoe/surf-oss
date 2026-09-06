@@ -35,7 +35,6 @@ pub const V1_MAPS: &[&str] = &[
     "surf_summit",
     "surf_boreas",
     "surf_tendies",
-    "surf_hourglass",
     "surf_andromeda",
 ];
 
@@ -47,7 +46,6 @@ pub const WAVE1_MAPS: &[&str] = &[
     "surf_demise",
     "surf_fornax",
     "surf_lovetunnel",
-    "surf_pantheon",
 ];
 
 /// Default soft-audit map list — all 18 zoned maps (linear + push + staged).
@@ -55,7 +53,6 @@ pub const SOFT_AUDIT_MAPS: &[&str] = &[
     "surf_summit",
     "surf_boreas",
     "surf_tendies",
-    "surf_hourglass",
     "surf_andromeda",
     "surf_void",
     "surf_lux",
@@ -63,8 +60,6 @@ pub const SOFT_AUDIT_MAPS: &[&str] = &[
     "surf_demise",
     "surf_fornax",
     "surf_lovetunnel",
-    "surf_pantheon",
-    "surf_nyx",
     "surf_frost",
     "surf_cyberwave",
     "surf_cement",

@@ -74,10 +74,9 @@ fn main() {
         ("cyberwave", "52.106", "wr 48.900"),
         ("demise", "—", ""),
         ("frost", "—", "wr 1:21.550"),
-        ("kitsune", "—", ""),
         ("lovetunnel", "—", "wr 55.201"),
         ("summit", "44.312", "wr 41.475"),
-        ("graybox arena", "—", ""),
+        
     ]
     .iter()
     .map(|(a, b, note)| MenuRow::item(*a, *b).with_note(*note))
@@ -103,7 +102,6 @@ fn main() {
             "main_menu",
             MenuPage {
                 title: "MX-SURF".into(),
-                subtitle: "source-faithful surf · single player".into(),
                 panel: rows(vec![
                     MenuRow::item("Resume", "summit").with_tone(RowTone::Accent),
                     MenuRow::item("Play", ""),
@@ -120,7 +118,6 @@ fn main() {
             "map_picker",
             MenuPage {
                 title: "SELECT MAP".into(),
-                subtitle: "24 available".into(),
                 panel: MenuPanel {
                     rows: map_rows,
                     selected: 10,
@@ -155,7 +152,6 @@ fn main() {
             "leaderboard",
             MenuPage {
                 title: "SUMMIT".into(),
-                subtitle: "ksf records · your runs".into(),
                 panel: rows(board_rows.clone()),
                 buttons: vec!["Back".into()],
                 wide: true,
@@ -177,7 +173,6 @@ fn main() {
             "pause_settings",
             MenuPage {
                 title: "SUMMIT".into(),
-                subtitle: "paused · pb 44.312".into(),
                 tabs: vec!["SETTINGS".into(), "LOCS".into(), "TIMES".into()],
                 tab: 0,
                 panel: MenuPanel {
@@ -201,7 +196,6 @@ fn main() {
             "pause_locs",
             MenuPage {
                 title: "SUMMIT".into(),
-                subtitle: "paused · pb 44.312".into(),
                 tabs: vec!["SETTINGS".into(), "LOCS".into(), "TIMES".into()],
                 tab: 1,
                 panel: MenuPanel {
@@ -232,7 +226,6 @@ fn main() {
             "pause_times",
             MenuPage {
                 title: "SUMMIT".into(),
-                subtitle: "paused · pb 44.312".into(),
                 tabs: vec!["SETTINGS".into(), "LOCS".into(), "TIMES".into()],
                 tab: 2,
                 panel: rows(board_rows),

@@ -272,7 +272,8 @@ pub fn extract_prop_collision(
             });
             continue;
         }
-        let solid = matches!(prop.solid, SolidType::Physics) && collide_prop(model_name.as_str());
+        let declared_solid =
+            matches!(prop.solid, SolidType::Physics) && collide_prop(model_name.as_str());
         if !cache.contains_key(&model_type) {
             cache.insert(
                 model_type,
@@ -295,6 +296,16 @@ pub fn extract_prop_collision(
             });
             continue;
         };
+        // Source builds a static prop's collision from the model's `.phy`
+        // vcollide and from nothing else — it never traces a render mesh. A
+        // model that ships no `.phy` therefore has no collision at all, whatever
+        // the lump's solid type says, and mappers leave `prop_static` on its
+        // default "Use VPhysics" freely because in-engine that costs nothing.
+        // botanica is the case in point: 971 props marked `solid=Physics`, not
+        // one of them with a `.phy`, including the grass, flowers and ivy — and
+        // the render-mesh fallback turned them into 1.44M triangles of invisible
+        // fence across every stage-end portal.
+        let solid = declared_solid && (collision.from_phy || render_mesh_collision());
         if !solid {
             let mut bounds = Bounds::new();
             for positions in &collision.tris {
@@ -446,6 +457,13 @@ fn render_prop(name: &str) -> bool {
         .split(',')
         .map(str::trim)
         .any(|pat| !pat.is_empty() && name.contains(pat))
+}
+
+/// A/B lever restoring the pre-2026-09-06 behaviour: collide `solid=Physics`
+/// props that ship no `.phy` against their render mesh. Source never does this;
+/// the switch exists so a corpus A/B can be run against the old geometry.
+fn render_mesh_collision() -> bool {
+    std::env::var_os("MX_SURF_PROP_RENDER_COLLISION").is_some()
 }
 
 /// Collision triangles for one prop model, in model space.

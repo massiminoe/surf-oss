@@ -5,13 +5,17 @@ use std::path::PathBuf;
 use surf_core::math::Vec3;
 use surf_map::LoadedMap;
 
+/// A real corpus map still loads with collision, a mesh, teleports and a spawn.
+/// This used to run on kitsune, which left the corpus on 2026-09-06; boreas is
+/// the equivalent case (brush + displacement + `.phy` prop collision, staged
+/// teleports) and is staying.
 #[test]
-fn load_kitsune_has_collision_and_spawn() {
+fn a_corpus_map_has_collision_and_spawn() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/maps/surf_kitsune.bsp"
+        "/../../assets/maps/surf_boreas.bsp"
     );
-    let map = LoadedMap::load_path(path).expect("load kitsune");
+    let map = LoadedMap::load_path(path).expect("load boreas");
     assert!(
         map.world.brushes.len() > 100,
         "expected hundreds of player-solid brushes, got {}",
@@ -24,7 +28,7 @@ fn load_kitsune_has_collision_and_spawn() {
     );
     assert!(
         !map.teleports.is_empty(),
-        "kitsune should have trigger_teleport"
+        "boreas should have trigger_teleport"
     );
     // Spawn should be somewhere near the map, not at origin by accident only.
     let o = map.spawn_origin;
@@ -71,14 +75,11 @@ fn aesthetic_maps_spawn_in_start_zone_not_bonus() {
     let hull_mins = Vec3::new(-16.0, -16.0, 0.0);
     let hull_maxs = Vec3::new(16.0, 16.0, 62.0);
     for name in [
-        "surf_nyx",
         "surf_fornax",
         "surf_frost",
         "surf_lovetunnel",
         "surf_void",
-        "surf_hourglass",
         "surf_lux",
-        "surf_pantheon",
     ] {
         let path = format!(
             "{}/../../assets/maps/{name}.bsp",

@@ -456,14 +456,11 @@ mod push_parse_tests {
     }
 
     #[test]
-    fn frost_nyx_overgrowth_parse_pushes() {
+    fn frost_and_overgrowth_parse_pushes() {
         let dir = maps_dir();
         let frost = LoadedMap::load_path(dir.join("surf_frost.bsp")).expect("frost");
         assert_eq!(frost.pushes.len(), 8, "frost pushes");
         assert!(frost.gravities.is_empty());
-
-        let nyx = LoadedMap::load_path(dir.join("surf_nyx.bsp")).expect("nyx");
-        assert_eq!(nyx.pushes.len(), 1, "nyx pushes");
 
         let og = LoadedMap::load_path(dir.join("surf_overgrowth.bsp")).expect("overgrowth");
         assert_eq!(og.pushes.len(), 11, "overgrowth pushes");

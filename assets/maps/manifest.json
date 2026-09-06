@@ -24,9 +24,7 @@
     "surf_cyberwave",
     "surf_fornax",
     "surf_frost",
-    "surf_kitsune",
     "surf_lovetunnel",
-    "surf_nyx",
     "surf_overgrowth",
     "surf_summit",
     "surf_tendies"
@@ -34,7 +32,6 @@
   "maps": {
     "surf_andromeda": { "sha256": "fc7c164faea5d29086fec1a71b3e55d21acfae0784b5d1517d78547f88f62fcf", "bytes": 155555294, "batch": "linear-wave1" },
     "surf_aquaflow":  { "sha256": "24211e8a63816cc55aed9137eafba35dedbf6649d80326dd9484bbe4f8aa2c88", "bytes": 32503878,  "batch": "linear-wave2" },
-    "surf_beginner":  { "sha256": "c7679bbb68829273c7ab86c7404096b65f4ef8f94ab09433da987c8f474e8d8d", "bytes": 17958137,  "batch": "core" },
     "surf_boreas":    { "sha256": "b8d3fac43ab01db112d047f1dbe6eee268c54a406eac428bd60e12fa37d69dc7", "bytes": 36649534,  "batch": "linear-wave1" },
     "surf_botanica":  { "sha256": "e2a78129882b6d25213bad67829b95fc0bb190ccb6485bfd9650ddd88f23f141", "bytes": 35412506,  "batch": "staged-later" },
     "surf_cement":    { "sha256": "6f7b198714768313841b1e610852cf4861ef367e61615de622de1b12f3e116b7", "bytes": 102927680, "batch": "staged-later" },
@@ -42,18 +39,11 @@
     "surf_demise":    { "sha256": "f03897dd66b1b2f8f7583db748f13d9d5cfbc98277681b82d304dd686aa9a07c", "bytes": 90250765,  "batch": "linear-wave2" },
     "surf_fornax":    { "sha256": "0c8b0f2a343da6d7fb05e15394959b2b843918fccd2441c605960f7c540a74cf", "bytes": 174311018, "batch": "linear-wave2" },
     "surf_frost":     { "sha256": "4f93ebded5a9f83ad605061aa614127601393627e108b434e14dfb27fe8c9cd8", "bytes": 95198053,  "batch": "linear-wave2" },
-    "surf_hourglass": { "sha256": "cadb975b2f49d04b7d862c77e141d5769351c38b33de336383dc0e2b96e402b1", "bytes": 25023405,  "batch": "linear-wave1" },
-    "surf_kitsune":   { "sha256": "1c0d3c7b3c08581180da3efc4512068b03023340ffd744eb0ab86c7ec214e77f", "bytes": 19370618,  "batch": "core" },
     "surf_lovetunnel":{ "sha256": "3f86d6222cdcdb740ce0d084fd152ff256eee35d6e596b66ff2f1b84671d93af", "bytes": 55802246,  "batch": "linear-wave2" },
     "surf_lux":       { "sha256": "72fb66e94dab609ecc17153d845abc17c9c961d70159df36d9eaf6f6315645ce", "bytes": 24733897,  "batch": "linear-wave1" },
-    "surf_mesa":      { "sha256": "7328e453b2aaaf3c116e1bfb4d842ac3f09e6ce282a977b63fe4f0539e995d93", "bytes": 89502287,  "batch": "core" },
-    "surf_nyx":       { "sha256": "2ae1682d802a1553bcf004971af5c8fdb8c73e104a5f2c0f8b6d512c5dec43ce", "bytes": 89494692,  "batch": "linear-wave1" },
     "surf_overgrowth":{ "sha256": "3a52566fb72852706cc25b89e1b9c310e23d5dd1dfde316c18a675aed9afaf7b", "bytes": 31495063,  "batch": "staged-later" },
-    "surf_pantheon":  { "sha256": "dbbcfdc1341fbcca4b88b0f93f3097a45572d39a5663da5cc3fcf4c8afeb9e24", "bytes": 69101553,  "batch": "linear-wave1" },
     "surf_summit":    { "sha256": "807f13aed0628b9b5ef55d7ba684e17d558bef5da29339cacf2238af2c58edc4", "bytes": 112605993, "batch": "core" },
     "surf_tendies":   { "sha256": "438fa4aac3d3a11d25731a106b264d6a3beea06e910f852379aa08048f9e0033", "bytes": 34355249,  "batch": "linear-wave1" },
-    "surf_utopia_njv":{ "sha256": "686887df80f72440437fe83ddeb262a14275c5f3ad2f8a6d05cbd084b7de51c8", "bytes": 56273716,  "batch": "core" },
-    "surf_utopia_v3": { "sha256": "66df8e0e6ef535cc10021910063a4e5bffa3896976c452fe5cf64727efefa1bb", "bytes": 35648722,  "batch": "core" },
     "surf_void":      { "sha256": "488dbc87f1ae54f76f9a70af75bc2495b86246095c20a4fed4be2b12e81a9406", "bytes": 17305916,  "batch": "linear-wave1" }
   }
 }

@@ -55,14 +55,7 @@ fn main() {
     let show_miss = args.iter().any(|a| a == "--miss");
     let paths: Vec<PathBuf> = if args.iter().any(|a| a == "--all-new") {
         let dir = Path::new("assets/maps");
-        let skip = [
-            "surf_summit",
-            "surf_utopia_njv",
-            "surf_utopia_v3",
-            "surf_kitsune",
-            "surf_beginner",
-            "surf_mesa",
-        ];
+        let skip = ["surf_summit"];
         let mut v: Vec<_> = std::fs::read_dir(dir)
             .expect("assets/maps")
             .filter_map(|e| e.ok())

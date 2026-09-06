@@ -1,6 +1,6 @@
 //! Batch-load BSPs and report spawn/teleport/brush stats.
 //!
-//!   cargo run -p surf-map --example load_smoke --release -- assets/maps/surf_nyx.bsp ...
+//!   cargo run -p surf-map --example load_smoke --release -- assets/maps/surf_boreas.bsp ...
 //!   cargo run -p surf-map --example load_smoke --release -- --all-new
 
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ fn main() {
                 p.extension().and_then(|x| x.to_str()) == Some("bsp")
                     && p.file_stem()
                         .and_then(|s| s.to_str())
-                        .map(|s| s != "surf_summit" && !s.starts_with("surf_utopia") && s != "surf_kitsune" && s != "surf_beginner" && s != "surf_mesa")
+                        .map(|s| s != "surf_summit")
                         .unwrap_or(false)
             })
             .collect();

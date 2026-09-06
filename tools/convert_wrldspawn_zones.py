@@ -2,7 +2,7 @@
 """Convert wrldspawn/surf-zones bhoptimer JSON → assets/zones/<map>.json.
 
 Usage:
-  python3 tools/convert_wrldspawn_zones.py surf_nyx surf_boreas
+  python3 tools/convert_wrldspawn_zones.py surf_boreas surf_frost
   python3 tools/convert_wrldspawn_zones.py --batch linear-wave1
 """
 
@@ -33,13 +33,10 @@ RAW_URL = (
 # From wrldspawn README (+ GameBanana notes). Missing → omit (engine default 3500).
 # 0 = uncapped in our format.
 MAX_VELOCITY = {
-    "surf_nyx": 4000.0,
     "surf_boreas": 5000.0,
     "surf_tendies": 5000.0,
     "surf_andromeda": 5000.0,
-    "surf_pantheon": 10000.0,
     "surf_fornax": 5000.0,
-    "surf_hourglass": 5000.0,
     "surf_void": 5000.0,
     "surf_cyberwave": 7500.0,
     "surf_summit": 0.0,

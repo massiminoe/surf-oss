@@ -3,6 +3,7 @@
   "mapName": "surf_demise",
   "trackType": "linear",
   "source": "converted from wrldspawn/surf-zones (bhoptimer AABB)",
+  "maxVelocity": 5000,
   "tracks": {
     "main": {
       "limitStartGroundSpeed": 350.0,

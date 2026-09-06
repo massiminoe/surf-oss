@@ -3,7 +3,6 @@
 //! Usage:
 //!   cargo run -p surf-app --release
 //!   cargo run -p surf-app --release -- assets/maps/surf_summit.bsp
-//!   cargo run -p surf-app --release -- --graybox
 //!   cargo run -p surf-app --release -- --ghost path/to/run.osxr
 //!   cargo run -p surf-app --release -- --perf-secs 8 --size 2560x1440
 //!   cargo run -p surf-app --release -- --no-vsync
@@ -40,7 +39,7 @@ use std::time::Instant;
 
 use surf_app::binds::{key_label, turn_delta, Bind, Binds};
 use surf_app::leaderboard::{self, MapStanding};
-use surf_app::locs::{self, Loc, GRAYBOX_MAP};
+use surf_app::locs::{self, Loc};
 use surf_app::menu::{
     slider_range, ButtonAction, Focus, Nav, PageId, PauseTab, RowAction, Setting, SettingsEntry,
     LOC_ROW_PRACTICE, SETTINGS_PAGE,
@@ -180,8 +179,6 @@ impl FrameStats {
 struct LaunchOpts {
     /// Map to open straight into. `None` = start on the menu.
     map_path: Option<PathBuf>,
-    /// `--graybox`: skip the menu into the M0 arena.
-    graybox: bool,
     window_w: u32,
     window_h: u32,
     /// Exit after this many seconds of rendering (agent / CI sampling).
@@ -299,7 +296,6 @@ impl App {
     fn new(opts: LaunchOpts) -> Self {
         let LaunchOpts {
             map_path,
-            graybox,
             window_w,
             window_h,
             perf_secs,
@@ -382,12 +378,8 @@ impl App {
             start_time: Instant::now(),
         };
 
-        // `mx-surf <map>` and `--graybox` skip the shell, as they always have.
-        if graybox {
-            app.mode = Mode::Playing;
-            app.entered_world = true;
-            app.on_session_loaded();
-        } else if let Some(path) = map_path {
+        // `mx-surf <map>` skips the shell, as it always has.
+        if let Some(path) = map_path {
             app.begin_load(path);
         }
         app
@@ -822,29 +814,20 @@ impl App {
     /// 2026-09-03): how to drive a list is implicit in the design.
     fn page_title(&self) -> (String, String) {
         match &self.mode {
-            Mode::MainMenu => (
-                "MX-SURF".into(),
-                "source-faithful surf · single player".into(),
-            ),
-            Mode::MapPicker => (
-                "SELECT MAP".into(),
-                format!("{} available", self.map_list.len()),
-            ),
+            Mode::MainMenu => ("MX-SURF".into(), String::new()),
+            Mode::MapPicker => ("SELECT MAP".into(), String::new()),
             Mode::Settings => (
                 "SETTINGS".into(),
                 if self.rebinding.is_some() {
                     "press a key · esc cancels".into()
                 } else {
-                    "saved on close".into()
+                    String::new()
                 },
             ),
-            Mode::Leaderboard { map: None } => (
-                "LEADERBOARD".into(),
-                "your PB against the imported KSF record".into(),
-            ),
+            Mode::Leaderboard { map: None } => ("LEADERBOARD".into(), String::new()),
             Mode::Leaderboard { map: Some(m) } => (
                 m.strip_prefix("surf_").unwrap_or(m).to_uppercase(),
-                "ksf records · your runs".into(),
+                String::new(),
             ),
             Mode::Loading { name, started, .. } => (
                 "LOADING".into(),
@@ -855,10 +838,7 @@ impl App {
                 if self.rebinding.is_some() {
                     "press a key · esc cancels".into()
                 } else {
-                    match self.session.pb_time {
-                        Some(t) => format!("paused · pb {}", format_time(t)),
-                        None => "paused · no pb yet".into(),
-                    }
+                    String::new()
                 },
             ),
         }
@@ -1026,15 +1006,10 @@ impl App {
                 let Some(entry) = self.map_list.get(i) else {
                     return;
                 };
-                match entry.path.clone() {
-                    Some(p) => self.begin_load(p),
-                    None => {
-                        let s = Session::graybox(
-                            self.pb_store.as_ref(),
-                            Some(self.session.vars.airaccelerate),
-                        );
-                        self.enter_session(s);
-                    }
+                // Every offered entry has a path now that the graybox arena
+                // is no longer in the list; a pathless row would be a bug.
+                if let Some(p) = entry.path.clone() {
+                    self.begin_load(p);
                 }
             }
             RowAction::OpenBoard(map) => {
@@ -2832,9 +2807,12 @@ fn fetch_hint(path: &std::path::Path) -> String {
     )
 }
 
-/// Maps offered by the picker: every `.bsp` under `assets/maps`, alphabetical,
-/// with the generated graybox arena last so it is always available even on a
-/// checkout with no maps fetched.
+/// Maps offered by the picker: every `.bsp` under `assets/maps`, alphabetical.
+///
+/// The generated graybox arena used to be appended here so the picker was never
+/// empty. It is no longer offered (Max, 2026-09-06) — `Level::Graybox` stays as
+/// the world a `Session` holds before a map is chosen and as M0's physics
+/// fixture, but it is not a place to go and surf.
 fn discover_maps() -> Vec<MapEntry> {
     let mut out: Vec<MapEntry> = std::fs::read_dir(surf_app::assets::maps_dir())
         .into_iter()
@@ -2855,13 +2833,6 @@ fn discover_maps() -> Vec<MapEntry> {
         })
         .collect();
     out.sort_by(|a, b| a.label.cmp(&b.label));
-    out.push(MapEntry {
-        label: "graybox arena".into(),
-        name: GRAYBOX_MAP.to_string(),
-        path: None,
-        pb: None,
-        wr: None,
-    });
     out
 }
 
@@ -2871,17 +2842,12 @@ fn parse_args() -> LaunchOpts {
     let mut window_h = 800u32;
     let mut perf_secs: Option<f32> = None;
     let mut vsync: Option<bool> = None;
-    let mut graybox = false;
     let mut map_path: Option<PathBuf> = None;
     let mut ghost_path: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--graybox" => {
-                graybox = true;
-                i += 1;
-            }
             "--vsync" => {
                 vsync = Some(true);
                 i += 1;
@@ -2936,7 +2902,6 @@ fn parse_args() -> LaunchOpts {
 
     LaunchOpts {
         map_path,
-        graybox,
         window_w,
         window_h,
         perf_secs,

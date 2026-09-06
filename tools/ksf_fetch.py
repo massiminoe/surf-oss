@@ -7,7 +7,7 @@ manifest.json with provenance + SHA-256. See docs/KSF-REPLAY-HANDOFF.md.
 Usage:
   python3 tools/ksf_fetch.py --map surf_summit --max-rank 10
   python3 tools/ksf_fetch.py --batch aesthetic-17 --max-rank 10
-  python3 tools/ksf_fetch.py surf_nyx surf_boreas --max-rank 5
+  python3 tools/ksf_fetch.py surf_boreas surf_frost --max-rank 5
 
 Polite defaults: one in-flight request, >=1s delay, Retry-After / backoff on
 429/5xx. Does not mirror the whole service.
@@ -41,7 +41,6 @@ MAX_RETRIES = 6
 # Same aesthetic wave as tools/fetch_maps.py (exact KSF names, 2026-08-02 probe).
 BATCHES = {
     "aesthetic-17": [
-        "surf_nyx",
         "surf_boreas",
         "surf_tendies",
         "surf_lovetunnel",
@@ -49,25 +48,20 @@ BATCHES = {
         "surf_cyberwave",
         "surf_overgrowth",
         "surf_cement",
-        "surf_pantheon",
         "surf_lux",
         "surf_fornax",
         "surf_void",
         "surf_frost",
         "surf_aquaflow",
-        "surf_hourglass",
         "surf_botanica",
         "surf_demise",
     ],
     "linear-wave1": [
         "surf_void",
         "surf_lux",
-        "surf_hourglass",
-        "surf_nyx",
         "surf_boreas",
         "surf_tendies",
         "surf_andromeda",
-        "surf_pantheon",
     ],
     "linear-wave2": [
         "surf_lovetunnel",
@@ -84,10 +78,6 @@ BATCHES = {
     ],
     "m1-corpus": [
         "surf_summit",
-        "surf_beginner",
-        "surf_utopia_njv",
-        "surf_kitsune",
-        "surf_mesa_fixed",
     ],
 }
 
