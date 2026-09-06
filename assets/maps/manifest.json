@@ -20,6 +20,7 @@
   ],
   "required_by_tests": [
     "surf_boreas",
+    "surf_cannonball",
     "surf_cement",
     "surf_cyberwave",
     "surf_fornax",
@@ -34,6 +35,7 @@
     "surf_aquaflow":  { "sha256": "24211e8a63816cc55aed9137eafba35dedbf6649d80326dd9484bbe4f8aa2c88", "bytes": 32503878,  "batch": "linear-wave2" },
     "surf_boreas":    { "sha256": "b8d3fac43ab01db112d047f1dbe6eee268c54a406eac428bd60e12fa37d69dc7", "bytes": 36649534,  "batch": "linear-wave1" },
     "surf_botanica":  { "sha256": "e2a78129882b6d25213bad67829b95fc0bb190ccb6485bfd9650ddd88f23f141", "bytes": 35412506,  "batch": "staged-later" },
+    "surf_cannonball":{ "sha256": "c8ad266ac5587c9368b3ef62878db07dce816e363c6ae3552d5d117c060ded95", "bytes": 115263425, "batch": "linear-wave3" },
     "surf_cement":    { "sha256": "6f7b198714768313841b1e610852cf4861ef367e61615de622de1b12f3e116b7", "bytes": 102927680, "batch": "staged-later" },
     "surf_cyberwave": { "sha256": "0ecb42a50257e5c0f764714dfa78a9b95c187918a3a8730e7d944a892b43c0b3", "bytes": 95669906,  "batch": "linear-wave2" },
     "surf_demise":    { "sha256": "f03897dd66b1b2f8f7583db748f13d9d5cfbc98277681b82d304dd686aa9a07c", "bytes": 90250765,  "batch": "linear-wave2" },

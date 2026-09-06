@@ -80,6 +80,7 @@ fn aesthetic_maps_spawn_in_start_zone_not_bonus() {
         "surf_lovetunnel",
         "surf_void",
         "surf_lux",
+        "surf_cannonball",
     ] {
         let path = format!(
             "{}/../../assets/maps/{name}.bsp",

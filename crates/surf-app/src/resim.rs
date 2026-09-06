@@ -48,7 +48,7 @@ pub const WAVE1_MAPS: &[&str] = &[
     "surf_lovetunnel",
 ];
 
-/// Default soft-audit map list — all 18 zoned maps (linear + push + staged).
+/// Default soft-audit map list — every zoned map with KSF ghosts (linear + push + staged).
 pub const SOFT_AUDIT_MAPS: &[&str] = &[
     "surf_summit",
     "surf_boreas",
@@ -65,6 +65,7 @@ pub const SOFT_AUDIT_MAPS: &[&str] = &[
     "surf_cement",
     "surf_botanica",
     "surf_overgrowth",
+    "surf_cannonball",
 ];
 
 /// Summit WR ghost filename (KSF rank 1).

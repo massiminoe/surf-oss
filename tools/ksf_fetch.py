@@ -71,6 +71,9 @@ BATCHES = {
         "surf_cyberwave",
         "surf_aquaflow",
     ],
+    "linear-wave3": [
+        "surf_cannonball",
+    ],
     "staged-later": [
         "surf_overgrowth",
         "surf_cement",

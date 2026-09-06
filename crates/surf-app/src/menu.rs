@@ -29,52 +29,111 @@ pub enum Setting {
 }
 
 pub enum SettingsEntry {
-    Header(&'static str),
     Set(Setting),
     /// A rebindable key: activating it captures the next key press.
     Bind(Bind),
 }
 
 use crate::binds::Bind;
-use SettingsEntry::{Header, Set};
+use SettingsEntry::{Bind as Key, Set};
 
-/// The settings page, in order. Grouped under headings so it reads as sections
-/// instead of one twenty-row wall.
-pub const SETTINGS_PAGE: &[SettingsEntry] = &[
-    Header("MOUSE"),
-    Set(Setting::Sens),
-    Header("VIDEO"),
-    Set(Setting::Brightness),
-    Set(Setting::ShadowLift),
-    Set(Setting::Vsync),
-    Header("HUD"),
-    Set(Setting::ShowKeys),
-    Header("GHOST"),
-    Set(Setting::Ghost),
-    Set(Setting::GhostTrail),
-    Header("MOVEMENT"),
-    Set(Setting::Airaccel),
-    Header("AUDIO"),
-    Set(Setting::Audio),
-    Set(Setting::AudioVolume),
-    Set(Setting::AudioCore),
-    Set(Setting::AudioAir),
-    Set(Setting::AudioSub),
-    Set(Setting::Wipe),
-    Header("KEYBINDS"),
-    SettingsEntry::Bind(Bind::Forward),
-    SettingsEntry::Bind(Bind::Back),
-    SettingsEntry::Bind(Bind::Left),
-    SettingsEntry::Bind(Bind::Right),
-    SettingsEntry::Bind(Bind::Jump),
-    SettingsEntry::Bind(Bind::Duck),
-    SettingsEntry::Bind(Bind::TurnLeft),
-    SettingsEntry::Bind(Bind::TurnRight),
-    Set(Setting::TurnSpeed),
-    SettingsEntry::Bind(Bind::Reset),
-    SettingsEntry::Bind(Bind::ResetStage),
-    SettingsEntry::Bind(Bind::Practice),
-];
+/// A family of settings. The settings screen lists these; picking one opens
+/// its rows. One page of twenty-odd rows was a scroll, not a menu (Max,
+/// 2026-09-06).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Section {
+    Mouse,
+    Video,
+    Hud,
+    Ghost,
+    Movement,
+    Audio,
+    Keybinds,
+}
+
+impl Section {
+    pub const ALL: [Section; 7] = [
+        Section::Mouse,
+        Section::Video,
+        Section::Hud,
+        Section::Ghost,
+        Section::Movement,
+        Section::Audio,
+        Section::Keybinds,
+    ];
+
+    pub fn index(self) -> usize {
+        Section::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+
+    /// Row label on the section list, and the title once inside it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Mouse => "Mouse",
+            Section::Video => "Video",
+            Section::Hud => "HUD",
+            Section::Ghost => "Ghost",
+            Section::Movement => "Movement",
+            Section::Audio => "Audio",
+            Section::Keybinds => "Keybinds",
+        }
+    }
+
+    /// What is inside, so the list is navigable without opening each one.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Section::Mouse => "sensitivity",
+            Section::Video => "brightness, shadows, vsync",
+            Section::Hud => "on-screen readouts",
+            Section::Ghost => "replay ghost and trail",
+            Section::Movement => "airaccelerate",
+            Section::Audio => "levels and wipe style",
+            Section::Keybinds => "movement keys, turn speed",
+        }
+    }
+
+    pub fn entries(self) -> &'static [SettingsEntry] {
+        match self {
+            Section::Mouse => &[Set(Setting::Sens)],
+            Section::Video => &[
+                Set(Setting::Brightness),
+                Set(Setting::ShadowLift),
+                Set(Setting::Vsync),
+            ],
+            Section::Hud => &[Set(Setting::ShowKeys)],
+            Section::Ghost => &[Set(Setting::Ghost), Set(Setting::GhostTrail)],
+            Section::Movement => &[Set(Setting::Airaccel)],
+            Section::Audio => &[
+                Set(Setting::Audio),
+                Set(Setting::AudioVolume),
+                Set(Setting::AudioCore),
+                Set(Setting::AudioAir),
+                Set(Setting::AudioSub),
+                Set(Setting::Wipe),
+            ],
+            Section::Keybinds => &[
+                Key(Bind::Forward),
+                Key(Bind::Back),
+                Key(Bind::Left),
+                Key(Bind::Right),
+                Key(Bind::Jump),
+                Key(Bind::Duck),
+                Key(Bind::TurnLeft),
+                Key(Bind::TurnRight),
+                Set(Setting::TurnSpeed),
+                Key(Bind::Reset),
+                Key(Bind::ResetStage),
+                Key(Bind::Practice),
+            ],
+        }
+    }
+}
+
+/// Every settings row on every section, in order. Only the tests and anything
+/// that needs the whole table should use this — the screen shows one section.
+pub fn all_entries() -> impl Iterator<Item = &'static SettingsEntry> {
+    Section::ALL.iter().flat_map(|s| s.entries().iter())
+}
 
 /// A continuous setting's domain. `log` maps the slider geometrically, which is
 /// the only way airaccelerate's 1..1000 is usable as a bar.
@@ -129,7 +188,9 @@ impl SliderRange {
 
 pub fn slider_range(s: Setting) -> Option<SliderRange> {
     Some(match s {
-        Setting::Sens => SliderRange::linear(0.5, 20.0, 0.1),
+        // CS:S sensitivity: the same number `sensitivity` takes in Source, and
+        // 1..5 is where nearly every player lives.
+        Setting::Sens => SliderRange::linear(0.1, 10.0, 0.05),
         Setting::Brightness => SliderRange::linear(0.5, 3.0, 0.05),
         Setting::ShadowLift => SliderRange::linear(0.0, 0.9, 0.05),
         Setting::Airaccel => SliderRange {
@@ -145,6 +206,82 @@ pub fn slider_range(s: Setting) -> Option<SliderRange> {
         }
         _ => return None,
     })
+}
+
+/// How a continuous setting's number reads — and therefore what a text field
+/// is seeded with. No units: the field parses back exactly what it shows.
+pub fn value_text(s: Setting, v: f32) -> String {
+    match s {
+        Setting::Airaccel | Setting::TurnSpeed => format!("{v:.0}"),
+        _ => format!("{v:.2}"),
+    }
+}
+
+/// A typed value, clamped into the setting's range. `None` for anything that
+/// is not a finite number, so a half-typed or empty field leaves the value
+/// alone rather than writing a zero.
+pub fn parse_value(s: Setting, text: &str) -> Option<f32> {
+    let v: f32 = text.trim().parse().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    Some(match slider_range(s) {
+        Some(r) => v.clamp(r.lo, r.hi),
+        None => v,
+    })
+}
+
+/// An open text field on a numeric settings row.
+///
+/// The buffer is free text while you type and is only parsed on commit, so
+/// "1." is a legal intermediate state. It lives here rather than in the event
+/// loop so the editing rules are testable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValueEdit {
+    pub setting: Setting,
+    buf: String,
+}
+
+impl ValueEdit {
+    /// Longer than any setting's range needs; past this it can only be a typo.
+    const MAX_LEN: usize = 8;
+
+    /// Open a field seeded with what the row currently reads.
+    pub fn new(setting: Setting, value: f32) -> Self {
+        Self {
+            setting,
+            buf: value_text(setting, value),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.buf
+    }
+
+    /// Accept one typed character. Anything that could not appear in a number
+    /// is ignored, as is a second decimal point.
+    pub fn push(&mut self, ch: char) {
+        let ok = match ch {
+            '0'..='9' => true,
+            '.' => !self.buf.contains('.'),
+            // A leading minus only: no setting has a negative range today, but
+            // typing one should not produce "1-2".
+            '-' => self.buf.is_empty(),
+            _ => false,
+        };
+        if ok && self.buf.len() < Self::MAX_LEN {
+            self.buf.push(ch);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        self.buf.pop();
+    }
+
+    /// The value to write, or `None` to leave the setting alone.
+    pub fn commit(&self) -> Option<f32> {
+        parse_value(self.setting, &self.buf)
+    }
 }
 
 /// Sections of the pause menu. Three panels' worth of content, one at a time.
@@ -177,6 +314,8 @@ pub enum RowAction {
     /// Headers and read-only lines.
     None,
     Adjust(Setting),
+    /// Open one settings family.
+    OpenSection(Section),
     /// Capture the next key press for this bind.
     Rebind(Bind),
     MainResume,
@@ -225,7 +364,10 @@ impl ButtonAction {
 pub enum PageId {
     Main,
     Picker,
+    /// The list of settings families.
     Settings,
+    /// One family's rows.
+    Section(Section),
     Board,
     Records,
     Loading,
@@ -244,6 +386,9 @@ pub struct Nav {
     records: usize,
     locs: usize,
     times: usize,
+    /// One cursor per settings family, so backing out and re-entering lands
+    /// where you left off.
+    section: [usize; Section::ALL.len()],
 }
 
 impl Nav {
@@ -252,6 +397,7 @@ impl Nav {
             PageId::Main => self.main,
             PageId::Picker => self.picker,
             PageId::Settings => self.settings,
+            PageId::Section(sec) => self.section[sec.index()],
             PageId::Board => self.board,
             PageId::Records => self.records,
             PageId::Locs => self.locs,
@@ -265,6 +411,7 @@ impl Nav {
             PageId::Main => self.main = v,
             PageId::Picker => self.picker = v,
             PageId::Settings => self.settings = v,
+            PageId::Section(sec) => self.section[sec.index()] = v,
             PageId::Board => self.board = v,
             PageId::Records => self.records = v,
             PageId::Locs => self.locs = v,
@@ -282,11 +429,11 @@ pub const LOC_ROW_PRACTICE: usize = 0;
 mod tests {
     use super::*;
 
-    /// Adding a `Setting` variant and forgetting to list it on the page is the
+    /// Adding a `Setting` variant and forgetting to list it in a section is the
     /// obvious way to lose a control with no compile error and no crash — it
     /// simply never appears. Also catches listing one twice.
     #[test]
-    fn every_setting_appears_on_the_page_exactly_once() {
+    fn every_setting_appears_in_exactly_one_section() {
         let all = [
             Setting::Sens,
             Setting::Brightness,
@@ -305,47 +452,46 @@ mod tests {
             Setting::TurnSpeed,
         ];
         for s in all {
-            let n = SETTINGS_PAGE
-                .iter()
+            let n = all_entries()
                 .filter(|e| matches!(e, SettingsEntry::Set(x) if *x == s))
                 .count();
-            assert_eq!(n, 1, "{s:?} appears {n} times on the settings page");
+            assert_eq!(n, 1, "{s:?} appears in {n} sections");
         }
-        let listed = SETTINGS_PAGE
-            .iter()
+        let listed = all_entries()
             .filter(|e| matches!(e, SettingsEntry::Set(_)))
             .count();
-        assert_eq!(
-            listed,
-            all.len(),
-            "page lists a setting not in the test set"
-        );
+        assert_eq!(listed, all.len(), "a section lists a setting not in the test set");
     }
 
+    /// A section with nothing in it is a dead end the cursor can still reach.
     #[test]
-    fn the_page_starts_with_a_header_and_has_no_empty_sections() {
-        assert!(matches!(SETTINGS_PAGE[0], SettingsEntry::Header(_)));
-        for pair in SETTINGS_PAGE.windows(2) {
-            if let (SettingsEntry::Header(a), SettingsEntry::Header(b)) = (&pair[0], &pair[1]) {
-                panic!("empty section: {a} is immediately followed by {b}");
-            }
+    fn no_section_is_empty() {
+        for sec in Section::ALL {
+            assert!(
+                !sec.entries().is_empty(),
+                "{sec:?} ({}) has no rows",
+                sec.label()
+            );
+            assert!(!sec.label().is_empty() && !sec.summary().is_empty());
         }
-        assert!(!matches!(
-            SETTINGS_PAGE.last().unwrap(),
-            SettingsEntry::Header(_)
-        ));
     }
 
-    /// Same trap as the settings: a bind missing from the page has no key the
-    /// player can change and no error to say so.
     #[test]
-    fn every_bind_appears_on_the_page_exactly_once() {
+    fn sections_index_themselves_consistently() {
+        for (i, sec) in Section::ALL.iter().enumerate() {
+            assert_eq!(sec.index(), i);
+        }
+    }
+
+    /// Same trap as the settings: a bind missing from every section has no key
+    /// the player can change and no error to say so.
+    #[test]
+    fn every_bind_appears_in_exactly_one_section() {
         for b in Bind::ALL {
-            let n = SETTINGS_PAGE
-                .iter()
+            let n = all_entries()
                 .filter(|e| matches!(e, SettingsEntry::Bind(x) if *x == b))
                 .count();
-            assert_eq!(n, 1, "{b:?} appears {n} times on the settings page");
+            assert_eq!(n, 1, "{b:?} appears in {n} sections");
         }
     }
 
@@ -353,7 +499,7 @@ mod tests {
     /// value somewhere other than where the bar is drawn.
     #[test]
     fn slider_positions_round_trip_through_their_values() {
-        for e in SETTINGS_PAGE {
+        for e in all_entries() {
             let SettingsEntry::Set(s) = e else { continue };
             let Some(r) = slider_range(*s) else { continue };
             for f in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
@@ -371,7 +517,7 @@ mod tests {
 
     #[test]
     fn nudging_a_slider_stays_inside_its_range_at_both_ends() {
-        for e in SETTINGS_PAGE {
+        for e in all_entries() {
             let SettingsEntry::Set(s) = e else { continue };
             let Some(r) = slider_range(*s) else { continue };
             let mut v = r.lo;
@@ -402,9 +548,125 @@ mod tests {
         assert!(css_classic > 0.5 && css_classic < momentum);
     }
 
+    /// Sensitivity is CS:S's own `sensitivity` number (our per-count scale is
+    /// Source's `m_yaw`/`m_pitch` default of 0.022), so the track has to put
+    /// the band real players use — roughly 1 to 5 — in reach, not at one end.
+    #[test]
+    fn sensitivity_covers_the_range_a_source_player_would_type() {
+        let r = slider_range(Setting::Sens).unwrap();
+        assert!(!r.log);
+        assert!(r.lo <= 0.1 && r.hi >= 10.0, "sens range {}..{}", r.lo, r.hi);
+        for v in [1.0f32, 2.0, 3.0, 5.0] {
+            let f = r.frac_of(v);
+            assert!((0.0..=0.55).contains(&f), "sens {v} sits at {f} of the track");
+        }
+        // Fine enough to land on a two-decimal value from the keyboard.
+        assert!(r.step <= 0.05);
+    }
+
+    /// A field is seeded with what the row shows, so typing nothing and
+    /// pressing enter has to give back the value that was already there. If
+    /// the display rounds harder than the field parses, every open-and-close
+    /// nudges the setting.
+    #[test]
+    fn opening_a_field_and_committing_it_unchanged_keeps_the_value() {
+        for e in all_entries() {
+            let SettingsEntry::Set(s) = e else { continue };
+            let Some(r) = slider_range(*s) else { continue };
+            for f in [0.0f32, 0.13, 0.5, 0.77, 1.0] {
+                let v = r.value_of(f);
+                let got = ValueEdit::new(*s, v).commit().unwrap();
+                // Within half a display step of what the row showed.
+                let tol = if matches!(s, Setting::Airaccel | Setting::TurnSpeed) {
+                    0.5
+                } else {
+                    0.005
+                };
+                assert!(
+                    (got - v).abs() <= tol,
+                    "{s:?}: showed {} for {v}, read back {got}",
+                    value_text(*s, v)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_typed_value_is_clamped_into_the_settings_range() {
+        for e in all_entries() {
+            let SettingsEntry::Set(s) = e else { continue };
+            let Some(r) = slider_range(*s) else { continue };
+            assert_eq!(parse_value(*s, "999999"), Some(r.hi), "{s:?} above range");
+            assert_eq!(parse_value(*s, "-999999"), Some(r.lo), "{s:?} below range");
+        }
+    }
+
+    /// A field that writes a zero when you clear it would silently mute the
+    /// audio or drop sensitivity to nothing.
+    #[test]
+    fn an_unfinished_field_commits_nothing() {
+        for text in ["", " ", ".", "-", "abc", "1.2.3", "inf", "NaN"] {
+            assert_eq!(
+                parse_value(Setting::Sens, text),
+                None,
+                "{text:?} parsed as a value"
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_only_accepts_characters_that_can_appear_in_a_number() {
+        let mut e = ValueEdit::new(Setting::Sens, 2.57);
+        assert_eq!(e.text(), "2.57");
+        e.backspace();
+        e.backspace();
+        e.backspace();
+        e.backspace();
+        assert_eq!(e.text(), "");
+        for ch in "1.2.3abc-4".chars() {
+            e.push(ch);
+        }
+        assert_eq!(e.text(), "1.234");
+        // And it cannot grow without bound.
+        for _ in 0..40 {
+            e.push('9');
+        }
+        assert_eq!(e.text().len(), ValueEdit::MAX_LEN);
+    }
+
+    /// The point of splitting settings into families is that a family is a
+    /// page, not a scroll (Max, 2026-09-06). Checked against the tightest
+    /// layout we draw: the pause overlay, which spends room on a tab strip and
+    /// a five-button action bar, at a small window.
+    #[test]
+    fn every_settings_family_fits_on_one_page_without_scrolling() {
+        for (w, h) in [(1280.0f32, 720.0f32), (1280.0, 800.0), (1512.0, 982.0)] {
+            for sec in Section::ALL {
+                let rows = sec.entries().len();
+                let layout = surf_render::page_layout(
+                    w,
+                    h,
+                    surf_render::PageSpec {
+                        rows,
+                        tabs: PauseTab::ALL.len(),
+                        buttons: 5,
+                        wide: false,
+                        large: false,
+                    },
+                );
+                assert!(
+                    layout.panel.rows >= rows,
+                    "{} has {rows} rows but only {} fit at {w}x{h}",
+                    sec.label(),
+                    layout.panel.rows
+                );
+            }
+        }
+    }
+
     #[test]
     fn nav_keeps_a_separate_cursor_per_page() {
-        let pages = [
+        let mut pages = vec![
             PageId::Main,
             PageId::Picker,
             PageId::Settings,
@@ -413,6 +675,7 @@ mod tests {
             PageId::Locs,
             PageId::Times,
         ];
+        pages.extend(Section::ALL.iter().map(|s| PageId::Section(*s)));
         let mut nav = Nav::default();
         for (i, p) in pages.iter().enumerate() {
             nav.set(*p, i + 1);

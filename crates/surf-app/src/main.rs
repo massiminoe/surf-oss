@@ -41,8 +41,8 @@ use surf_app::binds::{key_label, turn_delta, Bind, Binds};
 use surf_app::leaderboard::{self, MapStanding};
 use surf_app::locs::{self, Loc};
 use surf_app::menu::{
-    slider_range, ButtonAction, Focus, Nav, PageId, PauseTab, RowAction, Setting, SettingsEntry,
-    LOC_ROW_PRACTICE, SETTINGS_PAGE,
+    slider_range, value_text, ButtonAction, Focus, Nav, PageId, PauseTab, RowAction, Section,
+    Setting, SettingsEntry, ValueEdit, LOC_ROW_PRACTICE,
 };
 use surf_app::pb::PbStore;
 use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay};
@@ -67,7 +67,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-/// Source m_yaw / m_pitch defaults.
+/// Source `m_yaw` / `m_pitch` defaults. Together with `settings.mouse_sens`
+/// this reproduces CS:S exactly — `degrees = counts * sensitivity * m_yaw` —
+/// so the number on the Mouse settings row is the one a CS:S config carries,
+/// not a scale of our own. The one thing still unlike CS:S is upstream of
+/// here: macOS applies pointer acceleration to the deltas we receive (the
+/// GCMouse raw-input shim in the backlog is the fix).
 const MOUSE_YAW_SCALE: f32 = 0.022;
 const MOUSE_PITCH_SCALE: f32 = 0.022;
 
@@ -273,6 +278,11 @@ struct App {
     binds: Binds,
     /// A KEYBINDS row is waiting for its next key press.
     rebinding: Option<Bind>,
+    /// Settings family being shown; `None` is the list of families. Shared by
+    /// the shell page and the pause tab deliberately — it is the same screen.
+    settings_section: Option<Section>,
+    /// A numeric row's value column is open as a text field.
+    editing: Option<ValueEdit>,
     last_frame: Instant,
     hud_timer: f32,
     pb_store: Option<PbStore>,
@@ -360,6 +370,8 @@ impl App {
             focus: Focus::Rows,
             button_selected: 0,
             dragging: None,
+            settings_section: None,
+            editing: None,
             entered_world: false,
             settings,
             binds,
@@ -490,17 +502,31 @@ impl App {
         }
     }
 
+    /// Settings list, or the family that is open over it.
+    fn settings_page_id(&self) -> PageId {
+        match self.settings_section {
+            Some(sec) => PageId::Section(sec),
+            None => PageId::Settings,
+        }
+    }
+
+    /// Is a settings screen (list or family) the page on screen?
+    fn on_settings_page(&self) -> bool {
+        matches!(self.mode, Mode::Settings)
+            || (matches!(self.mode, Mode::Playing) && self.pause_tab == PauseTab::Settings)
+    }
+
     /// Identity of the page currently on screen.
     fn page_id(&self) -> PageId {
         match &self.mode {
             Mode::MainMenu => PageId::Main,
             Mode::MapPicker => PageId::Picker,
-            Mode::Settings => PageId::Settings,
+            Mode::Settings => self.settings_page_id(),
             Mode::Leaderboard { map: None } => PageId::Board,
             Mode::Leaderboard { map: Some(_) } => PageId::Records,
             Mode::Loading { .. } => PageId::Loading,
             Mode::Playing => match self.pause_tab {
-                PauseTab::Settings => PageId::Settings,
+                PauseTab::Settings => self.settings_page_id(),
                 PauseTab::Locs => PageId::Locs,
                 PauseTab::Times => PageId::Times,
             },
@@ -607,10 +633,20 @@ impl App {
     }
 
     fn settings_entries(&self) -> Vec<(MenuRow, RowAction)> {
-        SETTINGS_PAGE
+        let Some(sec) = self.settings_section else {
+            return Section::ALL
+                .iter()
+                .map(|sec| {
+                    (
+                        MenuRow::item(sec.label(), ">").with_note(sec.summary()),
+                        RowAction::OpenSection(*sec),
+                    )
+                })
+                .collect();
+        };
+        sec.entries()
             .iter()
             .map(|e| match e {
-                SettingsEntry::Header(h) => (MenuRow::header(*h), RowAction::None),
                 SettingsEntry::Set(s) => (self.setting_row(*s), RowAction::Adjust(*s)),
                 SettingsEntry::Bind(b) => (self.bind_row(*b), RowAction::Rebind(*b)),
             })
@@ -629,13 +665,24 @@ impl App {
         let label = self.setting_label(s);
         if let Some(range) = slider_range(s) {
             let v = self.setting_value(s);
+            if let Some(e) = self.editing.as_ref().filter(|e| e.setting == s) {
+                // Caret as a trailing underscore: no blink timer, and it shows
+                // an empty field is still a field.
+                return MenuRow::slider(label, format!("{}_", e.text()), range.frac_of(v))
+                    .with_tone(RowTone::Accent)
+                    .editing();
+            }
             let text = match s {
-                Setting::Airaccel => format!("{v:.0}"),
-                Setting::Sens => format!("{v:.1}"),
-                Setting::TurnSpeed => format!("{v:.0}°/s"),
-                _ => format!("{v:.2}"),
+                Setting::TurnSpeed => format!("{}°/s", value_text(s, v)),
+                _ => value_text(s, v),
             };
-            return MenuRow::slider(label, text, range.frac_of(v));
+            let row = MenuRow::slider(label, text, range.frac_of(v));
+            // Our per-count scale is Source's `m_yaw`/`m_pitch` default, so
+            // this number is literally the one a CS:S config would carry.
+            return match s {
+                Setting::Sens => row.with_note("cs:s sensitivity"),
+                _ => row,
+            };
         }
         match s {
             Setting::Vsync => {
@@ -817,12 +864,11 @@ impl App {
             Mode::MainMenu => ("MX-SURF".into(), String::new()),
             Mode::MapPicker => ("SELECT MAP".into(), String::new()),
             Mode::Settings => (
-                "SETTINGS".into(),
-                if self.rebinding.is_some() {
-                    "press a key · esc cancels".into()
-                } else {
-                    String::new()
+                match self.settings_section {
+                    Some(sec) => sec.label().to_uppercase(),
+                    None => "SETTINGS".into(),
                 },
+                self.settings_subtitle(false),
             ),
             Mode::Leaderboard { map: None } => ("LEADERBOARD".into(), String::new()),
             Mode::Leaderboard { map: Some(m) } => (
@@ -835,12 +881,32 @@ impl App {
             ),
             Mode::Playing => (
                 self.session.level.short_name().to_uppercase(),
-                if self.rebinding.is_some() {
-                    "press a key · esc cancels".into()
+                // The tab strip already says SETTINGS, so the open family has
+                // to be named here or the panel is unlabelled.
+                if self.pause_tab == PauseTab::Settings {
+                    self.settings_subtitle(true)
                 } else {
                     String::new()
                 },
             ),
+        }
+    }
+
+    /// The line under a settings title: whatever the screen is waiting for.
+    /// `name_section` is for the pause overlay, whose title is the map.
+    fn settings_subtitle(&self, name_section: bool) -> String {
+        if self.rebinding.is_some() {
+            return "press a key · esc cancels".into();
+        }
+        if self.editing.is_some() {
+            return "type a value · enter accepts · esc cancels".into();
+        }
+        match self.settings_section {
+            Some(sec) if name_section => {
+                format!("{} · {}", sec.label().to_uppercase(), sec.summary())
+            }
+            Some(sec) => sec.summary().into(),
+            None => String::new(),
         }
     }
 
@@ -979,15 +1045,25 @@ impl App {
         };
         // Clicking anywhere else abandons a pending key capture.
         self.rebinding = None;
+        if !matches!(action, RowAction::Adjust(_)) {
+            self.editing = None;
+        }
         match action {
             RowAction::None => {}
-            // Toggles and cyclers flip on Enter/click; sliders need ←→, the
-            // wheel, or a drag, so activating one does nothing rather than
-            // jumping the value under the cursor.
+            // Toggles and cyclers flip; a numeric row opens its value for
+            // typing, which is the only way to hit an exact number from the
+            // keyboard.
             RowAction::Adjust(s) => {
-                if slider_range(s).is_none() {
+                if slider_range(s).is_some() {
+                    self.begin_edit(s);
+                } else {
                     self.adjust_setting(s, 1);
                 }
+            }
+            RowAction::OpenSection(sec) => {
+                self.settings_section = Some(sec);
+                self.focus = Focus::Rows;
+                self.snap_selection_into_range();
             }
             RowAction::Rebind(b) => self.rebinding = Some(b),
             RowAction::MainResume => self.resume_world(),
@@ -995,6 +1071,7 @@ impl App {
             RowAction::MainLeaderboard => self.open_leaderboard(),
             RowAction::MainSettings => {
                 self.mode = Mode::Settings;
+                self.settings_section = None;
                 self.focus = Focus::Rows;
                 self.snap_selection_into_range();
             }
@@ -1093,6 +1170,17 @@ impl App {
     fn page_back(&mut self, _event_loop: &ActiveEventLoop) {
         if self.rebinding.take().is_some() {
             // Esc during a key capture only cancels the capture.
+            return;
+        }
+        if self.editing.take().is_some() {
+            // Esc abandons a typed value rather than committing it.
+            return;
+        }
+        // Backing out of a settings family returns to the family list, not out
+        // of settings altogether.
+        if self.on_settings_page() && self.settings_section.take().is_some() {
+            self.focus = Focus::Rows;
+            self.snap_selection_into_range();
             return;
         }
         match &self.mode {
@@ -1466,6 +1554,10 @@ impl App {
         self.menu_open = true;
         self.focus = Focus::Rows;
         self.button_selected = 0;
+        // Settings always opens on the family list — landing three levels deep
+        // in whatever was touched last is disorienting.
+        self.settings_section = None;
+        self.editing = None;
         // Land the locs list on the active loc so it reads as "this is the one
         // Mouse1 will load".
         self.nav.set(
@@ -1486,6 +1578,8 @@ impl App {
     }
 
     fn close_menu(&mut self, recapture: bool) {
+        // Leaving the menu accepts a half-open field, same as clicking away.
+        self.commit_edit();
         self.rebinding = None;
         self.menu_open = false;
         self.dragging = None;
@@ -1535,6 +1629,75 @@ impl App {
             return;
         };
         self.set_setting_value(s, range.value_of(frac));
+    }
+
+    // -- typed values ------------------------------------------------------
+
+    /// Open the value column of a numeric row as a text field, seeded with what
+    /// it currently reads. Non-numeric settings have nothing to type.
+    fn begin_edit(&mut self, s: Setting) {
+        if slider_range(s).is_none() {
+            return;
+        }
+        self.dragging = None;
+        self.rebinding = None;
+        self.editing = Some(ValueEdit::new(s, self.setting_value(s)));
+    }
+
+    /// Accept the buffer. An unparseable or empty field leaves the value alone
+    /// rather than writing a zero.
+    fn commit_edit(&mut self) {
+        let Some(e) = self.editing.take() else {
+            return;
+        };
+        if let Some(v) = e.commit() {
+            self.set_setting_value(e.setting, v);
+            self.persist_settings();
+        }
+    }
+
+    /// A key press while a value field is open. Returns false if the key is not
+    /// ours, so the page can handle it normally.
+    fn edit_key(&mut self, code: KeyCode) -> bool {
+        if self.editing.is_none() {
+            return false;
+        }
+        let ch = match code {
+            KeyCode::Escape => {
+                self.editing = None;
+                return true;
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                self.commit_edit();
+                return true;
+            }
+            KeyCode::Backspace => {
+                if let Some(e) = self.editing.as_mut() {
+                    e.backspace();
+                }
+                return true;
+            }
+            KeyCode::Digit0 | KeyCode::Numpad0 => '0',
+            KeyCode::Digit1 | KeyCode::Numpad1 => '1',
+            KeyCode::Digit2 | KeyCode::Numpad2 => '2',
+            KeyCode::Digit3 | KeyCode::Numpad3 => '3',
+            KeyCode::Digit4 | KeyCode::Numpad4 => '4',
+            KeyCode::Digit5 | KeyCode::Numpad5 => '5',
+            KeyCode::Digit6 | KeyCode::Numpad6 => '6',
+            KeyCode::Digit7 | KeyCode::Numpad7 => '7',
+            KeyCode::Digit8 | KeyCode::Numpad8 => '8',
+            KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+            KeyCode::Period | KeyCode::NumpadDecimal => '.',
+            KeyCode::Minus | KeyCode::NumpadSubtract => '-',
+            // Anything else — arrows, letters, Tab — is swallowed rather than
+            // acted on: a field that silently loses focus mid-type is worse
+            // than one that ignores a stray key.
+            _ => return true,
+        };
+        if let Some(e) = self.editing.as_mut() {
+            e.push(ch);
+        }
+        true
     }
 
     /// One notch of a setting: a slider step, or a toggle / cycle.
@@ -2314,6 +2477,10 @@ impl App {
     /// Keyboard on any menu page — shell or pause. One handler, so a key that
     /// works on one page works on all of them.
     fn page_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+        // An open value field owns every key until it is committed or cancelled.
+        if self.edit_key(code) {
+            return;
+        }
         match code {
             KeyCode::Escape => self.page_back(event_loop),
             KeyCode::Tab => {
@@ -2396,6 +2563,12 @@ impl App {
         if self.pause_tab == tab {
             return;
         }
+        self.editing = None;
+        self.rebinding = None;
+        // Re-entering settings starts at the family list.
+        if tab == PauseTab::Settings {
+            self.settings_section = None;
+        }
         self.pause_tab = tab;
         self.focus = Focus::Rows;
         self.snap_selection_into_range();
@@ -2419,6 +2592,9 @@ impl App {
     /// Left click anywhere on a menu page.
     fn page_click(&mut self, event_loop: &ActiveEventLoop) {
         let (mx, my) = self.cursor_px;
+        // Clicking away accepts what was typed — losing it would be a trap.
+        // Re-clicking the same field's value re-opens it below.
+        self.commit_edit();
         let Some((page, layout)) = self.page_layout() else {
             return;
         };
@@ -2445,10 +2621,17 @@ impl App {
             }
             self.focus = Focus::Rows;
             self.set_selected_row(row);
-            // A slider follows the cursor from here until the button comes up.
             if let (RowKind::Slider(_), RowAction::Adjust(s)) = (entry.0.kind, &entry.1) {
+                let s = *s;
+                // Clicking the number types it; clicking the track drags it.
+                // The value column starts where the track stops, so the two
+                // can't both claim a pixel.
+                if layout.panel.over_value(mx) {
+                    self.begin_edit(s);
+                    return;
+                }
+                // A slider follows the cursor from here until the button comes up.
                 if let Some(frac) = layout.panel.slider_frac_at(mx) {
-                    let s = *s;
                     self.dragging = Some(row);
                     self.set_setting_frac(s, frac);
                 }
@@ -2505,30 +2688,16 @@ impl App {
         }
     }
 
-    /// Wheel adjusts the hovered setting, otherwise steps the list.
+    /// Wheel steps the list, and only the list.
+    ///
+    /// It used to adjust whatever slider the cursor happened to be over, which
+    /// meant scrolling past a row changed it (Max, 2026-09-06). A value now
+    /// moves only from a deliberate act: ←→, a drag, or typing.
     fn page_scroll(&mut self, dy: f32) {
         if dy.abs() < 0.01 {
             return;
         }
         let dir = if dy > 0.0 { 1 } else { -1 };
-        let (mx, my) = self.cursor_px;
-        let hovered = self.page_layout().and_then(|(page, layout)| {
-            layout
-                .panel
-                .row_at(mx, my)
-                .map(|d| d + page.panel.scroll)
-                .filter(|r| *r < page.panel.rows.len())
-        });
-        if let Some(row) = hovered {
-            if matches!(self.action_at(row), Some(RowAction::Adjust(s)) if slider_range(s).is_some())
-            {
-                self.focus = Focus::Rows;
-                self.set_selected_row(row);
-                self.adjust_row(row, dir);
-                return;
-            }
-        }
-        // Scrolling a list moves the cursor; the window follows it.
         self.focus = Focus::Rows;
         self.move_selection(-dir);
     }

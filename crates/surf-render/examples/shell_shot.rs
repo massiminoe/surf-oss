@@ -22,31 +22,48 @@ fn rows(v: Vec<MenuRow>) -> MenuPanel {
     }
 }
 
-fn settings_rows() -> Vec<MenuRow> {
+/// The settings screen is a list of families now, not one long table.
+fn settings_families() -> Vec<MenuRow> {
     vec![
-        MenuRow::header("MOUSE"),
-        MenuRow::slider("Sensitivity", "5.0", 0.23),
-        MenuRow::header("VIDEO"),
-        MenuRow::slider("Brightness", "1.00", 0.20),
-        MenuRow::slider("Shadow lift", "0.00", 0.0),
-        MenuRow::item("VSync", "On"),
-        MenuRow::header("HUD"),
-        MenuRow::item("Show keys", "Off"),
-        MenuRow::header("GHOST"),
-        MenuRow::item("Ghost", "Auto (KSF #1 FinCS2 41.475)"),
-        MenuRow::item("Ghost trail", "On"),
-        MenuRow::header("MOVEMENT"),
-        MenuRow::slider("Airaccelerate", "150", 0.73),
-        MenuRow::header("AUDIO"),
+        MenuRow::item("Mouse", ">").with_note("sensitivity"),
+        MenuRow::item("Video", ">").with_note("brightness, shadows, vsync"),
+        MenuRow::item("HUD", ">").with_note("on-screen readouts"),
+        MenuRow::item("Ghost", ">").with_note("replay ghost and trail"),
+        MenuRow::item("Movement", ">").with_note("airaccelerate"),
+        MenuRow::item("Audio", ">").with_note("levels and wipe style"),
+        MenuRow::item("Keybinds", ">").with_note("movement keys, turn speed"),
+    ]
+}
+
+/// One family, with a value field open — the case the field box has to look
+/// right in.
+fn audio_section() -> Vec<MenuRow> {
+    vec![
         MenuRow::item("Audio", "On"),
-        MenuRow::slider("Volume", "0.70", 0.7),
-        MenuRow::slider("Core level", "1.00", 0.67),
-        MenuRow::header("KEYBINDS"),
+        MenuRow::slider("Volume", "0.7_", 0.72)
+            .with_tone(RowTone::Accent)
+            .editing(),
+        MenuRow::slider("Core level", "0.43", 0.29),
+        MenuRow::slider("Air level", "0.53", 0.35),
+        MenuRow::slider("Sub level", "0.58", 0.39),
+        MenuRow::item("Wipe sound", "Rewind"),
+    ]
+}
+
+fn keybinds_section() -> Vec<MenuRow> {
+    vec![
         MenuRow::item("Forward", "W"),
+        MenuRow::item("Back", "S"),
+        MenuRow::item("Left", "A"),
+        MenuRow::item("Right", "D"),
         MenuRow::item("Jump", "Space"),
+        MenuRow::item("Duck", "L Ctrl"),
         MenuRow::item("Turn left", "Q"),
         MenuRow::item("Turn right", "press a key").with_tone(RowTone::Warn),
         MenuRow::slider("Turn speed", "210°/s", 0.26),
+        MenuRow::item("Reset", "R"),
+        MenuRow::item("Reset stage", "T"),
+        MenuRow::item("Practice", "P"),
     ]
 }
 
@@ -134,13 +151,28 @@ fn main() {
             "shell_settings",
             MenuPage {
                 title: "SETTINGS".into(),
-                subtitle: "press a key · esc cancels".into(),
-                // Scrolled to the KEYBINDS section with a capture pending.
                 panel: MenuPanel {
-                    rows: settings_rows(),
-                    selected: 25,
+                    rows: settings_families(),
+                    selected: 5,
+                    hovered: Some(1),
+                    scroll: 0,
+                    focused: true,
+                },
+                buttons: vec!["Back".into()],
+                backdrop: true,
+                ..Default::default()
+            },
+        ),
+        (
+            "shell_settings_section",
+            MenuPage {
+                title: "AUDIO".into(),
+                subtitle: "type a value · enter accepts · esc cancels".into(),
+                panel: MenuPanel {
+                    rows: audio_section(),
+                    selected: 1,
                     hovered: None,
-                    scroll: 11,
+                    scroll: 0,
                     focused: true,
                 },
                 buttons: vec!["Back".into()],
@@ -173,12 +205,13 @@ fn main() {
             "pause_settings",
             MenuPage {
                 title: "SUMMIT".into(),
+                subtitle: "press a key · esc cancels".into(),
                 tabs: vec!["SETTINGS".into(), "LOCS".into(), "TIMES".into()],
                 tab: 0,
                 panel: MenuPanel {
-                    rows: settings_rows(),
-                    selected: 3,
-                    hovered: Some(5),
+                    rows: keybinds_section(),
+                    selected: 7,
+                    hovered: Some(8),
                     scroll: 0,
                     focused: true,
                 },

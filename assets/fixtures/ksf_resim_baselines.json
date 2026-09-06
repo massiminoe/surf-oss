@@ -134,6 +134,15 @@
       "maxMedianOriginErrAt66": 17510.0,
       "maxP95OriginErr": 0.0,
       "bestPreset": "aa100_accel5"
+    },
+    {
+      "map": "surf_cannonball",
+      "minOnRampFrac": 0.134,
+      "maxKillZFrac": 0.001,
+      "maxBuriedFrac": 0.05,
+      "maxMedianOriginErrAt66": 10.0,
+      "maxP95OriginErr": 28900.0,
+      "bestPreset": "momentum_surf"
     }
   ]
 }

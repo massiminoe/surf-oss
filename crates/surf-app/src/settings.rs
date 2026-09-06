@@ -52,21 +52,30 @@ pub struct Settings {
     pub turn_speed: f32,
 }
 
+/// Default sensitivity, in CS:S's own units — our per-count scale is Source's
+/// `m_yaw` / `m_pitch` default of 0.022, so this is the number a CS:S config
+/// would carry.
+pub const DEFAULT_SENS: f32 = 2.57;
+
 impl Default for Settings {
+    /// Max's own settings as of 2026-09-06, adopted wholesale so a fresh
+    /// install starts where the tuning ended up rather than at the arbitrary
+    /// first-guess values. Note `vsync: false` is deliberate and his call —
+    /// see the frame-pacing notes in CLAUDE.md before changing it back.
     fn default() -> Self {
         Self {
-            mouse_sens: 5.0,
+            mouse_sens: DEFAULT_SENS,
             show_keys: false,
-            vsync: true,
-            brightness: 1.0,
-            shadow_lift: 0.0,
-            ghost: GHOST_AUTO.into(),
+            vsync: false,
+            brightness: 0.97,
+            shadow_lift: 0.5,
+            ghost: GHOST_PB.into(),
             ghost_trail: true,
             audio: true,
-            audio_volume: 0.7,
-            audio_core: 1.0,
-            audio_air: 1.0,
-            audio_sub: 1.0,
+            audio_volume: 0.72,
+            audio_core: 0.43,
+            audio_air: 0.53,
+            audio_sub: 0.58,
             wipe_style: "rewind".into(),
             binds: crate::binds::Binds::default().to_map(),
             turn_speed: crate::binds::DEFAULT_TURN_SPEED,
@@ -110,11 +119,14 @@ impl Settings {
         fs::write(path, text).map_err(|e| format!("settings write: {e}"))
     }
 
+    /// CS:S's `sensitivity` range. The floor is well below anything playable
+    /// and the ceiling well above it, so a typed value is only refused when it
+    /// could not have been meant.
     pub fn clamp_sens(mut sens: f32) -> f32 {
         if !sens.is_finite() {
-            sens = 5.0;
+            sens = DEFAULT_SENS;
         }
-        sens.clamp(0.5, 20.0)
+        sens.clamp(0.1, 20.0)
     }
 
     pub fn clamp_brightness(mut v: f32) -> f32 {
@@ -133,7 +145,7 @@ impl Settings {
 
     pub fn clamp_audio_volume(mut v: f32) -> f32 {
         if !v.is_finite() {
-            v = 0.7;
+            v = Self::default().audio_volume;
         }
         v.clamp(0.0, 1.0)
     }
@@ -234,6 +246,35 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    /// The shipped defaults are Max's own settings (2026-09-06), not a first
+    /// guess. A change here is a product decision, so it should have to be
+    /// made twice.
+    #[test]
+    fn defaults_are_the_tuned_values() {
+        let d = Settings::default();
+        assert!((d.mouse_sens - 2.57).abs() < 1e-5);
+        assert!(!d.vsync);
+        assert!((d.brightness - 0.97).abs() < 1e-5);
+        assert!((d.shadow_lift - 0.5).abs() < 1e-5);
+        assert_eq!(d.ghost, GHOST_PB);
+        assert!(d.ghost_trail);
+        assert!(!d.show_keys);
+        assert!(d.audio);
+        assert!((d.audio_volume - 0.72).abs() < 1e-5);
+        assert!((d.audio_core - 0.43).abs() < 1e-5);
+        assert!((d.audio_air - 0.53).abs() < 1e-5);
+        assert!((d.audio_sub - 0.58).abs() < 1e-5);
+        assert_eq!(d.wipe_style, "rewind");
+        // Every default has to survive its own clamp, or a fresh install
+        // silently starts somewhere else.
+        assert_eq!(Settings::clamp_sens(d.mouse_sens), d.mouse_sens);
+        assert_eq!(Settings::clamp_brightness(d.brightness), d.brightness);
+        assert_eq!(Settings::clamp_shadow_lift(d.shadow_lift), d.shadow_lift);
+        assert_eq!(Settings::clamp_audio_volume(d.audio_volume), d.audio_volume);
+        assert_eq!(Settings::clamp_audio_level(d.audio_core), d.audio_core);
+        assert_eq!(Settings::clamp_turn_speed(d.turn_speed), d.turn_speed);
+    }
+
     #[test]
     fn ghost_defaults_when_absent() {
         let stamp = SystemTime::now()
@@ -243,14 +284,17 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mx-surf-settings-old-{stamp}.json"));
         fs::write(&path, r#"{"mouse_sens":5.0}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
-        assert_eq!(loaded.ghost, GHOST_AUTO);
-        assert!(loaded.ghost_trail);
+        let d = Settings::default();
+        assert_eq!(loaded.ghost, d.ghost);
+        assert_eq!(loaded.ghost_trail, d.ghost_trail);
         // Settings files written before audio existed must still load, with
         // audio on at its default mix.
         assert!(loaded.audio);
-        assert!((loaded.audio_volume - 0.7).abs() < 1e-5);
-        assert_eq!(loaded.audio_core, 1.0);
-        assert_eq!(loaded.wipe_style, "rewind");
+        assert!((loaded.audio_volume - d.audio_volume).abs() < 1e-5);
+        assert!((loaded.audio_core - d.audio_core).abs() < 1e-5);
+        assert_eq!(loaded.wipe_style, d.wipe_style);
+        // A file that predates the CS:S sensitivity range keeps its own value.
+        assert!((loaded.mouse_sens - 5.0).abs() < 1e-5);
         let _ = fs::remove_file(&path);
     }
 
@@ -283,10 +327,13 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("mx-surf-settings-inf-{stamp}.json"));
-        fs::write(&path, r#"{"audio_volume":1e40,"audio_core":1e40}"#).unwrap();
+        fs::write(&path, r#"{"audio_volume":1e40,"audio_core":1e40,"mouse_sens":1e40}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
-        assert!((loaded.audio_volume - 0.7).abs() < 1e-5);
+        assert!((loaded.audio_volume - Settings::default().audio_volume).abs() < 1e-5);
+        // A corrupt per-layer trim falls back to unity gain, not to the mix
+        // default — the point is an audible, neutral level.
         assert_eq!(loaded.audio_core, 1.0);
+        assert!((loaded.mouse_sens - DEFAULT_SENS).abs() < 1e-5);
         let _ = fs::remove_file(&path);
     }
 }

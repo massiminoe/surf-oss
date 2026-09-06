@@ -97,6 +97,9 @@ pub struct MenuRow {
     pub value: String,
     pub kind: RowKind,
     pub tone: RowTone,
+    /// The value column is a live text field: draw it framed so it reads as
+    /// somewhere you type rather than somewhere a number happens to sit.
+    pub editing: bool,
 }
 
 impl MenuRow {
@@ -141,6 +144,12 @@ impl MenuRow {
 
     pub fn with_tone(mut self, tone: RowTone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    /// Mark the value column as an open text field.
+    pub fn editing(mut self) -> Self {
+        self.editing = true;
         self
     }
 }
@@ -258,6 +267,20 @@ impl PanelLayout {
             return None;
         }
         Some(((mx - x0) / (x1 - x0)).clamp(0.0, 1.0))
+    }
+
+    /// Horizontal span of the value column — the right-aligned number at the
+    /// end of a row. Clicking here types a value instead of dragging one, so
+    /// it deliberately starts where [`Self::slider_track`] stops.
+    pub fn value_zone(&self) -> (f32, f32) {
+        let x1 = self.x + self.w - PANEL_PAD_X;
+        ((x1 - VALUE_GUTTER).max(self.x), x1)
+    }
+
+    /// Is `mx` over the value column?
+    pub fn over_value(&self, mx: f32) -> bool {
+        let (x0, x1) = self.value_zone();
+        mx >= x0 && mx <= x1
     }
 }
 
@@ -1510,11 +1533,33 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                         custom_glyphs: &[],
                     });
                 }
+                if row.editing {
+                    // Field box across the whole value column, so an empty
+                    // buffer still shows where the caret is. Cut *into* the
+                    // ground rather than lifting off it — an ink fill here
+                    // reads as a bright slab on a dark panel.
+                    let (vx0, vx1) = p.value_zone();
+                    let bx = vx0 - 8.0;
+                    let bw = vx1 - bx;
+                    let bh = value_lh + 9.0;
+                    let by = (y + (p.row_h - bh) * 0.5).floor();
+                    push_rect_px(&mut verts, bx, by, bw, bh, w, h, ground(0.85));
+                    for (rx, ry, rw, rh) in [
+                        (bx, by, bw, 1.0),
+                        (bx, by + bh - 1.0, bw, 1.0),
+                        (bx, by, 1.0, bh),
+                        (bx + bw - 1.0, by, 1.0, bh),
+                    ] {
+                        push_rect_px(&mut verts, rx, ry, rw, rh, w, h, accent(0.85));
+                    }
+                }
                 if !row.value.is_empty() {
                     let vw = line_width(&self.value_bufs[i]);
                     areas.push(TextArea {
                         buffer: &self.value_bufs[i],
-                        left: value_right - vw,
+                        // Inside the field box, the caret needs room off the
+                        // right border or it reads as part of the frame.
+                        left: value_right - vw - if row.editing { 7.0 } else { 0.0 },
                         top: y + (p.row_h - value_lh) * 0.5,
                         scale: 1.0,
                         bounds,
