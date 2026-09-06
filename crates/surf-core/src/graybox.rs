@@ -20,6 +20,16 @@ pub struct Tri {
     pub lm_c: [f32; 2],
     /// Texture-array layer. `0` = solid `color` (no albedo).
     pub tex: u32,
+    /// Second texture-array layer for two-texture displacement blends
+    /// (`WorldVertexTransition`); `0` = none. Mixed by `alpha` per vertex.
+    pub tex2: u32,
+    /// Per-vertex blend weight toward `tex2` (0..1).
+    pub alpha: [f32; 3],
+    /// Per-vertex linear light multiplier, applied on top of the lightmap
+    /// sample. World faces carry 1.0 (the lightmap is their light); static
+    /// props carry their baked per-vertex light (their lightmap texel is the
+    /// reserved "L = 1" texel).
+    pub light: [[f32; 3]; 3],
 }
 
 impl Tri {
@@ -36,6 +46,9 @@ impl Tri {
             lm_b: [0.0, 0.0],
             lm_c: [0.0, 0.0],
             tex: 0,
+            tex2: 0,
+            alpha: [0.0; 3],
+            light: [[1.0; 3]; 3],
         }
     }
 }

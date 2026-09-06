@@ -9,16 +9,27 @@ use crate::pak::{normalize_path, PakFs};
 use crate::stock::StockFs;
 use crate::vmt;
 
-/// Side length of each texture-array layer (power of two).
+/// Side length of the fallback / graybox texture-array layer. A real map picks
+/// its own size in [`MaterialBank::into_atlas`].
 pub const TEX_LAYER_SIZE: u32 = 256;
 
-/// GPU-ready albedo atlas: `layer_count` slices of `TEX_LAYER_SIZE²` RGBA8.
+/// Largest layer side a map may pick. Most corpus VTFs are 512 or 1024; the
+/// handful of 2048/4096 ones are downscaled.
+pub const MAX_LAYER_SIZE: u32 = 1024;
+
+/// GPU-ready albedo atlas: `layer_count` slices of `layer_size²` RGBA8, with
+/// a full mip chain.
 #[derive(Clone, Debug)]
 pub struct MaterialAtlas {
     pub layer_size: u32,
     pub layer_count: u32,
-    /// Packed as layer-major: `[layer0 | layer1 | …]` each `layer_size² * 4` bytes.
+    /// Mip level 0, packed layer-major: `[layer0 | layer1 | …]` each
+    /// `layer_size² * 4` bytes.
     pub rgba: Vec<u8>,
+    /// Mip levels 1.. (each half the previous side, down to 1×1), packed the
+    /// same way. Without them a 1024² texture seen from 2000 units away is
+    /// point-sampled and shimmers with every camera move.
+    pub mips: Vec<Vec<u8>>,
     /// How many materials resolved to a real VTF (layer > 0).
     pub textured_count: u32,
     /// Unique material names without a real VTF (may use a generated placeholder).
@@ -47,6 +58,7 @@ impl MaterialAtlas {
             layer_size: TEX_LAYER_SIZE,
             layer_count: 1,
             rgba: vec![255u8; px],
+            mips: Vec::new(),
             textured_count: 0,
             missing_count: 0,
             missing_names: Vec::new(),
@@ -162,7 +174,7 @@ impl MaterialBank {
                     id
                 } else {
                     let id = self.layers.len() as u32;
-                    let mut layer = resize_layer(image);
+                    let mut layer = cap_layer(image);
                     // An additive layer keeps its VTF alpha only when the
                     // material also asked for it (`$translucent`/`$alphatest`);
                     // the additive pass multiplies rgb by it, nothing else does.
@@ -181,7 +193,7 @@ impl MaterialBank {
             Some(LoadedAlbedo::Placeholder(img)) => {
                 self.note_missing(&key);
                 let id = self.layers.len() as u32;
-                let mut layer = resize_layer(img);
+                let mut layer = cap_layer(img);
                 force_opaque(&mut layer);
                 apply_tint(&mut layer, tint);
                 self.layers.push(layer);
@@ -204,6 +216,33 @@ impl MaterialBank {
             }
         };
         self.by_material.insert(key, id);
+        id
+    }
+
+    /// The `$basetexture2` layer of a two-texture displacement material
+    /// (`WorldVertexTransition`), or 0 when it has none. Untinted, opaque:
+    /// the blend weight is per vertex, not in the texture.
+    pub fn resolve_secondary(&mut self, material_name: &str) -> u32 {
+        let key = normalize_path(material_name);
+        let get = |p: &str| self.get_bytes(p);
+        let Some(bt) = vmt::resolve_basetexture2(&get, &key) else {
+            return 0;
+        };
+        let texture_path = normalize_path(&format!("materials/{bt}.vtf"));
+        let cache_key = format!("{texture_path}#000#");
+        if let Some(&id) = self.by_texture.get(&cache_key) {
+            return id;
+        }
+        let Some(image) = self.decode_vtf(&texture_path) else {
+            return 0;
+        };
+        let id = self.layers.len() as u32;
+        let mut layer = cap_layer(image);
+        force_opaque(&mut layer);
+        self.layers.push(layer);
+        self.additive.push(false);
+        self.translucent.push(false);
+        self.by_texture.insert(cache_key, id);
         id
     }
 
@@ -244,10 +283,9 @@ impl MaterialBank {
         if let Some(kind) = kind {
             let rgb = match kind {
                 vmt::SeeThrough::Water => image::Rgba([38, 82, 105, 255]),
-                // Props are unlit, and the shader doubles albedo to undo the
-                // lightmap scale — 196 here clipped to pure white. 120 lands
-                // just under 1.0 after that doubling.
-                vmt::SeeThrough::Refract => image::Rgba([120, 140, 152, 255]),
+                // Frosted white-blue; lit like everything else now, so it
+                // can read light without clipping.
+                vmt::SeeThrough::Refract => image::Rgba([196, 214, 222, 255]),
             };
             let px = RgbaImage::from_pixel(8, 8, rgb);
             return Some(LoadedAlbedo::Placeholder(DynamicImage::ImageRgba8(px)));
@@ -269,16 +307,36 @@ impl MaterialBank {
     }
 
     pub fn into_atlas(self) -> MaterialAtlas {
-        let layer_size = TEX_LAYER_SIZE;
         let layer_count = self.layers.len() as u32;
-        let mut rgba = Vec::with_capacity((layer_size * layer_size * 4 * layer_count) as usize);
-        for layer in self.layers {
-            rgba.extend_from_slice(layer.as_raw());
+        let layer_size = choose_layer_size(&self.layers);
+        let mut levels: Vec<Vec<u8>> = Vec::new();
+        let mut size = layer_size;
+        while size >= 1 {
+            levels.push(Vec::with_capacity((size * size * 4 * layer_count) as usize));
+            if size == 1 {
+                break;
+            }
+            size /= 2;
         }
+        for layer in self.layers {
+            let mut img = if layer.width() == layer_size && layer.height() == layer_size {
+                layer
+            } else {
+                image::imageops::resize(&layer, layer_size, layer_size, FilterType::Triangle)
+            };
+            levels[0].extend_from_slice(img.as_raw());
+            for level in levels.iter_mut().skip(1) {
+                let half = (img.width() / 2).max(1);
+                img = image::imageops::resize(&img, half, half, FilterType::Triangle);
+                level.extend_from_slice(img.as_raw());
+            }
+        }
+        let rgba = levels.remove(0);
         MaterialAtlas {
             layer_size,
             layer_count,
             rgba,
+            mips: levels,
             textured_count: self.textured_count,
             missing_count: self.missing_count,
             missing_names: self.missing_names,
@@ -323,13 +381,9 @@ fn force_opaque(img: &mut RgbaImage) {
 fn flat_color_layer(linear: [f32; 3]) -> RgbaImage {
     let mut px = [255u8; 4];
     for (i, c) in linear.iter().enumerate() {
-        px[i] = (linear_to_srgb((c * 0.5).clamp(0.0, 1.0)) * 255.0).round() as u8;
+        px[i] = (linear_to_srgb(c.clamp(0.0, 1.0)) * 255.0).round() as u8;
     }
-    RgbaImage::from_pixel(
-        TEX_LAYER_SIZE,
-        TEX_LAYER_SIZE,
-        image::Rgba([px[0], px[1], px[2], 255]),
-    )
+    RgbaImage::from_pixel(4, 4, image::Rgba([px[0], px[1], px[2], 255]))
 }
 
 /// A/B lever, same convention as `MX_SURF_NO_PHY` / `MX_SURF_NO_FIELDS`:
@@ -410,10 +464,59 @@ fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
+/// Decoded VTF → RGBA8 no larger than `MAX_LAYER_SIZE` on a side. Layers are
+/// kept at their own size until [`MaterialBank::into_atlas`] picks the array
+/// size for the whole map.
+fn cap_layer(img: DynamicImage) -> RgbaImage {
+    let (w, h) = (img.width(), img.height());
+    if w > MAX_LAYER_SIZE || h > MAX_LAYER_SIZE {
+        let s = MAX_LAYER_SIZE;
+        img.resize_exact(s, s, FilterType::Triangle).into_rgba8()
+    } else {
+        img.into_rgba8()
+    }
+}
+
+/// Every layer of the array shares one size. 1024² RGBA with mips is 5.6 MB a
+/// layer, so a map with many materials steps down to 512 rather than hold a
+/// gigabyte of texture; `MX_SURF_TEX_SIZE` overrides.
+fn choose_layer_size(layers: &[RgbaImage]) -> u32 {
+    if let Some(v) = std::env::var("MX_SURF_TEX_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        if v.is_power_of_two() && (16..=4096).contains(&v) {
+            return v;
+        }
+    }
+    let largest = layers
+        .iter()
+        .map(|l| l.width().max(l.height()))
+        .max()
+        .unwrap_or(TEX_LAYER_SIZE)
+        .next_power_of_two()
+        .clamp(TEX_LAYER_SIZE, MAX_LAYER_SIZE);
+    let mut size = largest;
+    let budget: u64 = 640 << 20;
+    while size > TEX_LAYER_SIZE {
+        let bytes = layers.len() as u64 * (size as u64 * size as u64 * 4) * 4 / 3;
+        if bytes <= budget {
+            break;
+        }
+        size /= 2;
+    }
+    size
+}
+
+/// Sky faces: six layers at `SKY_LAYER_SIZE`. Skies ship at 1024–2048 a face
+/// and fill the whole background, so they get their own, larger size.
 fn resize_layer(img: DynamicImage) -> RgbaImage {
-    img.resize_exact(TEX_LAYER_SIZE, TEX_LAYER_SIZE, FilterType::Triangle)
+    img.resize_exact(SKY_LAYER_SIZE, SKY_LAYER_SIZE, FilterType::Triangle)
         .into_rgba8()
 }
+
+/// Side of each skybox face layer.
+pub const SKY_LAYER_SIZE: u32 = 1024;
 
 /// Six skybox faces: ft, bk, lf, rt, up, dn (Source order).
 #[derive(Clone, Debug)]
@@ -426,7 +529,7 @@ pub struct SkyboxAtlas {
 impl SkyboxAtlas {
     pub fn none() -> Self {
         Self {
-            layer_size: TEX_LAYER_SIZE,
+            layer_size: SKY_LAYER_SIZE,
             rgba: Vec::new(),
         }
     }
@@ -440,8 +543,8 @@ impl SkyboxAtlas {
         let suffixes = ["ft", "bk", "lf", "rt", "up", "dn"];
         let mut layers = Vec::with_capacity(6);
         let fallback = RgbaImage::from_pixel(
-            TEX_LAYER_SIZE,
-            TEX_LAYER_SIZE,
+            SKY_LAYER_SIZE,
+            SKY_LAYER_SIZE,
             image::Rgba([140, 180, 220, 255]),
         );
         let mut any = false;
@@ -456,12 +559,12 @@ impl SkyboxAtlas {
         if !any {
             return Self::none();
         }
-        let mut rgba = Vec::with_capacity((TEX_LAYER_SIZE * TEX_LAYER_SIZE * 4 * 6) as usize);
+        let mut rgba = Vec::with_capacity((SKY_LAYER_SIZE * SKY_LAYER_SIZE * 4 * 6) as usize);
         for layer in layers {
             rgba.extend_from_slice(layer.as_raw());
         }
         Self {
-            layer_size: TEX_LAYER_SIZE,
+            layer_size: SKY_LAYER_SIZE,
             rgba,
         }
     }

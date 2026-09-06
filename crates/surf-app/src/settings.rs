@@ -67,8 +67,12 @@ impl Default for Settings {
             mouse_sens: DEFAULT_SENS,
             show_keys: false,
             vsync: false,
-            brightness: 0.97,
-            shadow_lift: 0.5,
+            // Neutral: the world shader now reproduces Source's own
+            // `albedo * L`, so 1.0 / 0.0 *is* CS:S. (2026-09-06 — Max's 0.97 /
+            // 0.5 were tuned against the old 4×-overbright, lift-to-white
+            // pipeline and mean something else here.)
+            brightness: 1.0,
+            shadow_lift: 0.0,
             ghost: GHOST_PB.into(),
             ghost_trail: true,
             audio: true,
@@ -254,8 +258,8 @@ mod tests {
         let d = Settings::default();
         assert!((d.mouse_sens - 2.57).abs() < 1e-5);
         assert!(!d.vsync);
-        assert!((d.brightness - 0.97).abs() < 1e-5);
-        assert!((d.shadow_lift - 0.5).abs() < 1e-5);
+        assert!((d.brightness - 1.0).abs() < 1e-5);
+        assert!((d.shadow_lift - 0.0).abs() < 1e-5);
         assert_eq!(d.ghost, GHOST_PB);
         assert!(d.ghost_trail);
         assert!(!d.show_keys);

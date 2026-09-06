@@ -49,18 +49,20 @@ struct ViewParams {
 
 struct VsIn {
     @location(0) position: vec3<f32>,
-    @location(1) color: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-    @location(3) tex: f32,
-    @location(4) lm_uv: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) lm_uv: vec2<f32>,
+    @location(3) light: vec4<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) tex: vec2<u32>,
 }
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) color: vec4<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) tex: f32,
+    @location(2) @interpolate(flat) tex: vec2<u32>,
     @location(3) lm_uv: vec2<f32>,
     @location(4) world_pos: vec3<f32>,
+    @location(5) light: vec3<f32>,
 }
 
 @vertex
@@ -72,28 +74,48 @@ fn vs_main(v: VsIn) -> VsOut {
     out.tex = v.tex;
     out.lm_uv = v.lm_uv;
     out.world_pos = v.position;
+    out.light = v.light.rgb;
     return out;
+}
+
+// Source's lighting equation, in linear: `albedo * L`. The lightmap page holds
+// `L / 2` (overbright headroom), the vertex carries a linear multiplier (1 for
+// world faces, the baked per-vertex light for a static prop, whose lightmap
+// texel is the reserved "L = 1"). `shadow_lift` and `exposure` are the user's
+// own knobs on top; at 0 / 1 the result is the engine's.
+fn surface_light(v: VsOut) -> vec3<f32> {
+    let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb * 2.0;
+    let l = lm * v.light;
+    return mix(l, max(l, vec3<f32>(1.0, 1.0, 1.0)), clamp(params.shadow_lift, 0.0, 1.0));
+}
+
+// Albedo with the two-texture displacement blend (`WorldVertexTransition`):
+// `tex.y` is the second layer, `color.a` the per-vertex weight toward it.
+fn surface_albedo(v: VsOut) -> vec4<f32> {
+    let layer = i32(v.tex.x);
+    let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+    if (v.tex.y == 0u) {
+        return sample;
+    }
+    let second = textureSample(albedo, albedo_samp, v.uv, i32(v.tex.y));
+    return vec4<f32>(mix(sample.rgb, second.rgb, v.color.a), sample.a);
 }
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
-    let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb;
-    // Lift dark luxels toward white without flattening bright areas as hard.
-    let lifted = mix(lm, vec3<f32>(1.0, 1.0, 1.0), clamp(params.shadow_lift, 0.0, 1.0));
-    let light = max(lifted, vec3<f32>(0.05, 0.05, 0.05));
-    let layer = i32(v.tex + 0.5);
+    let light = surface_light(v);
     var base: vec3<f32>;
-    if (layer <= 0) {
-        base = v.color * light;
+    if (v.tex.x == 0u) {
+        base = v.color.rgb * light;
     } else {
-        let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+        let sample = surface_albedo(v);
         // Cutout test. surf-map forces alpha to 1 on every layer whose VMT did
         // not declare $alphatest/$translucent, so this only bites foliage cards,
         // grates and fences — the materials that mean it.
         if (sample.a < 0.5) {
             discard;
         }
-        base = sample.rgb * light * 2.0;
+        base = sample.rgb * light;
     }
     return vec4<f32>(base * params.exposure, 1.0);
 }
@@ -104,15 +126,12 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
 // instead of ending in a hard edge halfway along itself.
 @fragment
 fn fs_translucent(v: VsOut) -> @location(0) vec4<f32> {
-    let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb;
-    let lifted = mix(lm, vec3<f32>(1.0, 1.0, 1.0), clamp(params.shadow_lift, 0.0, 1.0));
-    let light = max(lifted, vec3<f32>(0.05, 0.05, 0.05));
-    let layer = i32(v.tex + 0.5);
-    if (layer <= 0) {
-        return vec4<f32>(v.color * light * params.exposure, 1.0);
+    let light = surface_light(v);
+    if (v.tex.x == 0u) {
+        return vec4<f32>(v.color.rgb * light * params.exposure, 1.0);
     }
-    let sample = textureSample(albedo, albedo_samp, v.uv, layer);
-    let base = sample.rgb * light * 2.0;
+    let sample = surface_albedo(v);
+    let base = sample.rgb * light;
     return vec4<f32>(base * params.exposure, sample.a);
 }
 
@@ -122,12 +141,11 @@ fn fs_translucent(v: VsOut) -> @location(0) vec4<f32> {
 // card. Unlit, no lightmap, no cutout — the blend state does the work.
 @fragment
 fn fs_additive(v: VsOut) -> @location(0) vec4<f32> {
-    let layer = i32(v.tex + 0.5);
     var rgb: vec3<f32>;
-    if (layer <= 0) {
-        rgb = v.color;
+    if (v.tex.x == 0u) {
+        rgb = v.color.rgb;
     } else {
-        let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+        let sample = textureSample(albedo, albedo_samp, v.uv, i32(v.tex.x));
         rgb = sample.rgb * sample.a;
     }
     return vec4<f32>(rgb * params.exposure, 1.0);
@@ -155,35 +173,9 @@ fn world_pipeline(
             module: shader,
             entry_point: Some("vs_main"),
             buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+                array_stride: MeshVertex::STRIDE,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute {
-                        offset: 0,
-                        shader_location: 0,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: 12,
-                        shader_location: 1,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: 24,
-                        shader_location: 2,
-                        format: wgpu::VertexFormat::Float32x2,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: 32,
-                        shader_location: 3,
-                        format: wgpu::VertexFormat::Float32,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: 36,
-                        shader_location: 4,
-                        format: wgpu::VertexFormat::Float32x2,
-                    },
-                ],
+                attributes: &MeshVertex::ATTRIBUTES,
             }],
             compilation_options: Default::default(),
         },

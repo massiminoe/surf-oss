@@ -88,6 +88,9 @@ fn append_model_faces(
                 lm_b: lightmaps.lm_uv(bsp, face_idx, face, tri[1]),
                 lm_c: lightmaps.lm_uv(bsp, face_idx, face, tri[2]),
                 tex: tex_layer,
+                tex2: 0,
+                alpha: [0.0; 3],
+                light: [[1.0; 3]; 3],
             });
         }
     }

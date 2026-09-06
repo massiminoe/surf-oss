@@ -22,7 +22,7 @@ pub struct LeafBrushRange {
 
 /// Reads one lump, transparently decompressing Source's per-lump LZMA.
 /// Returns the bytes and the lump's version.
-fn read_lump(bsp_bytes: &[u8], index: usize) -> Result<(Vec<u8>, i32), String> {
+pub(crate) fn read_lump(bsp_bytes: &[u8], index: usize) -> Result<(Vec<u8>, i32), String> {
     if bsp_bytes.len() < 8 + 64 * 16 + 4 {
         return Err("file too small for BSP header".into());
     }

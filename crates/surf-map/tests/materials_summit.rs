@@ -43,10 +43,13 @@ fn summit_loads_pakfile_albedos() {
         .filter(|uv| uv[0] < -0.01 || uv[0] > 1.01 || uv[1] < -0.01 || uv[1] > 1.01)
         .count();
     assert_eq!(bad, 0, "lm UVs outside 0..1 after normalize");
-    // Reserved white texel for unlit faces — atlas (0,0) area should be bright.
+    // Reserved "L = 1" texel for faces without luxels (and for static props,
+    // whose light is per vertex): atlas (0,0) stores sRGB(0.5), which the
+    // shader's overbright ×2 turns back into unity.
     let px = &map.lightmaps.rgba[0..4];
+    let unit = surf_map::UNIT_LIGHT_BYTE;
     assert!(
-        px[0] > 200 && px[1] > 200 && px[2] > 200,
-        "atlas origin should be reserved white, got {px:?}"
+        px[0] == unit && px[1] == unit && px[2] == unit,
+        "atlas origin should be the reserved unit-light texel {unit}, got {px:?}"
     );
 }

@@ -8,6 +8,24 @@ pub fn resolve_basetexture(
     get: &impl Fn(&str) -> Option<Vec<u8>>,
     material_name: &str,
 ) -> Option<String> {
+    resolve_texture_key(get, material_name, "$basetexture")
+}
+
+/// `$basetexture2` — the second layer of a `WorldVertexTransition`
+/// displacement material, blended in by per-vertex alpha. `None` for every
+/// single-texture material.
+pub fn resolve_basetexture2(
+    get: &impl Fn(&str) -> Option<Vec<u8>>,
+    material_name: &str,
+) -> Option<String> {
+    resolve_texture_key(get, material_name, "$basetexture2")
+}
+
+fn resolve_texture_key(
+    get: &impl Fn(&str) -> Option<Vec<u8>>,
+    material_name: &str,
+    key: &str,
+) -> Option<String> {
     let mat = normalize_path(material_name);
     let mut vmt_path = format!("materials/{mat}.vmt");
     let mut depth = 0;
@@ -19,12 +37,12 @@ pub fn resolve_basetexture(
             if !vmt_path.ends_with(".vmt") {
                 vmt_path = format!("materials/{}.vmt", strip_materials_prefix(&vmt_path));
             }
-            if let Some(bt) = find_basetexture(&text) {
+            if let Some(bt) = find_key_value(&text, key) {
                 return Some(normalize_path(&bt));
             }
             continue;
         }
-        if let Some(bt) = find_basetexture(&text) {
+        if let Some(bt) = find_key_value(&text, key) {
             return Some(normalize_path(&bt));
         }
         return None;
@@ -219,10 +237,6 @@ fn decode_text(bytes: &[u8]) -> Option<String> {
         .or_else(|| Some(bytes.iter().map(|&b| b as char).collect()))
 }
 
-fn find_basetexture(text: &str) -> Option<String> {
-    find_key_value(text, "$basetexture")
-}
-
 fn first_token(text: &str) -> &str {
     let text = text.trim_start();
     if let Some(rest) = text.strip_prefix('"') {
@@ -303,7 +317,7 @@ mod tests {
     #[test]
     fn parses_quoted_basetexture() {
         let t = r#"LightmappedGeneric { $basetexture "castle/step01" }"#;
-        assert_eq!(find_basetexture(t).as_deref(), Some("castle/step01"));
+        assert_eq!(find_key_value(t, "$basetexture").as_deref(), Some("castle/step01"));
     }
 
     #[test]
@@ -313,7 +327,7 @@ mod tests {
             $basetexture "elly/nature_moss3_2k_albedo"
         }"#;
         assert_eq!(
-            find_basetexture(t).as_deref(),
+            find_key_value(t, "$basetexture").as_deref(),
             Some("elly/nature_moss3_2k_albedo")
         );
     }

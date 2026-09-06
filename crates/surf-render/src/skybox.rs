@@ -14,14 +14,16 @@ struct Camera { view_proj: mat4x4<f32> }
 
 struct VsIn {
     @location(0) position: vec3<f32>,
-    @location(1) color: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-    @location(3) tex: f32,
+    @location(1) uv: vec2<f32>,
+    @location(2) lm_uv: vec2<f32>,
+    @location(3) light: vec4<f32>,
+    @location(4) color: vec4<f32>,
+    @location(5) tex: vec2<u32>,
 }
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) tex: f32,
+    @location(1) @interpolate(flat) tex: u32,
 }
 
 @vertex
@@ -32,14 +34,13 @@ fn vs_main(v: VsIn) -> VsOut {
     clip.z = 0.0; // far plane under reversed-Z
     out.clip = clip;
     out.uv = v.uv;
-    out.tex = v.tex;
+    out.tex = v.tex.x;
     return out;
 }
 
 @fragment
 fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
-    let layer = i32(v.tex + 0.5);
-    return textureSample(sky, sky_samp, v.uv, layer);
+    return textureSample(sky, sky_samp, v.uv, i32(v.tex));
 }
 "#;
 
@@ -179,30 +180,9 @@ impl SkyboxRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+                    array_stride: MeshVertex::STRIDE,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 12,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 24,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 32,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32,
-                        },
-                    ],
+                    attributes: &MeshVertex::ATTRIBUTES,
                 }],
                 compilation_options: Default::default(),
             },
@@ -312,14 +292,16 @@ fn sky_cube_mesh() -> (Vec<MeshVertex>, Vec<u32>) {
         };
         let base = verts.len() as u32;
         for i in 0..4 {
-            verts.push(MeshVertex {
-                position: corners[i],
-                color: [1.0, 1.0, 1.0],
-                uv: uvs[i],
-                tex: layer as f32,
-                lm_uv: [0.0, 0.0],
-                _pad: 0.0,
-            });
+            verts.push(MeshVertex::new(
+                corners[i],
+                uvs[i],
+                [0.0, 0.0],
+                [1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0],
+                0.0,
+                layer as u32,
+                0,
+            ));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -433,8 +415,8 @@ mod tests {
                     ];
                     let (ua, va) = uv_at(&quads[a], pt);
                     let (ub, vb) = uv_at(&quads[b], pt);
-                    let ca = texel(atlas, quads[a][0].tex as usize, ua, va);
-                    let cb = texel(atlas, quads[b][0].tex as usize, ub, vb);
+                    let ca = texel(atlas, quads[a][0].tex[0] as usize, ua, va);
+                    let cb = texel(atlas, quads[b][0].tex[0] as usize, ub, vb);
                     sum += ((ca[0] - cb[0]).abs() + (ca[1] - cb[1]).abs() + (ca[2] - cb[2]).abs())
                         as f64
                         / 3.0;

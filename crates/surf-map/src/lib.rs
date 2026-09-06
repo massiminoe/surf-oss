@@ -4,6 +4,7 @@
 //! (including PLAYERCLIP). Trigger bmodels are never world-solid.
 //! Materials: pakfile VMT/VTF, optional local CS:S stock (`MX_SURF_GAME_DIR`).
 
+mod ambient;
 mod collision;
 pub mod disp;
 mod entities;
@@ -17,6 +18,7 @@ mod pak;
 mod phy;
 mod stock;
 mod vmt;
+mod world_lights;
 
 use std::fmt;
 use std::path::Path;
@@ -31,9 +33,9 @@ pub use entities::{
     TeleportTrigger,
 };
 pub use fields::{FieldEffects, FieldState};
-pub use lightmap::LightmapAtlas;
+pub use lightmap::{LightmapAtlas, UNIT_LIGHT_BYTE};
 pub use materials::{MaterialAtlas, SkyboxAtlas};
-pub use models::PropInstance;
+pub use models::{PropInstance, PropLighting};
 
 #[derive(Debug)]
 pub enum MapError {
@@ -155,11 +157,12 @@ impl LoadedMap {
         let mut mesh = mesh::build_mesh(&bsp, &ents.render_models, &mut materials, &mut lightmaps);
         mesh.tris.extend(disps.render);
         let (_, render_bounds) =
-            models::append_static_props(&bsp, &mut materials, &mut mesh, &skybox_props);
+            models::append_static_props(&bsp, data, &mut materials, &mut mesh, &skybox_props);
         for prop in &mut props {
-            if let Some((range, bounds)) = render_bounds.get(prop.index) {
+            if let Some((range, bounds, lighting)) = render_bounds.get(prop.index) {
                 prop.render_tris = range.clone();
                 prop.render_bounds = *bounds;
+                prop.lighting = *lighting;
             }
         }
         let materials = materials.into_atlas();

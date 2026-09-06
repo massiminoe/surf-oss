@@ -81,7 +81,7 @@ pub fn extract_displacements(
         if corners.len() != 4 {
             continue;
         }
-        let Some(verts) = displaced_grid(bsp, disp, &corners) else {
+        let Some((verts, alphas)) = displaced_grid(bsp, disp, &corners) else {
             continue;
         };
 
@@ -91,23 +91,31 @@ pub fn extract_displacements(
         } else {
             None
         };
-        let (tex_layer, color, tex_h) = if let Some(tex) = tex_info {
+        let (tex_layer, tex2_layer, color, tex_h) = if let Some(tex) = tex_info {
             let tex_h = Handle::new(bsp, tex);
             let layer = materials.resolve(tex_h.name());
+            // `WorldVertexTransition`: the displacement paints between two
+            // textures with per-vertex alpha. Only meaningful with a real
+            // first layer.
+            let layer2 = if layer > 0 {
+                materials.resolve_secondary(tex_h.name())
+            } else {
+                0
+            };
             let color = face_color_fallback(tex_h.name());
-            (layer, color, Some(tex_h))
+            (layer, layer2, color, Some(tex_h))
         } else {
-            (0, [0.45, 0.50, 0.40], None)
+            (0, 0, [0.45, 0.50, 0.40], None)
         };
 
         let steps = 2usize.pow(disp.power as u32);
         let index = |x: usize, y: usize| y * (steps + 1) + x;
         for x in 0..steps {
             for y in 0..steps {
-                let v00 = verts[index(x, y)];
-                let v10 = verts[index(x + 1, y)];
-                let v01 = verts[index(x, y + 1)];
-                let v11 = verts[index(x + 1, y + 1)];
+                let v00 = (verts[index(x, y)], alphas[index(x, y)]);
+                let v10 = (verts[index(x + 1, y)], alphas[index(x + 1, y)]);
+                let v01 = (verts[index(x, y + 1)], alphas[index(x, y + 1)]);
+                let v11 = (verts[index(x + 1, y + 1)], alphas[index(x + 1, y + 1)]);
                 // Source splits each quad on a checkerboard
                 // (`CCoreDispInfo::GenerateCollisionSurface`): an odd
                 // `row*width + col` — i.e. odd x+y, width being odd — runs the
@@ -132,11 +140,13 @@ pub fn extract_displacements(
                         face_idx,
                         face_ref,
                         lightmaps,
-                        a,
-                        b,
-                        c,
+                        a.0,
+                        b.0,
+                        c.0,
+                        [a.1, b.1, c.1],
                         color,
                         tex_layer,
+                        tex2_layer,
                         tex_h.as_ref(),
                     );
                 }
@@ -171,7 +181,7 @@ fn displaced_grid(
     bsp: &Bsp,
     disp: &vbsp::DisplacementInfo,
     corners_in: &[Vector],
-) -> Option<Vec<Vec3>> {
+) -> Option<(Vec<Vec3>, Vec<f32>)> {
     let mut corners: [Vector; 4] = [
         corners_in[0],
         corners_in[1],
@@ -204,6 +214,7 @@ fn displaced_grid(
     }
 
     let mut out = Vec::with_capacity(steps * steps);
+    let mut alphas = Vec::with_capacity(steps * steps);
     let mut vi = 0usize;
     for x in 0..steps {
         for y in 0..steps {
@@ -220,10 +231,12 @@ fn displaced_grid(
                 base.y + offset.y,
                 base.z + offset.z,
             ));
+            // Hammer paints blend alpha 0..255 per displacement vertex.
+            alphas.push((dvert.alpha / 255.0).clamp(0.0, 1.0));
             vi += 1;
         }
     }
-    Some(out)
+    Some((out, alphas))
 }
 
 fn push_tri(
@@ -239,8 +252,10 @@ fn push_tri(
     a: Vec3,
     b: Vec3,
     c: Vec3,
+    alpha: [f32; 3],
     color: [f32; 3],
     tex: u32,
+    tex2: u32,
     tex_h: Option<&Handle<'_, vbsp::TextureInfo>>,
 ) {
     let col = if hull_solid {
@@ -296,6 +311,9 @@ fn push_tri(
         lm_b,
         lm_c,
         tex,
+        tex2,
+        alpha,
+        light: [[1.0; 3]; 3],
     });
     if let Some(col) = col {
         collision.push(col);

@@ -53,6 +53,22 @@ pub struct PropInstance {
     /// `bounds`: a `.phy` hull is a simplified shell, and a non-solid prop has
     /// no collision at all yet still occupies the view.
     pub render_bounds: Aabb,
+    /// Where the prop's per-vertex light came from.
+    pub lighting: PropLighting,
+}
+
+/// How a drawn static prop is lit. Source never lightmaps a prop: vrad bakes
+/// per-vertex light into `sp_<index>.vhv` in the pakfile when the map was
+/// compiled with `-StaticPropLighting`, and otherwise the engine lights the
+/// model from its leaf's ambient cube (plus local lights we do not model).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropLighting {
+    /// Not drawn (skybox, undecodable) or lit at unity.
+    Unlit,
+    /// Per-vertex light from the map's `.vhv`.
+    Baked,
+    /// Ambient cube of the leaf at the prop origin, per vertex normal.
+    Ambient,
 }
 
 /// Component-wise bounds accumulator. `surf-core`'s `Vec3` deliberately has no
@@ -90,8 +106,21 @@ impl Bounds {
 #[derive(Clone)]
 struct LocalTri {
     positions: [Vec3; 3],
+    normals: [Vec3; 3],
     uvs: [[f32; 2]; 3],
+    /// Hardware vertex index (strip-group upload order) — the `.vhv` join key.
+    vert_ids: [u32; 3],
     texture: u32,
+}
+
+/// A decoded model: its draw triangles plus the vertex count the `.vhv` has to
+/// match before its colours can be trusted.
+struct DecodedModel {
+    tris: Vec<LocalTri>,
+    vertex_count: usize,
+    /// Hardware (strip-group order) vertex count of LOD 0 — the `.vhv` join.
+    /// MDL `illumposition`, model space: where Source samples ambient light.
+    illumination_position: Vec3,
 }
 
 /// Appends every decodable static prop to the draw mesh, and reports the world
@@ -165,17 +194,37 @@ pub fn skybox_prop_mask(bsp: &Bsp, leaf_areas: &[u16], sky_area: Option<u16>) ->
 
 pub fn append_static_props(
     bsp: &Bsp,
+    bsp_bytes: &[u8],
     materials: &mut MaterialBank,
     mesh: &mut GrayboxMesh,
     skybox: &[bool],
-) -> (usize, Vec<(std::ops::Range<usize>, Aabb)>) {
-    let mut cache: HashMap<u16, Option<Vec<LocalTri>>> = HashMap::new();
+) -> (usize, Vec<(std::ops::Range<usize>, Aabb, PropLighting)>) {
+    let mut cache: HashMap<u16, Option<DecodedModel>> = HashMap::new();
     let mut added = 0;
-    let mut render_bounds: Vec<(std::ops::Range<usize>, Aabb)> =
-        vec![
-            (0..0, Aabb::from_mins_maxs(Vec3::ZERO, Vec3::ZERO));
-            bsp.static_props.props.props.len()
-        ];
+    let mut render_bounds: Vec<(std::ops::Range<usize>, Aabb, PropLighting)> = vec![
+        (
+            0..0,
+            Aabb::from_mins_maxs(Vec3::ZERO, Vec3::ZERO),
+            PropLighting::Unlit
+        );
+        bsp.static_props.props.props.len()
+    ];
+    let ambient = if std::env::var_os("MX_SURF_NO_PROP_LIGHT").is_some() {
+        None
+    } else {
+        crate::ambient::AmbientCubes::parse(bsp_bytes)
+    };
+    let baked_allowed = std::env::var_os("MX_SURF_NO_PROP_LIGHT").is_none()
+        && std::env::var_os("MX_SURF_NO_VHV").is_none();
+    let world_lights = if ambient.is_some() {
+        crate::world_lights::WorldLights::parse(bsp_bytes)
+    } else {
+        crate::world_lights::WorldLights::default()
+    };
+    let sun = world_lights.sun();
+    // The lightmap baker reserves its first texel as "L = 1" for geometry
+    // whose light is not in the atlas; a prop's light rides per vertex.
+    let unit_lm = [0.5, 0.5];
 
     for (prop_index, prop) in bsp.static_props.props.props.iter().enumerate() {
         if skybox.get(prop_index).copied().unwrap_or(false) {
@@ -192,20 +241,89 @@ pub fn append_static_props(
             let decoded = decode_model(materials, model_name.as_str());
             cache.insert(model_type, decoded);
         }
-        let Some(local_tris) = cache.get(&model_type).and_then(Option::as_ref) else {
+        let Some(decoded) = cache.get(&model_type).and_then(Option::as_ref) else {
             continue;
         };
 
         let origin = Vec3::new(prop.origin.x, prop.origin.y, prop.origin.z);
+        let baked = if baked_allowed {
+            materials
+                .get_bytes(&format!("sp_{prop_index}.vhv"))
+                .and_then(|b| decode_vhv(&b, decoded.vertex_count))
+        } else {
+            None
+        };
+        let cube = if baked.is_none() {
+            ambient.as_ref().and_then(|a| {
+                // Source samples the cube at the model's illumination position.
+                // A prop whose origin is sunk into the ground (rocks, corals)
+                // lands in a solid leaf, whose cube is all zeros; walk upward
+                // until a lit leaf answers.
+                let illum = origin + rotate_source(decoded.illumination_position, prop.angles);
+                [0.0, 8.0, 32.0, 96.0, 256.0]
+                    .into_iter()
+                    .filter_map(|dz| a.cube_at(bsp_bytes, [illum.x, illum.y, illum.z + dz]))
+                    .find(|c| c.iter().flatten().any(|v| *v > 0.0))
+                    .or_else(|| a.average())
+            })
+        } else {
+            None
+        };
+        let locals = if cube.is_some() {
+            world_lights.local_lights_at(origin)
+        } else {
+            Vec::new()
+        };
+        // Direct sun on an ambient-lit prop, gated by whether this cube can
+        // see the sky in the sun's direction (see `parse_sun`).
+        let sun_here = match (&cube, &sun) {
+            (Some(cube), Some(sun)) if sun.visible_from(cube) => Some(sun),
+            _ => None,
+        };
+        let lighting = if baked.is_some() {
+            PropLighting::Baked
+        } else if cube.is_some() {
+            PropLighting::Ambient
+        } else {
+            PropLighting::Unlit
+        };
         let mut bounds = Bounds::new();
         let draw_start = mesh.tris.len();
-        for local in local_tris {
+        for local in &decoded.tris {
             let a = origin + rotate_source(local.positions[0], prop.angles);
             let b = origin + rotate_source(local.positions[1], prop.angles);
             let c = origin + rotate_source(local.positions[2], prop.angles);
             bounds.add(a);
             bounds.add(b);
             bounds.add(c);
+            let mut light = [[1.0f32; 3]; 3];
+            if let Some(colors) = &baked {
+                for (i, id) in local.vert_ids.iter().enumerate() {
+                    light[i] = colors[*id as usize];
+                }
+            } else if let Some(cube) = &cube {
+                for (i, n) in local.normals.iter().enumerate() {
+                    let wn = rotate_source(*n, prop.angles);
+                    light[i] = crate::ambient::eval(cube, [wn.x, wn.y, wn.z]);
+                    if let Some(sun) = sun_here {
+                        let lambert = wn.dot(sun.to_sun).max(0.0);
+                        for c in 0..3 {
+                            light[i][c] += sun.color[c] * lambert;
+                        }
+                    }
+                    let p = origin + rotate_source(local.positions[i], prop.angles);
+                    for wl in &locals {
+                        let lambert = wn.dot(wl.direction_from(p)).max(0.0);
+                        if lambert <= 0.0 {
+                            continue;
+                        }
+                        let e = wl.irradiance_at(p);
+                        for c in 0..3 {
+                            light[i][c] += e[c] * lambert;
+                        }
+                    }
+                }
+            }
             mesh.tris.push(Tri {
                 a,
                 b,
@@ -214,17 +332,98 @@ pub fn append_static_props(
                 uv_a: local.uvs[0],
                 uv_b: local.uvs[1],
                 uv_c: local.uvs[2],
-                // LightmapBaker reserves its first texel as white for unlit geometry.
-                lm_a: [0.5, 0.5],
-                lm_b: [0.5, 0.5],
-                lm_c: [0.5, 0.5],
+                lm_a: unit_lm,
+                lm_b: unit_lm,
+                lm_c: unit_lm,
                 tex: local.texture,
+                tex2: 0,
+                alpha: [0.0; 3],
+                light,
             });
             added += 1;
         }
-        render_bounds[prop_index] = (draw_start..mesh.tris.len(), bounds.finish(origin));
+        render_bounds[prop_index] = (draw_start..mesh.tris.len(), bounds.finish(origin), lighting);
+        if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() && prop_index % 25 == 0 {
+            let n = (mesh.tris.len() - draw_start).max(1) as f32 * 3.0;
+            let mean = mesh.tris[draw_start..]
+                .iter()
+                .flat_map(|t| t.light.iter())
+                .fold([0.0f32; 3], |a, l| [a[0] + l[0] / n, a[1] + l[1] / n, a[2] + l[2] / n]);
+            eprintln!(
+                "  PROPLIGHT #{prop_index} {model_name} {lighting:?} mean=({:.3},{:.3},{:.3}) cube+z={:?} sun={}",
+                mean[0],
+                mean[1],
+                mean[2],
+                cube.map(|c| c[4]),
+                sun_here.is_some()
+            );
+        }
     }
     (added, render_bounds)
+}
+
+/// vrad's per-vertex static-prop lighting (`sp_<index>.vhv`, "hardware
+/// verts"): a 40-byte header (version 2, checksum, vertex flags, vertex size,
+/// vertex count, mesh count), then 28-byte mesh headers (lod, vertex count,
+/// byte offset), then 4-byte BGRA colours. The header's vertex count spans
+/// every LOD; only the LOD-0 mesh headers are read, and vertex `i` of their
+/// concatenation is LOD-0 VVD vertex `i`, which is what `LocalTri::vert_ids`
+/// holds (vmdl resolves the VVD fixups to the LOD-0 list).
+///
+/// Colours are stored the way the LDR lightmap page is — gamma-space, halved
+/// for overbright — so a byte `b` means linear `(2b/255)^2.2`. Calibrated
+/// against summit, where the bytes top out at 125 on sunlit rocks (the
+/// lightmap's lit luxels reach L ≈ 1) — see the module doc on `lightmap.rs`.
+/// Byte order was settled the same way: read as RGB the torches lit blue and
+/// the leaf cubes around them are orange; as BGR they agree.
+fn decode_vhv(bytes: &[u8], expected_vertices: usize) -> Option<Vec<[f32; 3]>> {
+    if bytes.len() < 40 {
+        return None;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let version = u32_at(0);
+    let vertex_size = u32_at(12) as usize;
+    let mesh_count = u32_at(20) as usize;
+    if version != 2 || vertex_size != 4 || expected_vertices == 0 || mesh_count > 4096 {
+        return None;
+    }
+    let vertex_count = expected_vertices;
+    let mut out = Vec::with_capacity(vertex_count);
+    let decode = |b: u8| -> f32 { (2.0 * b as f32 / 255.0).powf(2.2) };
+    for m in 0..mesh_count {
+        let h = 40 + m * 28;
+        if h + 12 > bytes.len() {
+            return None;
+        }
+        let lod = u32_at(h);
+        let count = u32_at(h + 4) as usize;
+        let offset = u32_at(h + 8) as usize;
+        if lod != 0 {
+            continue;
+        }
+        if offset + count * 4 > bytes.len() {
+            return None;
+        }
+        for i in 0..count {
+            let px = &bytes[offset + i * 4..offset + i * 4 + 4];
+            out.push([decode(px[2]), decode(px[1]), decode(px[0])]);
+        }
+        if out.len() >= vertex_count {
+            break;
+        }
+    }
+    // An empty file (header count 0) is vrad saying "no vertex lighting for
+    // this one"; the ambient path covers it silently.
+    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() && out.len() < vertex_count && mesh_count > 0 {
+        eprintln!(
+            "  VHV lod0 colours {} < needed {} (header count {}, meshes {})",
+            out.len(),
+            vertex_count,
+            u32_at(16),
+            mesh_count
+        );
+    }
+    (out.len() >= vertex_count).then_some(out)
 }
 
 /// Collision for `solid=Physics` static props (cyberwave / MDL ramps).
@@ -269,6 +468,7 @@ pub fn extract_prop_collision(
                 render_tris: 0..0,
                 bounds: Aabb::from_mins_maxs(origin, origin),
                 render_bounds: Aabb::from_mins_maxs(origin, origin),
+            lighting: PropLighting::Unlit,
             });
             continue;
         }
@@ -293,6 +493,7 @@ pub fn extract_prop_collision(
                 bounds: Aabb::from_mins_maxs(origin, origin),
                 render_tris: 0..0,
                 render_bounds: Aabb::from_mins_maxs(origin, origin),
+            lighting: PropLighting::Unlit,
             });
             continue;
         };
@@ -326,6 +527,7 @@ pub fn extract_prop_collision(
                 bounds,
                 render_tris: 0..0,
                 render_bounds: Aabb::from_mins_maxs(origin, origin),
+            lighting: PropLighting::Unlit,
             });
             continue;
         }
@@ -396,6 +598,7 @@ pub fn extract_prop_collision(
             bounds,
             render_tris: 0..0,
             render_bounds: Aabb::from_mins_maxs(origin, origin),
+            lighting: PropLighting::Unlit,
         });
         if debug {
             eprintln!(
@@ -505,6 +708,7 @@ fn decode_prop_collision(materials: &mut MaterialBank, model_path: &str) -> Opti
         }
     }
     let tris = decode_model(materials, model_path)?
+        .tris
         .into_iter()
         .map(|t| t.positions)
         .collect();
@@ -514,40 +718,96 @@ fn decode_prop_collision(materials: &mut MaterialBank, model_path: &str) -> Opti
     })
 }
 
-fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<Vec<LocalTri>> {
+fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<DecodedModel> {
     let mdl_path = normalize_path(model_path);
     let stem = mdl_path.strip_suffix(".mdl")?;
     let mdl = Mdl::read(&materials.get_bytes(&mdl_path)?).ok()?;
+    let illum = mdl.header.illumination_position;
+    let illumination_position = Vec3::new(illum.x, illum.y, illum.z);
     let vvd = Vvd::read(&materials.get_bytes(&format!("{stem}.vvd"))?).ok()?;
     let vtx = Vtx::read(&materials.get_bytes(&format!("{stem}.dx90.vtx"))?).ok()?;
-    let model = Model::from_parts(mdl, vtx, vvd);
+    // Meshes in the order vmdl (and the engine) pair them: MDL meshes zipped
+    // with the VTX LOD-0 meshes, body part by body part.
+    let mdl_meshes: Vec<(&vmdl::mdl::Mesh, i32)> = mdl
+        .body_parts
+        .iter()
+        .flat_map(|part| part.models.iter())
+        .flat_map(|model| model.meshes.iter().map(move |m| (m, model.vertex_offset)))
+        .collect();
+    let vtx_meshes: Vec<&vmdl::vtx::Mesh> = vtx
+        .body_parts
+        .iter()
+        .flat_map(|part| part.models.iter())
+        .flat_map(|model| model.lods.first())
+        .flat_map(|lod| lod.meshes.iter())
+        .collect();
+    let model = Model::from_parts(mdl.clone(), vtx.clone(), vvd);
 
     let directories = model.texture_directories().to_vec();
     let skin = model.skin_tables().next();
+    let all = model.vertices();
     let mut out = Vec::new();
+    // Hardware vertex index: the order the strip groups upload vertices in,
+    // strip group after strip group, mesh after mesh — the order vrad writes
+    // `.vhv` colours in. Not the VVD index: a multi-LOD model's VVD ids run
+    // past its LOD-0 count.
+    let mut hw_base = 0u32;
 
-    for source_mesh in model.meshes() {
+    for ((mdl_mesh, model_vertex_offset), vtx_mesh) in mdl_meshes.into_iter().zip(vtx_meshes) {
         let texture_name = skin
             .as_ref()
-            .and_then(|table| table.texture(source_mesh.material_index()))
+            .and_then(|table| table.texture(mdl_mesh.material))
             .unwrap_or("");
         let texture = materials.resolve_model_texture(&directories, texture_name);
-        let vertices: Vec<_> = source_mesh.vertices().collect();
-        for triangle in vertices.chunks_exact(3) {
-            let mut positions = [Vec3::ZERO; 3];
-            let mut uvs = [[0.0; 2]; 3];
-            for i in 0..3 {
-                let position = model.apply_root_transform(triangle[i].position);
-                positions[i] = Vec3::new(position.x, position.y, position.z);
-                uvs[i] = triangle[i].texture_coordinates;
+        let vvd_offset = (mdl_mesh.vertex_offset + model_vertex_offset).max(0) as usize;
+        for group in &vtx_mesh.strip_groups {
+            let ids: Vec<(u32, usize)> = group
+                .strips
+                .iter()
+                .flat_map(|strip| strip.indices())
+                .filter_map(|i| {
+                    let sg = *group.indices.get(i)? as usize;
+                    let vvd_id = group.vertices.get(sg)?.original_mesh_vertex_id as usize + vvd_offset;
+                    Some((hw_base + sg as u32, vvd_id))
+                })
+                .collect();
+            for triangle in ids.chunks_exact(3) {
+                let mut positions = [Vec3::ZERO; 3];
+                let mut normals = [Vec3::ZERO; 3];
+                let mut uvs = [[0.0; 2]; 3];
+                let mut vert_ids = [0u32; 3];
+                for i in 0..3 {
+                    let (hw, vvd_id) = triangle[i];
+                    let Some(v) = all.get(vvd_id) else {
+                        return None;
+                    };
+                    let position = model.apply_root_transform(v.position);
+                    positions[i] = Vec3::new(position.x, position.y, position.z);
+                    // The root transform is a rotation (plus nothing for a
+                    // static prop); moving the normal through it and removing
+                    // the origin's image keeps it a direction.
+                    let n = model.apply_root_transform(v.normal);
+                    let o = model.apply_root_transform(vmdl::Vector {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    });
+                    normals[i] = Vec3::new(n.x - o.x, n.y - o.y, n.z - o.z);
+                    uvs[i] = v.texture_coordinates;
+                    vert_ids[i] = hw;
+                }
+                out.push(LocalTri {
+                    positions,
+                    normals,
+                    uvs,
+                    vert_ids,
+                    texture,
+                });
             }
-            out.push(LocalTri {
-                positions,
-                uvs,
-                texture,
-            });
+            hw_base += group.vertices.len() as u32;
         }
     }
+    let vertex_count = hw_base as usize;
     if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for t in &out {
@@ -569,7 +829,11 @@ fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<Vec<Lo
             hi[2]
         );
     }
-    Some(out)
+    Some(DecodedModel {
+        tris: out,
+        vertex_count,
+        illumination_position,
+    })
 }
 
 fn rotate_source(v: Vec3, angles: vbsp::Angles) -> Vec3 {

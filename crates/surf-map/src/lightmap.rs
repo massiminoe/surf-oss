@@ -1,5 +1,15 @@
 //! LDR/HDR lightmap lump → atlas + per-face luxel UVs.
 //!
+//! **Brightness convention (Source LDR).** A luxel is `ColorRGBExp32`:
+//! `L = rgb * 2^exp / 255`, linear, with `L = 1` a fully lit surface and up to
+//! ~4 near lights. The engine stores `L / 2` in the lightmap page and its
+//! shaders multiply the sample by `OVERBRIGHT = 2`, so the pixel is
+//! `albedo * L`. We keep exactly that: the atlas is an sRGB texture holding
+//! `L / 2` (clamped at 1, i.e. `L ≤ 2` headroom) and the world shader doubles
+//! it. The reserved texel for faces with no luxels — and for static props,
+//! whose light is per-vertex — therefore stores `0.5`, meaning `L = 1`, not
+//! white.
+//!
 //! `lm_uv` returns **atlas pixel** coordinates while packing (height may grow).
 //! Call [`normalize_lm_uvs`] after [`LightmapBaker::finish`] so UVs are 0..1
 //! against the final atlas size.
@@ -23,7 +33,7 @@ impl LightmapAtlas {
         Self {
             width: 1,
             height: 1,
-            rgba: vec![255, 255, 255, 255],
+            rgba: vec![UNIT_LIGHT_BYTE, UNIT_LIGHT_BYTE, UNIT_LIGHT_BYTE, 255],
             face_count: 0,
         }
     }
@@ -40,6 +50,11 @@ struct Rect {
     w: u16,
     h: u16,
 }
+
+/// sRGB byte encoding `L / 2` for `L = 1`: `srgb(0.5) * 255`. Every atlas
+/// texel that means "lit at unity" — the stub atlas, the reserved texel for
+/// luxel-less faces, the texel static props point at — stores this.
+pub const UNIT_LIGHT_BYTE: u8 = 188;
 
 /// Builds an atlas while meshing; maps `bsp.faces` index → atlas rect.
 pub struct LightmapBaker {
@@ -71,12 +86,17 @@ impl LightmapBaker {
             rgba: Vec::new(),
             missing_px: [0.0, 0.0],
         };
-        // Reserve a white 2×2 so unlit faces don't sample a dark luxel at (0,0).
+        // Reserve a unit-light 2×2 so faces without luxels (and static props,
+        // whose light is per-vertex) don't sample a dark luxel at (0,0).
         if !baker.samples.is_empty() {
             let (x, y) = baker.alloc(2, 2);
             for dy in 0..2 {
                 for dx in 0..2 {
-                    baker.put_px(x + dx, y + dy, [255, 255, 255, 255]);
+                    baker.put_px(
+                        x + dx,
+                        y + dy,
+                        [UNIT_LIGHT_BYTE, UNIT_LIGHT_BYTE, UNIT_LIGHT_BYTE, 255],
+                    );
                 }
             }
             baker.missing_px = [x as f32 + 0.5, y as f32 + 0.5];
@@ -264,45 +284,52 @@ fn luxel_st(tex: &TextureInfo, face: &Face, p: Vector) -> (f32, f32) {
     (s, t)
 }
 
-fn decode_rgbexp(r: u8, g: u8, b: u8, exp: i8) -> [u8; 4] {
-    // Source: RGB * 2^exponent / 255 → linear, then compress to 8-bit with exposure.
+/// `ColorRGBExp32` luxel → linear `L` per channel (see the module doc).
+pub fn luxel_to_linear(r: u8, g: u8, b: u8, exp: i8) -> [f32; 3] {
     let scale = 2f32.powi(exp as i32) / 255.0;
-    // Mild exposure so outdoor/indoor both read; clamp.
-    let expose = 2.0;
-    let enc = |c: u8| -> u8 {
-        let v = (c as f32 * scale * expose).clamp(0.0, 1.0);
-        (v * 255.0) as u8
-    };
-    [enc(r), enc(g), enc(b), 255]
+    [r as f32 * scale, g as f32 * scale, b as f32 * scale]
 }
 
+/// Linear `L` → the atlas byte: `srgb(L / 2)`, clamped. sRGB encoding keeps
+/// the shadow end of an 8-bit page from banding; the texture is declared
+/// `Rgba8UnormSrgb` so the sampler hands the shader `L / 2` back in linear.
+pub fn encode_light_byte(l: f32) -> u8 {
+    let v = (l * 0.5).clamp(0.0, 1.0);
+    let s = if v <= 0.003_130_8 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
+}
+
+fn decode_rgbexp(r: u8, g: u8, b: u8, exp: i8) -> [u8; 4] {
+    let l = luxel_to_linear(r, g, b, exp);
+    [
+        encode_light_byte(l[0]),
+        encode_light_byte(l[1]),
+        encode_light_byte(l[2]),
+        255,
+    ]
+}
+
+/// The LDR lighting lump (8), else HDR (53) — void ships only HDR. Read
+/// through the LZMA-aware reader: six corpus maps (aquaflow, boreas,
+/// botanica, demise, lovetunnel, tendies) compress it, and reading the raw
+/// bytes silently produced no lightmap at all on every one of them.
 fn read_lighting_lump(bsp_bytes: &[u8]) -> Result<Vec<u8>, String> {
-    // Prefer LDR (8); fall back to HDR (53).
-    for lump in [8u32, 53] {
-        if let Some(data) = read_lump(bsp_bytes, lump)? {
-            if !data.is_empty() {
-                return Ok(data);
-            }
+    for lump in [LUMP_LIGHTING, LUMP_LIGHTING_HDR] {
+        match crate::leaves::read_lump(bsp_bytes, lump) {
+            Ok((data, _)) if !data.is_empty() => return Ok(data),
+            Ok(_) => {}
+            Err(e) => return Err(e),
         }
     }
     Ok(Vec::new())
 }
 
-fn read_lump(bsp_bytes: &[u8], lump: u32) -> Result<Option<Vec<u8>>, String> {
-    if bsp_bytes.len() < 8 + 64 * 16 {
-        return Err("bsp too small".into());
-    }
-    let base = 8 + (lump as usize) * 16;
-    let fileofs = i32::from_le_bytes(bsp_bytes[base..base + 4].try_into().unwrap()) as usize;
-    let filelen = i32::from_le_bytes(bsp_bytes[base + 4..base + 8].try_into().unwrap()) as usize;
-    if filelen == 0 {
-        return Ok(None);
-    }
-    if fileofs + filelen > bsp_bytes.len() {
-        return Err(format!("lump {lump} out of range"));
-    }
-    Ok(Some(bsp_bytes[fileofs..fileofs + filelen].to_vec()))
-}
+const LUMP_LIGHTING: usize = 8;
+const LUMP_LIGHTING_HDR: usize = 53;
 
 #[cfg(test)]
 mod tests {
@@ -324,6 +351,9 @@ mod tests {
                 lm_b: [1024.0, 512.0],
                 lm_c: [0.0, 0.0],
                 tex: 0,
+                tex2: 0,
+                alpha: [0.0; 3],
+                light: [[1.0; 3]; 3],
             }],
         };
         normalize_lm_uvs(&mut mesh, 2048, 1024);
