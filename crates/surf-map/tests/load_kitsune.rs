@@ -166,7 +166,10 @@ fn lovetunnel_spawns_on_its_start_platform_not_in_the_startzone_wall() {
     );
     assert!(!tr.startsolid, "spawn {spawn:?} still wedged");
     let normal = tr.hit.as_ref().expect("floor under spawn").normal;
-    assert!(normal.z > 0.99, "start platform should be flat, got {normal:?}");
+    assert!(
+        normal.z > 0.99,
+        "start platform should be flat, got {normal:?}"
+    );
     assert!(
         (tr.endpos.z - 5104.0).abs() < 8.0,
         "landed at z={:.1}, expected the start-platform floor at 5104",
@@ -423,7 +426,9 @@ fn overgrowth_start_disabled_jail_teleports_are_not_live() {
     let live_jail: Vec<_> = map
         .teleports
         .iter()
-        .filter(|t| (t.dest_origin.x - jail_x).abs() < 1.0 && (t.dest_origin.z - 791.62).abs() < 1.0)
+        .filter(|t| {
+            (t.dest_origin.x - jail_x).abs() < 1.0 && (t.dest_origin.z - 791.62).abs() < 1.0
+        })
         .map(|t| t.dest_origin)
         .collect();
     assert!(
@@ -431,5 +436,54 @@ fn overgrowth_start_disabled_jail_teleports_are_not_live() {
         "start-disabled jail teleports are live: {live_jail:?}"
     );
     // And the course teleports the run actually uses are still there.
-    assert!(map.teleports.len() >= 20, "only {} teleports loaded", map.teleports.len());
+    assert!(
+        map.teleports.len() >= 20,
+        "only {} teleports loaded",
+        map.teleports.len()
+    );
+}
+
+/// A `func_areaportalwindow`'s target brush is the portal's distance-fade
+/// cover, not scenery. Source draws it only as the portal closes far away and
+/// keeps it fully invisible inside `FadeStartDist` — which, on a surf route, is
+/// where the player always is. We have no areaportal system at all, so its far
+/// state would only hide geometry we deliberately still render.
+///
+/// aquaflow has four of them, all skinned `oceanwall_portal` (a flat
+/// `$color2 [0.064 0.08 0.28]` sheet) and all sitting square across the route.
+/// Drawn opaque they were solid blue-purple slabs at the tunnel mouths, which
+/// is what Max saw: "it renders as a solid colour (though you can pass through
+/// normally). there is one either side of the first tunnel, at least 3 more
+/// later on."
+///
+/// Those 7 faces are the *only* users of `oceanwall_portal`, so the material
+/// never reaching the atlas is exactly the property under test. Verified to
+/// fail with `MX_SURF_DRAW_AREAPORTAL_WINDOWS=1`.
+#[test]
+fn aquaflow_areaportal_window_covers_are_not_drawn() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/maps/surf_aquaflow.bsp");
+    if !path.is_file() {
+        eprintln!("surf_aquaflow.bsp absent; skipping");
+        return;
+    }
+    let map = LoadedMap::load_path(path).expect("load surf_aquaflow");
+    let drawn: Vec<_> = map
+        .materials
+        .layer_of
+        .iter()
+        .filter(|(name, _)| name.contains("oceanwall_portal"))
+        .collect();
+    assert!(
+        drawn.is_empty(),
+        "areaportal-window covers reached the draw mesh: {drawn:?}"
+    );
+    // The ordinary ocean walls beside them are opaque scenery and must stay.
+    assert!(
+        map.materials
+            .layer_of
+            .iter()
+            .any(|(name, _)| name == "oceanwall"),
+        "the plain oceanwall backdrop went missing too"
+    );
 }

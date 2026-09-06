@@ -120,6 +120,6 @@ fn a_new_session_is_not_in_practice_mode() {
     assert!(!session.practice_mode, "practice mode must be off on load");
     assert!(!session.run_timer.practice);
     assert!(session.pb_ghost.is_none());
-    assert!(session.split_flash_line.is_none());
+    assert!(session.notice_line.is_none());
     assert!(!session.finish_recorded);
 }

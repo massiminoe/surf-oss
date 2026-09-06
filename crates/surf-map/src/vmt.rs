@@ -32,8 +32,10 @@ pub fn resolve_basetexture(
     None
 }
 
-/// Which see-through Source shader a material uses, if any. We have no
-/// alpha-blended pass, so each gets a different opaque stand-in.
+/// Which see-through Source shader a material uses, if any. Neither is
+/// rendered — no refraction, no water surface — so each gets a different
+/// opaque stand-in. (`$translucent` and `$additive` *are* blended now; these
+/// two are whole shaders, not blend modes.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeeThrough {
     /// `Water` — a body of water. A flat opaque teal reads correctly.
@@ -82,12 +84,22 @@ pub fn is_alpha_tested(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &s
     flag_through_includes(get, material_name, &["$alphatest", "$translucent"])
 }
 
+/// True when the material declares `$translucent` (following `patch`/`include`).
+///
+/// `$translucent` and `$alphatest` are not the same instruction. A cutout keeps
+/// or drops a texel; a translucent surface *blends* with what is behind it.
+/// Testing a translucent gradient at 0.5 turns it into a hard-edged opaque
+/// slab — which is what aquaflow's ocean-wall fades and tunnel glass became.
+pub fn is_translucent(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
+    flag_through_includes(get, material_name, &["$translucent"])
+}
+
 /// True when the material is drawn `$additive` (following `patch`/`include`).
 ///
 /// Additive materials *add* light: a black texel contributes nothing at all.
-/// We have no blended pass, so drawing one opaque turns cyberwave's energy ball
-/// into a giant black disc over the skyline — the single most "broken texture"
-/// looking thing on the map. See `MaterialBank`'s additive keying.
+/// Drawn opaque — which is all we could do before the blended pass — cyberwave's
+/// energy ball became a giant black disc over the skyline, the single most
+/// "broken texture" looking thing on the map.
 pub fn is_additive(get: &impl Fn(&str) -> Option<Vec<u8>>, material_name: &str) -> bool {
     flag_through_includes(get, material_name, &["$additive"])
 }
@@ -429,5 +441,19 @@ mod tests {
         assert!(is_additive(&get, "maps/m/effects/emp_ball1_0_0_0"));
         assert!(!is_additive(&get, "plain"));
         assert!(!is_additive(&get, "absent"));
+    }
+
+    #[test]
+    fn translucent_is_narrower_than_alpha_tested() {
+        let get = |path: &str| match path {
+            "materials/glass.vmt" => {
+                Some(br#""LightmappedGeneric" { "$translucent" "1" }"#.to_vec())
+            }
+            "materials/fence.vmt" => Some(br#""LightmappedGeneric" { "$alphatest" "1" }"#.to_vec()),
+            _ => None,
+        };
+        // Both keep their alpha channel; only one of them blends.
+        assert!(is_alpha_tested(&get, "glass") && is_translucent(&get, "glass"));
+        assert!(is_alpha_tested(&get, "fence") && !is_translucent(&get, "fence"));
     }
 }

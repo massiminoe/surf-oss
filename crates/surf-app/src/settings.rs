@@ -22,7 +22,6 @@ pub const GHOST_PB: &str = "pb";
 #[serde(default)]
 pub struct Settings {
     pub mouse_sens: f32,
-    pub show_sync_bar: bool,
     pub show_keys: bool,
     /// When true, present with AutoVsync/Fifo. When false, prefer Immediate.
     pub vsync: bool,
@@ -57,7 +56,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             mouse_sens: 5.0,
-            show_sync_bar: false,
             show_keys: false,
             vsync: true,
             brightness: 1.0,
@@ -178,7 +176,6 @@ mod tests {
         let path = std::env::temp_dir().join(format!("mx-surf-settings-{stamp}.json"));
         let s = Settings {
             mouse_sens: 7.5,
-            show_sync_bar: true,
             show_keys: true,
             vsync: false,
             brightness: 1.4,
@@ -203,7 +200,6 @@ mod tests {
         assert_eq!(loaded.audio_sub, 0.0);
         assert_eq!(loaded.wipe_style, "dissolve");
         assert!((loaded.mouse_sens - 7.5).abs() < 1e-5);
-        assert!(loaded.show_sync_bar);
         assert!(loaded.show_keys);
         assert!(!loaded.vsync);
         assert!((loaded.brightness - 1.4).abs() < 1e-5);

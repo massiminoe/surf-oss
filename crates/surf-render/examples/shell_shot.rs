@@ -31,7 +31,6 @@ fn settings_rows() -> Vec<MenuRow> {
         MenuRow::slider("Shadow lift", "0.00", 0.0),
         MenuRow::item("VSync", "On"),
         MenuRow::header("HUD"),
-        MenuRow::item("Show sync %", "Off"),
         MenuRow::item("Show keys", "Off"),
         MenuRow::header("GHOST"),
         MenuRow::item("Ghost", "Auto (KSF #1 FinCS2 41.475)"),
@@ -254,19 +253,17 @@ fn main() {
     {
         let hud = HudState {
             speed: 1842.0,
-            sync: 78.0,
             grounded: false,
             time_secs: Some(31.42),
-            pb_delta_secs: Some(-0.18),
             timer_phase: HudTimerPhase::Running,
-            show_sync_bar: true,
             show_keys: Some(ShowKeysState {
                 forward: true,
                 left: true,
                 ..Default::default()
             }),
-            stage_line: Some("CP 2 / 4".into()),
-            ghost_time_delta: Some(0.41),
+            stage_line: Some("STAGE 2/4".into()),
+            cp_label: Some("CP3".into()),
+            cp_delta_secs: Some(-0.184),
             ghost_speed_delta: Some(62.0),
             time: 3.0,
             ..HudState::default()

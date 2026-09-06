@@ -151,8 +151,13 @@ pub struct Session {
     pub pb_ghost: Option<GhostPlayback>,
     /// Cached Esc-menu ghost choices for the loaded map.
     pub ghost_options: Vec<GhostOption>,
-    pub split_flash_left: f32,
-    pub split_flash_line: Option<String>,
+    pub notice_left: f32,
+    pub notice_line: Option<String>,
+    /// Last checkpoint reached this run (`"CP3"` / `"S2"`) and its split
+    /// against the ghost's (else the PB's) time there. Persists on the HUD
+    /// until the next checkpoint, unlike the old three-second flash.
+    pub cp_label: Option<String>,
+    pub cp_delta: Option<f32>,
 
     /// Saved practice locations for this map (Mouse2 save / Mouse1 load).
     pub locs: LocStore,
@@ -238,8 +243,10 @@ impl Session {
             pb_splits: Vec::new(),
             pb_ghost: None,
             ghost_options: Vec::new(),
-            split_flash_left: 0.0,
-            split_flash_line: None,
+            notice_left: 0.0,
+            notice_line: None,
+            cp_label: None,
+            cp_delta: None,
             locs,
             practice_mode: false,
             field_state: FieldState::new(),

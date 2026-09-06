@@ -1,6 +1,6 @@
 //! Entity KV parsing: spawns, teleports, render-only brush models.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use surf_core::math::{Angle, Vec3};
 use surf_core::{Aabb, Brush, Plane};
@@ -112,6 +112,25 @@ pub struct ParsedEntities {
     pub solid_brushes: Vec<Brush>,
 }
 
+/// Lowercased `targetname`s that a `func_areaportalwindow` points at. Those
+/// brushes are the portal's distance-fade cover, not map scenery.
+///
+/// A separate pass because the window and the brush it names appear in either
+/// order in the entity lump — aquaflow has one of each.
+///
+/// `MX_SURF_DRAW_AREAPORTAL_WINDOWS=1` restores the old behaviour for A/B.
+fn areaportal_window_targets(bsp: &Bsp) -> HashSet<String> {
+    if std::env::var_os("MX_SURF_DRAW_AREAPORTAL_WINDOWS").is_some() {
+        return HashSet::new();
+    }
+    bsp.entities
+        .iter()
+        .filter(|e| e.prop("classname") == Some("func_areaportalwindow"))
+        .filter_map(|e| prop_ci(&e, "target").map(|t| t.trim().to_ascii_lowercase()))
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
 pub fn parse_entities(
     bsp: &Bsp,
     leaf_ranges: &[LeafBrushRange],
@@ -132,6 +151,7 @@ pub fn parse_entities(
     let mut solid_models: Vec<(usize, Vec3)> = Vec::new();
     let mut teleport_target_counts: HashMap<String, usize> = HashMap::new();
     let mut start_volumes: Vec<Aabb> = Vec::new();
+    let portal_window_targets = areaportal_window_targets(bsp);
 
     for ent in bsp.entities.iter() {
         let class = ent.prop("classname").unwrap_or("");
@@ -219,8 +239,7 @@ pub fn parse_entities(
                 player_spawns.push((class, NamedPoint { origin, angles }));
             }
             "trigger_teleport" => {
-                let start_disabled =
-                    trigger_start_disabled(&ent);
+                let start_disabled = trigger_start_disabled(&ent);
                 let target = ent.prop("target").unwrap_or("").to_string();
                 // filter_activator_name (e.g. filter_fail) needs trigger_multiple
                 // AddOutput targetname — skip until that path exists. Unfiltered
@@ -229,19 +248,12 @@ pub fn parse_entities(
                 if let Some(model) = ent.prop("model").and_then(parse_model_index) {
                     if model > 0 && !target.is_empty() {
                         *teleport_target_counts.entry(target.clone()).or_insert(0) += 1;
-                        teleports_raw.push((
-                            model,
-                            target,
-                            start_disabled,
-                            origin,
-                            filtername,
-                        ));
+                        teleports_raw.push((model, target, start_disabled, origin, filtername));
                     }
                 }
             }
             "trigger_push" => {
-                let start_disabled =
-                    trigger_start_disabled(&ent);
+                let start_disabled = trigger_start_disabled(&ent);
                 if start_disabled {
                     continue;
                 }
@@ -270,8 +282,7 @@ pub fn parse_entities(
                 }
             }
             "trigger_gravity" => {
-                let start_disabled =
-                    trigger_start_disabled(&ent);
+                let start_disabled = trigger_start_disabled(&ent);
                 if start_disabled {
                     continue;
                 }
@@ -304,9 +315,20 @@ pub fn parse_entities(
                     "2" => true,
                     _ => !trigger_start_disabled(&ent),
                 };
+                // A `func_areaportalwindow` cover is not scenery: Source draws
+                // it only as the portal closes in the distance, and it is fully
+                // invisible inside `FadeStartDist` — which, on a surf route, is
+                // where the player always is. We have no areaportal system, so
+                // its far state would only hide geometry we deliberately still
+                // render. Drawing it opaque is what put a flat blue slab across
+                // aquaflow's tunnel mouths.
+                let cover = prop_ci(&ent, "targetname")
+                    .is_some_and(|n| portal_window_targets.contains(&n.to_ascii_lowercase()));
                 if let Some(model) = ent.prop("model").and_then(parse_model_index) {
                     if model > 0 {
-                        render_models.push((model, origin));
+                        if !cover {
+                            render_models.push((model, origin));
+                        }
                         if solid {
                             solid_models.push((model, origin));
                         }
@@ -450,7 +472,9 @@ fn prop_ci<'a>(ent: &vbsp::RawEntity<'a>, key: &str) -> Option<&'a str> {
 /// `StartDisabled` — the trigger is off until an input enables it, which we
 /// don't model, so treat it as absent.
 fn trigger_start_disabled(ent: &vbsp::RawEntity<'_>) -> bool {
-    prop_ci(ent, "StartDisabled").map(|v| v.trim() == "1").unwrap_or(false)
+    prop_ci(ent, "StartDisabled")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
 }
 
 /// Spawnflag 1 is "Clients". A trigger that doesn't list it never touches the
@@ -675,7 +699,9 @@ fn pick_gameplay_spawn(
             // Reject pure fail/reset pads when a better-named target exists with
             // similar fan-in (within 2).
             if *score < 0 {
-                let alt = targets.iter().find(|(s, c, _)| *s >= 40 && *c + 2 >= *count);
+                let alt = targets
+                    .iter()
+                    .find(|(s, c, _)| *s >= 40 && *c + 2 >= *count);
                 if let Some((_, _, alt_name)) = alt {
                     if let Some(ent) = named.get(*alt_name) {
                         return Some(ent.point);

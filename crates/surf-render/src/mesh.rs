@@ -18,19 +18,25 @@ pub struct GpuMesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
-    /// Indices `0..opaque_index_count` are the opaque world; the rest are the
-    /// `$additive` triangles, drawn afterwards with `dst += src` and no depth
-    /// write. Triangle order in the source mesh is untouched (prop ranges
-    /// still index it); only the index buffer is partitioned.
+    /// The index buffer is partitioned into three runs, drawn in this order:
+    /// `0..opaque_index_count` opaque, `opaque_index_count..translucent_end`
+    /// `$translucent` (blended `src.a` over, no depth write), and
+    /// `translucent_end..index_count` `$additive` (`dst += src`). Triangle
+    /// order in the source mesh is untouched (prop ranges still index it);
+    /// only the index buffer is partitioned.
     pub opaque_index_count: u32,
+    /// End of the translucent run — see `opaque_index_count`.
+    pub translucent_end: u32,
 }
 
 impl GpuMesh {
-    /// `additive_layers[tex]` says whether a texture-array layer is additive;
-    /// an empty slice means nothing is (the graybox arena).
-    pub fn from_graybox(device: &wgpu::Device, mesh: &GrayboxMesh, additive_layers: &[bool]) -> Self {
+    /// The atlas says which texture-array layers are `$additive` or
+    /// `$translucent`; a graybox atlas declares neither and everything is
+    /// opaque.
+    pub fn from_graybox(device: &wgpu::Device, mesh: &GrayboxMesh, atlas: &MaterialAtlas) -> Self {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let mut translucent = Vec::new();
         let mut additive = Vec::new();
         for tri in &mesh.tris {
             let base = vertices.len() as u32;
@@ -49,11 +55,24 @@ impl GpuMesh {
                     _pad: 0.0,
                 });
             }
-            let is_additive = additive_layers.get(tri.tex as usize).copied().unwrap_or(false);
-            let list = if is_additive { &mut additive } else { &mut indices };
+            let layer = tri.tex as usize;
+            let list = if atlas.additive_layers.get(layer).copied().unwrap_or(false) {
+                &mut additive
+            } else if atlas
+                .translucent_layers
+                .get(layer)
+                .copied()
+                .unwrap_or(false)
+            {
+                &mut translucent
+            } else {
+                &mut indices
+            };
             list.extend_from_slice(&[base, base + 1, base + 2]);
         }
         let opaque_index_count = indices.len() as u32;
+        indices.extend_from_slice(&translucent);
+        let translucent_end = indices.len() as u32;
         indices.extend_from_slice(&additive);
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_verts"),
@@ -70,6 +89,7 @@ impl GpuMesh {
             index_buffer,
             index_count: indices.len() as u32,
             opaque_index_count,
+            translucent_end,
         }
     }
 }
@@ -139,7 +159,13 @@ impl GpuMaterials {
         atlas: &MaterialAtlas,
         lightmaps: &LightmapAtlas,
     ) {
-        let rebuilt = Self::upload_with(device, queue, atlas, lightmaps, Some(&self.bind_group_layout));
+        let rebuilt = Self::upload_with(
+            device,
+            queue,
+            atlas,
+            lightmaps,
+            Some(&self.bind_group_layout),
+        );
         self.bind_group = rebuilt.bind_group;
     }
 

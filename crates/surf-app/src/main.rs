@@ -49,7 +49,7 @@ use surf_app::pb::PbStore;
 use surf_app::replay::{self, derive_splits, GhostOption, GhostPlayback, Replay};
 use surf_app::session::{load_level, Level, Session};
 use surf_app::settings::{Settings, GHOST_AUTO, GHOST_OFF, GHOST_PB};
-use surf_app::timer::{format_split_line, format_time, TimerPhase};
+use surf_app::timer::{format_split_line, format_time, split_label, SplitEvent, TimerPhase};
 use surf_app::zones::{MapZones, TrackType};
 use surf_audio::{
     AudioEngine, AudioEvent, Levels as AudioLevels, Observation, Params as AudioParams, WipeStyle,
@@ -207,7 +207,7 @@ fn pct1_low_fps(dts: &[f32]) -> f32 {
 }
 
 const PB_FLASH_SECS: f32 = 2.0;
-const SPLIT_FLASH_SECS: f32 = 2.5;
+const NOTICE_SECS: f32 = 2.5;
 
 /// One row of the map picker.
 struct MapEntry {
@@ -658,7 +658,6 @@ impl App {
                 };
                 MenuRow::item(label, v)
             }
-            Setting::ShowSync => MenuRow::item(label, on(self.settings.show_sync_bar)),
             Setting::ShowKeys => MenuRow::item(label, on(self.settings.show_keys)),
             Setting::Ghost => MenuRow::item(label, self.ghost_label()),
             Setting::GhostTrail => MenuRow::item(label, on(self.settings.ghost_trail)),
@@ -687,7 +686,6 @@ impl App {
             Setting::Brightness => "Brightness",
             Setting::ShadowLift => "Shadow lift",
             Setting::Vsync => "VSync",
-            Setting::ShowSync => "Show sync %",
             Setting::ShowKeys => "Show keys",
             Setting::Ghost => "Ghost",
             Setting::GhostTrail => "Ghost trail",
@@ -1241,12 +1239,14 @@ impl App {
         if self.settings.ghost == GHOST_OFF {
             self.session.pb_ghost = None;
             self.session.pb_splits.clear();
+            self.load_pb_splits(&name);
             println!("  ghost off");
             return;
         }
         let Some(path) = replay::resolve_ghost_path(&name, &self.settings.ghost) else {
             self.session.pb_ghost = None;
             self.session.pb_splits.clear();
+            self.load_pb_splits(&name);
             return;
         };
         let kind = match self.settings.ghost.as_str() {
@@ -1287,8 +1287,33 @@ impl App {
                 }
                 self.session.pb_ghost = None;
                 self.session.pb_splits.clear();
+                self.load_pb_splits(&name);
             }
         }
+    }
+
+    /// Checkpoint reference times when no ghost is loaded: the PB replay's own
+    /// splits. The HUD's split delta is "vs the ghost you're racing, else your
+    /// PB" — turning the ghost off is not a reason to lose the comparison.
+    fn load_pb_splits(&mut self, map: &str) {
+        if !self.session.pb_splits.is_empty() {
+            return;
+        }
+        let path = replay::pb_replay_path(map);
+        let Ok(mut replay) = Replay::load(&path) else {
+            return;
+        };
+        if replay.header.splits.is_empty() {
+            if let Some(zones) = self.session.zones.as_ref() {
+                replay.header.splits = derive_splits(
+                    &replay.frames,
+                    &zones.main.checkpoints,
+                    replay.header.tick_interval,
+                    Hull::css_stand(),
+                );
+            }
+        }
+        self.session.pb_splits = replay.header.splits;
     }
 
     /// Freeze pose + velocity + run clock into a new numbered loc.
@@ -1348,8 +1373,30 @@ impl App {
             .filter(|_| self.session.run_timer.phase == TimerPhase::Running)
             .map(|pb| self.session.run_timer.time_secs - pb);
         self.session.pb_flash_left = 0.0;
-        self.session.split_flash_left = 0.0;
-        self.session.split_flash_line = None;
+        self.session.notice_left = 0.0;
+        self.session.notice_line = None;
+        // Rebuild the checkpoint reading from the loc's own splits: it puts you
+        // back mid-run, and the split from before the load would be a lie.
+        let staged = self.session.run_timer.track_type == TrackType::Staged;
+        self.session.cp_label = None;
+        self.session.cp_delta = None;
+        if let Some((i, t)) = self
+            .session
+            .run_timer
+            .splits
+            .iter()
+            .copied()
+            .enumerate()
+            .next_back()
+        {
+            let ev = SplitEvent {
+                index: i + 1,
+                time_secs: t,
+                delta_vs_pb: self.session.pb_splits.get(i).map(|pb| t - pb),
+            };
+            self.session.cp_label = Some(split_label(ev, staged));
+            self.session.cp_delta = ev.delta_vs_pb;
+        }
         // A practice attempt is never a saved run; drop whatever was captured.
         self.session.replay_rec.clear();
 
@@ -1413,8 +1460,8 @@ impl App {
 
     /// Brief centre-screen message, reusing the checkpoint-split flash slot.
     fn flash_notice(&mut self, msg: &str) {
-        self.session.split_flash_line = Some(msg.to_string());
-        self.session.split_flash_left = SPLIT_FLASH_SECS;
+        self.session.notice_line = Some(msg.to_string());
+        self.session.notice_left = NOTICE_SECS;
     }
 
     fn persist_locs(&self) {
@@ -1532,7 +1579,6 @@ impl App {
                     self.apply_present_mode();
                 }
             }
-            Setting::ShowSync => self.settings.show_sync_bar = !self.settings.show_sync_bar,
             Setting::ShowKeys => self.settings.show_keys = !self.settings.show_keys,
             Setting::Ghost => self.cycle_ghost(dir),
             Setting::GhostTrail => self.settings.ghost_trail = !self.settings.ghost_trail,
@@ -1602,8 +1648,10 @@ impl App {
         self.session.pb_delta = None;
         self.session.finish_recorded = false;
         self.session.pb_flash_left = 0.0;
-        self.session.split_flash_left = 0.0;
-        self.session.split_flash_line = None;
+        self.session.notice_left = 0.0;
+        self.session.notice_line = None;
+        self.session.cp_label = None;
+        self.session.cp_delta = None;
         self.session.replay_rec.clear();
         if let Some(g) = self.session.pb_ghost.as_mut() {
             g.stop();
@@ -1766,7 +1814,7 @@ impl App {
         );
 
         let atlas = self.session.level.materials();
-        let mesh = GpuMesh::from_graybox(&device, self.session.level.mesh(), &atlas.additive_layers);
+        let mesh = GpuMesh::from_graybox(&device, self.session.level.mesh(), &atlas);
         let lightmaps = self.session.level.lightmaps();
         let sky = self.session.level.skybox();
         let renderer = Renderer::new(device, queue, config, mesh, &atlas, &lightmaps, &sky);
@@ -1967,12 +2015,18 @@ impl App {
                 self.session
                     .run_timer
                     .tick(zones, &mut self.session.player, tick_dt, &pb_splits);
+                if phase_before != TimerPhase::Running
+                    && self.session.run_timer.phase == TimerPhase::Running
+                {
+                    // A fresh run starts with nothing to compare against.
+                    self.session.cp_label = None;
+                    self.session.cp_delta = None;
+                }
                 if let Some(ev) = self.session.run_timer.take_split_event() {
                     let staged = self.session.run_timer.track_type == TrackType::Staged;
-                    let line = format_split_line(ev, staged);
-                    println!("{line}");
-                    self.session.split_flash_line = Some(line);
-                    self.session.split_flash_left = SPLIT_FLASH_SECS;
+                    println!("{}", format_split_line(ev, staged));
+                    self.session.cp_label = Some(split_label(ev, staged));
+                    self.session.cp_delta = ev.delta_vs_pb;
                 }
                 self.record_replay_tick(phase_before, &cmd);
                 if self.session.run_timer.is_finished()
@@ -2055,9 +2109,8 @@ impl App {
                 .as_ref()
                 .map(|g| g.active)
                 .unwrap_or(false);
-        let (ghost_time_delta, ghost_speed_delta, ghost_pose, trail_pts) = if racing {
+        let (ghost_speed_delta, ghost_pose, trail_pts) = if racing {
             let g = self.session.pb_ghost.as_ref().unwrap();
-            let td = Some(self.session.run_timer.time_secs - g.current_time());
             let sd = g.current_speed_2d().map(|gs| speed - gs);
             let pose = g
                 .sample(self.session.alpha)
@@ -2070,12 +2123,12 @@ impl App {
             } else {
                 Vec::new()
             };
-            (td, sd, pose, trail)
+            (sd, pose, trail)
         } else {
-            (None, None, None, Vec::new())
+            (None, None, Vec::new())
         };
-        let split_line = if self.session.split_flash_left > 0.0 {
-            self.session.split_flash_line.clone()
+        let notice = if self.session.notice_left > 0.0 {
+            self.session.notice_line.clone()
         } else {
             None
         };
@@ -2086,21 +2139,19 @@ impl App {
             .and_then(|z| self.session.run_timer.stage_hud_label(z));
         let hud = HudState {
             speed,
-            sync: self.session.sync_display,
             grounded: self.session.player.grounded,
-            speed_scale: 3500.0,
             time_secs: self.session.run_timer.display_time(),
             pb_time_secs: self.session.pb_time,
             pb_delta_secs: self.session.pb_delta,
             timer_phase,
-            show_sync_bar: self.settings.show_sync_bar,
             show_keys,
             pb_flash: self.session.pb_flash_left > 0.0,
-            split_line,
+            notice,
             stage_line,
             practice: self.session.run_timer.practice,
             practice_mode: self.session.practice_mode,
-            ghost_time_delta,
+            cp_label: self.session.cp_label.clone(),
+            cp_delta_secs: self.session.cp_delta,
             ghost_speed_delta,
             page,
             perf_line,
@@ -2660,8 +2711,8 @@ impl ApplicationHandler for App {
                 if self.session.pb_flash_left > 0.0 {
                     self.session.pb_flash_left = (self.session.pb_flash_left - dt).max(0.0);
                 }
-                if self.session.split_flash_left > 0.0 {
-                    self.session.split_flash_left = (self.session.split_flash_left - dt).max(0.0);
+                if self.session.notice_left > 0.0 {
+                    self.session.notice_left = (self.session.notice_left - dt).max(0.0);
                 }
                 let t0 = Instant::now();
                 self.simulate(dt);

@@ -98,6 +98,24 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(base * params.exposure, 1.0);
 }
 
+// `$translucent` materials blend rather than cut out. Same lighting as the
+// opaque world — glass in a lit tunnel is still lit — but the sampled alpha
+// reaches the blend state instead of a 0.5 threshold, so a gradient fades
+// instead of ending in a hard edge halfway along itself.
+@fragment
+fn fs_translucent(v: VsOut) -> @location(0) vec4<f32> {
+    let lm = textureSample(lightmap, lightmap_samp, v.lm_uv).rgb;
+    let lifted = mix(lm, vec3<f32>(1.0, 1.0, 1.0), clamp(params.shadow_lift, 0.0, 1.0));
+    let light = max(lifted, vec3<f32>(0.05, 0.05, 0.05));
+    let layer = i32(v.tex + 0.5);
+    if (layer <= 0) {
+        return vec4<f32>(v.color * light * params.exposure, 1.0);
+    }
+    let sample = textureSample(albedo, albedo_samp, v.uv, layer);
+    let base = sample.rgb * light * 2.0;
+    return vec4<f32>(base * params.exposure, sample.a);
+}
+
 // `$additive` materials: Source composites them as `dst += src.rgb` (times
 // `src.a` when the material also declares `$translucent`/`$alphatest`), so
 // black adds nothing and a soft glow sprite fades out instead of showing its
@@ -116,11 +134,96 @@ fn fs_additive(v: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// One description of a world-mesh pipeline. The three passes (opaque,
+/// translucent, additive) share a vertex layout that must match `MeshVertex`
+/// exactly; writing it once is what keeps them from drifting.
+#[allow(clippy::too_many_arguments)]
+fn world_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    label: &str,
+    fragment_entry: &str,
+    blend: wgpu::BlendState,
+    depth_write: bool,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 12,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 24,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 32,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 36,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                ],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment_entry),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(blend),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: depth_write,
+            // Reversed-Z: near maps to 1, far to 0.
+            depth_compare: wgpu::CompareFunction::Greater,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub pipeline: wgpu::RenderPipeline,
+    /// Same layout and vertex stream as `pipeline`, blended `src.a` over,
+    /// depth-tested but not depth-written. See `fs_translucent`.
+    pub translucent_pipeline: wgpu::RenderPipeline,
     /// Same layout and vertex stream as `pipeline`, blended `dst += src`,
     /// depth-tested but not depth-written. See `fs_additive`.
     pub additive_pipeline: wgpu::RenderPipeline,
@@ -232,144 +335,46 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("textured_pipe"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 12,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 24,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 32,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 36,
-                            shader_location: 4,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                    ],
-                }],
-                compilation_options: Default::default(),
+        // Three passes over the same vertex stream, differing only in fragment
+        // entry point, blend and depth write. Built from one description so
+        // the vertex layout cannot drift between them.
+        let pipeline = world_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            "textured_pipe",
+            "fs_main",
+            wgpu::BlendState::REPLACE,
+            true,
+        );
+        let translucent_pipeline = world_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            "textured_pipe_translucent",
+            "fs_translucent",
+            wgpu::BlendState::ALPHA_BLENDING,
+            false,
+        );
+        let additive_pipeline = world_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            config.format,
+            "textured_pipe_additive",
+            "fs_additive",
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::REPLACE,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let additive_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("textured_pipe_additive"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 12,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 24,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 32,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 36,
-                            shader_location: 4,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                    ],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_additive"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::One,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::REPLACE,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+            false,
+        );
 
         let depth_view = create_depth_view(&device, config.width, config.height);
         let hud = HudRenderer::new(&device, &queue, config.format);
@@ -383,6 +388,7 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            translucent_pipeline,
             additive_pipeline,
             camera_buffer,
             camera_bind_group,
@@ -410,7 +416,7 @@ impl Renderer {
         lightmaps: &LightmapAtlas,
         sky: &SkyboxAtlas,
     ) {
-        self.mesh = GpuMesh::from_graybox(&self.device, mesh, &atlas.additive_layers);
+        self.mesh = GpuMesh::from_graybox(&self.device, mesh, atlas);
         self.materials
             .reload(&self.device, &self.queue, atlas, lightmaps);
         self.skybox = crate::skybox::SkyboxRenderer::try_new(
@@ -554,16 +560,36 @@ impl Renderer {
                 if draw_ghost {
                     self.ghost.draw(&mut pass, &self.camera_bind_group);
                 }
-                // Glows last, over everything opaque (ghost included), so a
-                // ramp's light spills onto whatever stands in it.
+                // Then the see-through passes, over everything opaque (ghost
+                // included), so glass tints what is behind it and a ramp's
+                // glow spills onto whatever stands in it. Both are drawn in
+                // mesh order rather than sorted back-to-front: additive does
+                // not care, and the translucent surfaces in this corpus are
+                // single sheets of glass or fade cards that rarely overlap.
+                // The ghost and trail passes rebind their own pipeline, bind
+                // groups and buffers, so the world state has to be restored
+                // before drawing any more of the mesh.
                 if self.mesh.opaque_index_count < self.mesh.index_count {
-                    pass.set_pipeline(&self.additive_pipeline);
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_bind_group(1, &self.materials.bind_group, &[]);
                     pass.set_bind_group(2, &self.view_params_bind_group, &[]);
                     pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(self.mesh.opaque_index_count..self.mesh.index_count, 0, 0..1);
+                    pass.set_index_buffer(
+                        self.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                }
+                if self.mesh.opaque_index_count < self.mesh.translucent_end {
+                    pass.set_pipeline(&self.translucent_pipeline);
+                    pass.draw_indexed(
+                        self.mesh.opaque_index_count..self.mesh.translucent_end,
+                        0,
+                        0..1,
+                    );
+                }
+                if self.mesh.translucent_end < self.mesh.index_count {
+                    pass.set_pipeline(&self.additive_pipeline);
+                    pass.draw_indexed(self.mesh.translucent_end..self.mesh.index_count, 0, 0..1);
                 }
             }
         }

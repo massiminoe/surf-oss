@@ -453,34 +453,30 @@ pub fn layout_for(w: f32, h: f32, page: &MenuPage) -> PageLayout {
 pub struct HudState {
     /// Horizontal speed u/s.
     pub speed: f32,
-    /// 0..100 air-strafe sync estimate.
-    pub sync: f32,
     pub grounded: bool,
-    /// Retained for callers; the speed bar it scaled is gone.
-    pub speed_scale: f32,
     /// Elapsed run time (seconds). `None` hides the timer line.
     pub time_secs: Option<f32>,
     /// Absolute PB for idle/armed display.
     pub pb_time_secs: Option<f32>,
-    /// PB delta seconds (negative = ahead). Shown while running/finished.
+    /// PB delta seconds (negative = ahead). Shown on the finished run.
     pub pb_delta_secs: Option<f32>,
     pub timer_phase: HudTimerPhase,
-    /// Show the sync percentage as a row in the info box.
-    pub show_sync_bar: bool,
     pub show_keys: Option<ShowKeysState>,
     /// Briefly show "PB!" after a new personal best.
     pub pb_flash: bool,
-    /// Checkpoint split flash, e.g. `"CP2 12.340  -0.210"`.
-    pub split_line: Option<String>,
+    /// Transient centre-screen message (practice mode, loc saved, ...).
+    pub notice: Option<String>,
     /// Staged maps: `"STAGE 2/5"` while armed/running/finished.
     pub stage_line: Option<String>,
     /// Run was resumed from a saved loc: the clock is real, the run is not.
     pub practice: bool,
     /// Practice mode armed — loadloc is unlocked.
     pub practice_mode: bool,
-    /// Live time delta vs PB ghost (negative = ahead).
-    pub ghost_time_delta: Option<f32>,
-    /// Live 2D speed delta vs PB ghost (positive = faster than ghost).
+    /// Last checkpoint reached, e.g. `"CP3"` / `"S2"`. Persists until the next.
+    pub cp_label: Option<String>,
+    /// That checkpoint's split vs the racing ghost, else the PB (negative = ahead).
+    pub cp_delta_secs: Option<f32>,
+    /// Live 2D speed delta vs the ghost (positive = faster than the ghost).
     pub ghost_speed_delta: Option<f32>,
     /// Pause overlay or shell page. Takes over the frame when present.
     pub page: Option<MenuPage>,
@@ -494,21 +490,19 @@ impl Default for HudState {
     fn default() -> Self {
         Self {
             speed: 0.0,
-            sync: 0.0,
             grounded: false,
-            speed_scale: 3500.0,
             time_secs: None,
             pb_time_secs: None,
             pb_delta_secs: None,
             timer_phase: HudTimerPhase::Idle,
-            show_sync_bar: false,
             show_keys: None,
             practice: false,
             practice_mode: false,
             pb_flash: false,
-            split_line: None,
+            notice: None,
             stage_line: None,
-            ghost_time_delta: None,
+            cp_label: None,
+            cp_delta_secs: None,
             ghost_speed_delta: None,
             page: None,
             perf_line: None,
@@ -549,6 +543,19 @@ const TXT_ERR: Color = Color::rgb(232, 138, 116);
 /// is sRGB, so the byte values would come out three stops light.
 const C_INK: [f32; 3] = [0.82279, 0.87137, 0.84652];
 const C_GROUND: [f32; 3] = [0.00335, 0.00518, 0.00605];
+/// In-run HUD geometry. The timer block is the only framed thing on screen, so
+/// its metrics live together rather than as literals inside the layout pass.
+const SPEED_PX: f32 = 56.0;
+const TIMER_BOTTOM: f32 = 52.0;
+const TIMER_PAD_X: f32 = 26.0;
+const TIMER_PAD_Y: f32 = 12.0;
+const TIMER_MIN_W: f32 = 260.0;
+const TIMER_STAGE_H: f32 = 20.0;
+const TIMER_CLOCK_H: f32 = 40.0;
+const TIMER_ROW_H: f32 = 24.0;
+/// Gap between the two relative readings on the bottom row.
+const TIMER_PAIR_GAP: f32 = 34.0;
+
 fn ink(a: f32) -> [f32; 4] {
     [C_INK[0], C_INK[1], C_INK[2], a]
 }
@@ -568,13 +575,13 @@ pub struct HudRenderer {
     backdrop: Backdrop,
     speed_buf: Buffer,
     time_buf: Buffer,
-    delta_buf: Buffer,
+    stage_buf: Buffer,
+    cp_buf: Buffer,
+    units_buf: Buffer,
     phase_buf: Buffer,
     pb_abs_buf: Buffer,
     flash_buf: Buffer,
-    split_buf: Buffer,
-    ghost_buf: Buffer,
-    sync_buf: Buffer,
+    notice_buf: Buffer,
     keys_buf: Buffer,
     perf_buf: Buffer,
     page_title_buf: Buffer,
@@ -612,15 +619,15 @@ impl HudRenderer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
 
         // Speed is the headline read — everything else is deliberately quieter.
-        let speed_buf = Buffer::new(&mut font_system, Metrics::new(44.0, 50.0));
-        let time_buf = Buffer::new(&mut font_system, Metrics::new(30.0, 36.0));
-        let delta_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
+        let speed_buf = Buffer::new(&mut font_system, Metrics::new(SPEED_PX, SPEED_PX * 1.15));
+        let time_buf = Buffer::new(&mut font_system, Metrics::new(34.0, 40.0));
+        let stage_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 17.0));
+        let cp_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 23.0));
+        let units_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 23.0));
         let phase_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
         let pb_abs_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
         let flash_buf = Buffer::new(&mut font_system, Metrics::new(32.0, 38.0));
-        let split_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 21.0));
-        let ghost_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
-        let sync_buf = Buffer::new(&mut font_system, Metrics::new(15.0, 20.0));
+        let notice_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 21.0));
         let keys_buf = Buffer::new(&mut font_system, Metrics::new(18.0, 22.0));
         let perf_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 16.0));
 
@@ -737,13 +744,13 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             backdrop: Backdrop::new(device, format),
             speed_buf,
             time_buf,
-            delta_buf,
+            stage_buf,
+            cp_buf,
+            units_buf,
             phase_buf,
             pb_abs_buf,
             flash_buf,
-            split_buf,
-            ghost_buf,
-            sync_buf,
+            notice_buf,
             keys_buf,
             perf_buf,
             page_title_buf,
@@ -821,21 +828,20 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             &speed_label,
             attrs,
             w,
-            80.0,
+            SPEED_PX * 2.0,
         );
 
-        let time_label = hud
-            .time_secs
-            .map(format_hud_time);
+        let time_label = hud.time_secs.map(format_hud_time);
         if let Some(ref t) = time_label {
-            set_buf_text(&mut self.font_system, &mut self.time_buf, t, attrs, w, 30.0);
+            set_buf_text(&mut self.font_system, &mut self.time_buf, t, attrs, w, 42.0);
         }
 
+        // The stage caption belongs to the timer block now, so the top-left tag
+        // is only the phase and the practice state.
         let base_phase_label = match hud.timer_phase {
             HudTimerPhase::Finished => Some("FINISH"),
-            HudTimerPhase::Armed => hud.stage_line.as_deref().or(Some("START")),
-            HudTimerPhase::Running => hud.stage_line.as_deref(),
-            HudTimerPhase::Idle => None,
+            HudTimerPhase::Armed => Some("START"),
+            HudTimerPhase::Running | HudTimerPhase::Idle => None,
         };
         // Both states always show, even where there'd be no label: a loaded run
         // must never be mistaken for a clean one, and you must be able to see at
@@ -854,14 +860,41 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             (None, None) => None,
         };
         if let Some(ref p) = phase_label {
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.phase_buf,
-                p,
-                attrs,
-                w,
-                22.0,
-            );
+            set_buf_text(&mut self.font_system, &mut self.phase_buf, p, attrs, w, 22.0);
+        }
+
+        let stage_label = hud.stage_line.clone();
+        if let Some(ref st) = stage_label {
+            set_buf_text(&mut self.font_system, &mut self.stage_buf, st, attrs, w, 20.0);
+        }
+
+        // Row under the clock. While the clock is not running it names what
+        // you're chasing; at the finish it is the result vs PB; in between it
+        // is the last checkpoint's split against the ghost.
+        let running = matches!(hud.timer_phase, HudTimerPhase::Running);
+        let finished = matches!(hud.timer_phase, HudTimerPhase::Finished);
+        let cp_label = if running {
+            match (hud.cp_label.as_deref(), hud.cp_delta_secs) {
+                (Some(l), Some(d)) => Some(format!("{l} {}", format_hud_delta(d))),
+                (Some(l), None) => Some(l.to_string()),
+                _ => None,
+            }
+        } else if finished {
+            hud.pb_delta_secs.map(|d| format!("PB {}", format_hud_delta(d)))
+        } else {
+            None
+        };
+        if let Some(ref c) = cp_label {
+            set_buf_text(&mut self.font_system, &mut self.cp_buf, c, attrs, w, 26.0);
+        }
+
+        let units_label = if running {
+            hud.ghost_speed_delta.map(|d| format!("{d:+.0} u/s"))
+        } else {
+            None
+        };
+        if let Some(ref u) = units_label {
+            set_buf_text(&mut self.font_system, &mut self.units_buf, u, attrs, w, 26.0);
         }
 
         let show_pb_abs = matches!(hud.timer_phase, HudTimerPhase::Idle | HudTimerPhase::Armed)
@@ -873,34 +906,7 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             None
         };
         if let Some(ref p) = pb_abs_label {
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.pb_abs_buf,
-                p,
-                attrs,
-                w,
-                22.0,
-            );
-        }
-
-        let show_delta = matches!(
-            hud.timer_phase,
-            HudTimerPhase::Running | HudTimerPhase::Finished
-        ) && hud.pb_delta_secs.is_some();
-        let delta_label = if show_delta {
-            hud.pb_delta_secs.map(format_hud_delta)
-        } else {
-            None
-        };
-        if let Some(ref d) = delta_label {
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.delta_buf,
-                d,
-                attrs,
-                w,
-                24.0,
-            );
+            set_buf_text(&mut self.font_system, &mut self.pb_abs_buf, p, attrs, w, 22.0);
         }
 
         if hud.pb_flash {
@@ -914,40 +920,15 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             );
         }
 
-        if let Some(ref s) = hud.split_line {
+        if let Some(ref s) = hud.notice {
             set_buf_text(
                 &mut self.font_system,
-                &mut self.split_buf,
+                &mut self.notice_buf,
                 s,
                 attrs,
                 w,
                 24.0,
             );
-        }
-
-        let ghost_label = match (hud.ghost_time_delta, hud.ghost_speed_delta) {
-            (Some(td), Some(sd)) => Some(format!("GHOST {}  {:+.0} u/s", format_hud_delta(td), sd)),
-            (Some(td), None) => Some(format!("GHOST {}", format_hud_delta(td))),
-            _ => None,
-        };
-        if let Some(ref g) = ghost_label {
-            set_buf_text(
-                &mut self.font_system,
-                &mut self.ghost_buf,
-                g,
-                attrs,
-                w,
-                22.0,
-            );
-        }
-
-        let sync_label = if hud.show_sync_bar {
-            Some(format!("sync {:.0}", hud.sync.clamp(0.0, 100.0)))
-        } else {
-            None
-        };
-        if let Some(ref s) = sync_label {
-            set_buf_text(&mut self.font_system, &mut self.sync_buf, s, attrs, w, 22.0);
         }
 
         let keys_label = hud.show_keys.map(format_showkeys);
@@ -1088,10 +1069,11 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
         }
 
         // In-run readout: ink for the facts, accent / warm red only for a
-        // delta's sign, warn orange only for practice. Airborne no longer tints
-        // the speed — the bar under it carries that.
+        // delta's sign, warn orange only for practice. Speed is the one place
+        // colour is a *quantity* — it warms from ink toward the accent as you
+        // go faster, so a glance reads fast/slow without a scale to parse.
         let behind = Color::rgb(232, 120, 104);
-        let speed_color = TXT_TITLE;
+        let speed_color = speed_tint(hud.speed);
         let time_color = if hud.timer_phase == HudTimerPhase::Finished && !hud.practice {
             TXT_ACCENT
         } else {
@@ -1105,103 +1087,155 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
             TXT_LABEL
         };
         let pb_abs_color = TXT_SUB;
-        let delta_color = match hud.pb_delta_secs {
-            Some(d) if d < 0.0 => TXT_GOOD,
-            Some(d) if d > 0.0 => behind,
-            _ => TXT_SUB,
+        // The two relative readings are coloured independently: you can be up
+        // on the clock and down on speed, and the HUD has to say so.
+        let sign_color = |d: Option<f32>, ahead_is_negative: bool| match d {
+            Some(v) if v == 0.0 => TXT_LABEL,
+            Some(v) => {
+                let ahead = if ahead_is_negative { v < 0.0 } else { v > 0.0 };
+                if ahead {
+                    TXT_GOOD
+                } else {
+                    behind
+                }
+            }
+            None => TXT_LABEL,
         };
-        let split_color = match hud.split_line.as_deref() {
-            Some(s) if s.contains(" -") => TXT_GOOD,
-            Some(s) if s.contains(" +") => behind,
-            _ => TXT_LABEL,
+        let cp_color = if finished {
+            sign_color(hud.pb_delta_secs, true)
+        } else {
+            sign_color(hud.cp_delta_secs, true)
         };
-        let ghost_color = match hud.ghost_time_delta {
-            Some(d) if d < 0.0 => TXT_GOOD,
-            Some(d) if d > 0.0 => behind,
-            _ => TXT_SUB,
-        };
+        let units_color = sign_color(hud.ghost_speed_delta, false);
 
         let mut areas: Vec<TextArea> = Vec::with_capacity(96);
 
-        // Speed bar + sync bar geometry, drawn into the quad pass below.
-        let mut speed_bar: Option<(f32, f32, f32, f32)> = None; // x, y, w, frac
-        let mut sync_bar: Option<(f32, f32, f32, f32)> = None;
         let mut crosshair = false;
-        // Soft ground washes behind the two text blocks so they stay legible
-        // over a bright sky or floor. No frame — the text is the shape.
-        let mut washes: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(2);
+        // The timer block's panel: a ground wash with a hairline frame, drawn
+        // in the quad pass below. (x, y, w, h)
+        let mut timer_box: Option<(f32, f32, f32, f32)> = None;
 
         if !page_open {
-            // Headline speed: top centre, with a hairline bar under it that
-            // fills toward speed_scale. The edges of the screen carry the
-            // rest, so the middle stays clear for the map.
+            // Headline speed: top centre, sat down off the edge. Just the
+            // number — no frame, no scale; the colour carries the magnitude.
             let speed_w = line_width(&self.speed_buf);
-            let speed_top = 30.0;
+            let speed_top = (h * 0.10).round();
             areas.push(TextArea {
                 buffer: &self.speed_buf,
-                left: (w - speed_w) * 0.5,
+                left: ((w - speed_w) * 0.5).round(),
                 top: speed_top,
                 scale: 1.0,
                 bounds,
                 default_color: speed_color,
                 custom_glyphs: &[],
             });
-            let bar_w = 200.0;
-            speed_bar = Some((
-                (w - bar_w) * 0.5,
-                speed_top + 58.0,
-                bar_w,
-                (hud.speed / hud.speed_scale.max(1.0)).clamp(0.0, 1.0),
-            ));
             crosshair = true;
 
-            // Timer block, bottom-left: the clock large, then its context
-            // lines beneath it in reading order.
-            let mut rows: Vec<(&Buffer, Color, f32)> = Vec::with_capacity(8);
-            if time_label.is_some() {
-                rows.push((&self.time_buf, time_color, 36.0));
+            // Timer block, lower centre: stage caption, the clock, then the
+            // two relative readings side by side.
+            let stage_w = stage_label.as_ref().map(|_| line_width(&self.stage_buf));
+            let clock_w = time_label.as_ref().map(|_| line_width(&self.time_buf));
+            let cp_w = cp_label.as_ref().map(|_| line_width(&self.cp_buf));
+            let units_w = units_label.as_ref().map(|_| line_width(&self.units_buf));
+            let pb_w = pb_abs_label.as_ref().map(|_| line_width(&self.pb_abs_buf));
+
+            // Row 3 is the pair (either half may be absent), or the absolute PB
+            // while the clock isn't running.
+            let pair_w = match (cp_w, units_w) {
+                (Some(a), Some(b)) => Some(a + TIMER_PAIR_GAP + b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let last_w = pair_w.or(pb_w);
+
+            let mut block_h = 0.0f32;
+            if stage_w.is_some() {
+                block_h += TIMER_STAGE_H;
             }
-            if delta_label.is_some() {
-                rows.push((&self.delta_buf, delta_color, 21.0));
+            if clock_w.is_some() {
+                block_h += TIMER_CLOCK_H;
             }
-            if hud.split_line.is_some() {
-                rows.push((&self.split_buf, split_color, 21.0));
-            }
-            if ghost_label.is_some() {
-                rows.push((&self.ghost_buf, ghost_color, 20.0));
-            }
-            if pb_abs_label.is_some() {
-                rows.push((&self.pb_abs_buf, pb_abs_color, 20.0));
-            }
-            let block_h: f32 = rows.iter().map(|(_, _, lh)| *lh).sum();
-            let block_w = rows
-                .iter()
-                .map(|(b, _, _)| line_width(b))
-                .fold(0.0f32, f32::max);
-            let mut y = h - 56.0 - block_h;
-            if !rows.is_empty() {
-                washes.push((44.0 - 14.0, y - 10.0, block_w + 28.0, block_h + 20.0));
-            }
-            washes.push((
-                (w - speed_w.max(bar_w)) * 0.5 - 20.0,
-                speed_top - 8.0,
-                speed_w.max(bar_w) + 40.0,
-                76.0,
-            ));
-            for (buf, color, lh) in rows {
-                areas.push(TextArea {
-                    buffer: buf,
-                    left: 44.0,
-                    top: y,
-                    scale: 1.0,
-                    bounds,
-                    default_color: color,
-                    custom_glyphs: &[],
-                });
-                y += lh;
+            if last_w.is_some() {
+                block_h += TIMER_ROW_H;
             }
 
-            // Phase / stage / practice: top-left, small caps.
+            if block_h > 0.0 {
+                let content_w = [stage_w, clock_w, last_w]
+                    .into_iter()
+                    .flatten()
+                    .fold(0.0f32, f32::max);
+                let box_w = (content_w + TIMER_PAD_X * 2.0).max(TIMER_MIN_W);
+                let box_h = block_h + TIMER_PAD_Y * 2.0;
+                let box_x = ((w - box_w) * 0.5).round();
+                let box_y = (h - TIMER_BOTTOM - box_h).round();
+                timer_box = Some((box_x, box_y, box_w, box_h));
+
+                let cx = (w * 0.5).round();
+                let mut y = box_y + TIMER_PAD_Y;
+                if let Some(sw) = stage_w {
+                    areas.push(TextArea {
+                        buffer: &self.stage_buf,
+                        left: (cx - sw * 0.5).round(),
+                        top: y,
+                        scale: 1.0,
+                        bounds,
+                        default_color: TXT_HEADER,
+                        custom_glyphs: &[],
+                    });
+                    y += TIMER_STAGE_H;
+                }
+                if let Some(cw) = clock_w {
+                    areas.push(TextArea {
+                        buffer: &self.time_buf,
+                        left: (cx - cw * 0.5).round(),
+                        top: y,
+                        scale: 1.0,
+                        bounds,
+                        default_color: time_color,
+                        custom_glyphs: &[],
+                    });
+                    y += TIMER_CLOCK_H;
+                }
+                if let Some(pw) = pair_w {
+                    let mut x = (cx - pw * 0.5).round();
+                    if let Some(cw) = cp_w {
+                        areas.push(TextArea {
+                            buffer: &self.cp_buf,
+                            left: x,
+                            top: y,
+                            scale: 1.0,
+                            bounds,
+                            default_color: cp_color,
+                            custom_glyphs: &[],
+                        });
+                        x += cw + TIMER_PAIR_GAP;
+                    }
+                    if units_w.is_some() {
+                        areas.push(TextArea {
+                            buffer: &self.units_buf,
+                            left: x,
+                            top: y,
+                            scale: 1.0,
+                            bounds,
+                            default_color: units_color,
+                            custom_glyphs: &[],
+                        });
+                    }
+                } else if let Some(pw) = pb_w {
+                    areas.push(TextArea {
+                        buffer: &self.pb_abs_buf,
+                        left: (cx - pw * 0.5).round(),
+                        top: y,
+                        scale: 1.0,
+                        bounds,
+                        default_color: pb_abs_color,
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+
+            // Phase / practice: top-left, small caps.
             if phase_label.is_some() {
                 areas.push(TextArea {
                     buffer: &self.phase_buf,
@@ -1218,8 +1252,8 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 let fw = line_width(&self.flash_buf);
                 areas.push(TextArea {
                     buffer: &self.flash_buf,
-                    left: (w - fw) * 0.5,
-                    top: speed_top + 84.0,
+                    left: ((w - fw) * 0.5).round(),
+                    top: speed_top + SPEED_PX + 18.0,
                     scale: 1.0,
                     bounds,
                     default_color: TXT_ACCENT,
@@ -1227,33 +1261,29 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 });
             }
 
-            // Sync, bottom-right above the perf line, with a hairline bar.
-            if sync_label.is_some() {
-                let sw = line_width(&self.sync_buf);
-                let sy = h - 56.0 - 30.0;
+            // Transient notices sit just above the timer block.
+            if hud.notice.is_some() {
+                let nw = line_width(&self.notice_buf);
+                let ny = timer_box.map(|(_, by, _, _)| by - 34.0).unwrap_or(h - 120.0);
                 areas.push(TextArea {
-                    buffer: &self.sync_buf,
-                    left: w - 44.0 - sw,
-                    top: sy,
+                    buffer: &self.notice_buf,
+                    left: ((w - nw) * 0.5).round(),
+                    top: ny,
                     scale: 1.0,
                     bounds,
-                    default_color: TXT_SUB,
+                    default_color: TXT_LABEL,
                     custom_glyphs: &[],
                 });
-                sync_bar = Some((
-                    w - 44.0 - 160.0,
-                    sy + 26.0,
-                    160.0,
-                    (hud.sync / 100.0).clamp(0.0, 1.0),
-                ));
             }
 
+            // Keys, bottom-right above the perf line — the bottom centre is
+            // the timer's now.
             if keys_label.is_some() {
                 let kw = line_width(&self.keys_buf);
                 areas.push(TextArea {
                     buffer: &self.keys_buf,
-                    left: (w - kw) * 0.5,
-                    top: h - 56.0,
+                    left: w - 44.0 - kw,
+                    top: h - 62.0,
                     scale: 1.0,
                     bounds,
                     default_color: TXT_LABEL,
@@ -1629,16 +1659,29 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
                 });
             }
         } else {
-            for (bx, by, bw, bh) in washes {
-                push_rect_px(&mut verts, bx, by, bw, bh, w, h, ground(0.30));
-            }
-            if let Some((bx, by, bw, frac)) = speed_bar {
-                push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, ink(0.14));
-                push_rect_px(&mut verts, bx, by - 1.0, (bw * frac).max(1.0), 3.0, w, h, ink(1.0));
-            }
-            if let Some((bx, by, bw, frac)) = sync_bar {
-                push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, ink(0.14));
-                push_rect_px(&mut verts, bx, by - 1.0, (bw * frac).max(1.0), 3.0, w, h, ink(1.0));
+            // Timer block: the one framed thing in the run HUD. Same language
+            // as a menu panel — ground sheet, hairline frame, corner ticks.
+            if let Some((bx, by, bw, bh)) = timer_box {
+                push_rect_px(&mut verts, bx, by, bw, bh, w, h, ground(0.80));
+                let frame = ink(0.12);
+                push_rect_px(&mut verts, bx, by, bw, 1.0, w, h, frame);
+                push_rect_px(&mut verts, bx, by + bh - 1.0, bw, 1.0, w, h, frame);
+                push_rect_px(&mut verts, bx, by, 1.0, bh, w, h, frame);
+                push_rect_px(&mut verts, bx + bw - 1.0, by, 1.0, bh, w, h, frame);
+                // Four L-shaped corner ticks: the horizontal arm runs inward
+                // from the corner, the vertical one down (top) or up (bottom).
+                let tick = ink(0.55);
+                let t = 10.0;
+                for &right in &[false, true] {
+                    for &bottom in &[false, true] {
+                        let hx = if right { bx + bw - t } else { bx };
+                        let hy = if bottom { by + bh - 1.0 } else { by };
+                        push_rect_px(&mut verts, hx, hy, t, 1.0, w, h, tick);
+                        let vx = if right { bx + bw - 1.0 } else { bx };
+                        let vy = if bottom { by + bh - t } else { by };
+                        push_rect_px(&mut verts, vx, vy, 1.0, t, w, h, tick);
+                    }
+                }
             }
             if crosshair {
                 // 1px hairline cross, 14px, with a 2px gap at the centre.
@@ -1687,6 +1730,16 @@ fn fs_main(v: VsOut) -> @location(0) vec4<f32> {
     pub fn trim(&mut self) {
         self.atlas.trim();
     }
+}
+
+/// Speed's one job as colour: warm from ink toward the accent as you go
+/// faster, saturating around a fast surf line. Not a scale — a temperature.
+fn speed_tint(speed: f32) -> Color {
+    // Ramps in over the band you actually surf, and stops short of the pure
+    // accent so the number never shouts as loudly as a delta does.
+    let t = ((speed - 400.0) / 2200.0).clamp(0.0, 1.0) * 0.72;
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::rgb(mix(233, 47), mix(238, 191), mix(236, 127))
 }
 
 fn title_metrics(large: bool) -> Metrics {

@@ -28,6 +28,11 @@ pub struct MaterialAtlas {
     /// Per layer: is this an `$additive` material? The renderer draws those in
     /// a second, blended pass (`dst += src`) after the opaque world.
     pub additive_layers: Vec<bool>,
+    /// Per layer: is this a `$translucent` material? Drawn in a blended pass
+    /// (`src.a` over the world) between the opaque world and the additive
+    /// glows. Disjoint from `additive_layers` — a material declaring both is
+    /// additive, because that is the blend Source ends up using.
+    pub translucent_layers: Vec<bool>,
     /// Every resolved material name → its layer. "Which texture is that white
     /// wall?" is the question every texture triage starts with, and without
     /// this the atlas is an anonymous pile of images.
@@ -46,6 +51,7 @@ impl MaterialAtlas {
             missing_count: 0,
             missing_names: Vec::new(),
             additive_layers: vec![false],
+            translucent_layers: vec![false],
             layer_of: Vec::new(),
         }
     }
@@ -60,8 +66,9 @@ pub struct MaterialBank {
     /// resolved VTF path → layer index (cubemap patches often share one albedo)
     by_texture: HashMap<String, u32>,
     layers: Vec<RgbaImage>,
-    /// Parallel to `layers`.
+    /// Both parallel to `layers`.
     additive: Vec<bool>,
+    translucent: Vec<bool>,
     textured_count: u32,
     missing_count: u32,
     missing_names: Vec<String>,
@@ -93,6 +100,7 @@ impl MaterialBank {
             by_texture: HashMap::new(),
             layers: vec![white],
             additive: vec![false],
+            translucent: vec![false],
             textured_count: 0,
             missing_count: 0,
             missing_names: Vec::new(),
@@ -134,15 +142,20 @@ impl MaterialBank {
         let off = disabled();
         let tint = (!off.tint).then(|| vmt::resolve_tint(&get, &key)).flatten();
         let additive = !off.additive && vmt::is_additive(&get, &key);
+        // A `$translucent` surface blends; it does not cut out. Additive wins
+        // when a material declares both — `dst += src` is the blend Source
+        // settles on, and the two passes are mutually exclusive here.
+        let translucent = !off.translucent && !additive && vmt::is_translucent(&get, &key);
         let id = match self.load_albedo(&key, tint) {
             Some(LoadedAlbedo::Real {
                 image,
                 texture_path,
             }) => {
                 let cache_key = format!(
-                    "{texture_path}#{}{}#{}",
+                    "{texture_path}#{}{}{}#{}",
                     u8::from(alpha_tested),
                     u8::from(additive),
+                    u8::from(translucent),
                     tint_key(tint)
                 );
                 if let Some(&id) = self.by_texture.get(&cache_key) {
@@ -159,6 +172,7 @@ impl MaterialBank {
                     apply_tint(&mut layer, tint);
                     self.layers.push(layer);
                     self.additive.push(additive);
+                    self.translucent.push(translucent);
                     self.by_texture.insert(cache_key, id);
                     self.textured_count += 1;
                     id
@@ -172,6 +186,8 @@ impl MaterialBank {
                 apply_tint(&mut layer, tint);
                 self.layers.push(layer);
                 self.additive.push(additive);
+                // Forced opaque above, so blending it would change nothing.
+                self.translucent.push(false);
                 id
             }
             Some(LoadedAlbedo::FlatColor(c)) => {
@@ -179,6 +195,7 @@ impl MaterialBank {
                 let id = self.layers.len() as u32;
                 self.layers.push(flat_color_layer(c));
                 self.additive.push(additive);
+                self.translucent.push(false);
                 id
             }
             None => {
@@ -266,6 +283,7 @@ impl MaterialBank {
             missing_count: self.missing_count,
             missing_names: self.missing_names,
             additive_layers: self.additive,
+            translucent_layers: self.translucent,
             layer_of: {
                 let mut v: Vec<_> = self.by_material.into_iter().collect();
                 v.sort();
@@ -325,6 +343,7 @@ fn flat_color_layer(linear: [f32; 3]) -> RgbaImage {
 struct Disabled {
     tint: bool,
     additive: bool,
+    translucent: bool,
 }
 
 fn disabled() -> Disabled {
@@ -336,6 +355,7 @@ fn disabled() -> Disabled {
     Disabled {
         tint: all || v.contains("tint"),
         additive: all || v.contains("additive"),
+        translucent: all || v.contains("translucent"),
     }
 }
 

@@ -398,15 +398,20 @@ pub fn format_pb_delta(delta: f32) -> String {
     format!("{sign}{abs}")
 }
 
-/// HUD line for a checkpoint / stage split flash.
-pub fn format_split_line(ev: SplitEvent, staged: bool) -> String {
-    let t = format_time(ev.time_secs);
-    let label = if staged {
+/// Short name for a split: `CP3` on a linear track, `S4` on a staged one.
+pub fn split_label(ev: SplitEvent, staged: bool) -> String {
+    if staged {
         // Split index 1 = arriving at stage 2.
         format!("S{}", ev.index + 1)
     } else {
         format!("CP{}", ev.index)
-    };
+    }
+}
+
+/// Console line for a checkpoint / stage split.
+pub fn format_split_line(ev: SplitEvent, staged: bool) -> String {
+    let t = format_time(ev.time_secs);
+    let label = split_label(ev, staged);
     match ev.delta_vs_pb {
         Some(d) => format!("{label} {t}  {}", format_pb_delta(d)),
         None => format!("{label} {t}"),

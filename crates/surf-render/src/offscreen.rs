@@ -60,7 +60,7 @@ impl Offscreen {
             view_formats: vec![],
         };
 
-        let mesh = GpuMesh::from_graybox(&device, &map.mesh, &map.materials.additive_layers);
+        let mesh = GpuMesh::from_graybox(&device, &map.mesh, &map.materials);
         let renderer = Renderer::new(
             device,
             queue,

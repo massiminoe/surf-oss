@@ -87,7 +87,11 @@ fn main() {
         let px = &m.rgba[i * layer..(i + 1) * layer];
         let first = &px[0..4];
         let flat = px.chunks_exact(4).all(|c| c == first);
-        println!("  layer {i:3}: flat={flat} rgba={first:?}");
+        // Which blended pass (if any) this layer is drawn in — the first thing
+        // to check when a surface reads as an opaque slab.
+        let add = m.additive_layers.get(i).copied().unwrap_or(false);
+        let tra = m.translucent_layers.get(i).copied().unwrap_or(false);
+        println!("  layer {i:3}: flat={flat} additive={add} translucent={tra} rgba={first:?}");
         image::RgbaImage::from_raw(s, s, px.to_vec())
             .unwrap()
             .save(format!("{out}/mat_{i:03}.png"))
