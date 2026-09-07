@@ -7,7 +7,7 @@ use crate::movement::{
     MoveVars, PlayerState, UserCmd, CROUCH_STUCK_NUDGES, DUCK_SPEED_MULTIPLIER, GROUND_PROBE,
     MAX_CLIP_PLANES, NON_JUMP_VELOCITY, STOP_EPSILON, WALKABLE_NORMAL_Z,
 };
-use crate::trace::{point_contents_box, trace_box, TraceResult};
+use crate::trace::{hull_is_stuck, point_contents_box, trace_box, TraceResult};
 
 /// True when the player hull is sitting on a surfable slope (steep, not walkable).
 ///
@@ -290,7 +290,89 @@ fn step_move(world: &World, p: &mut PlayerState, _dest: Vec3, vars: &MoveVars, h
     }
 }
 
+/// Momentum `sv_ramp_initial_retrace_length`: how far a stuck hull is pushed
+/// out along a known surface normal before the sweep is retried.
+const RAMP_RETRACE_LENGTH: f32 = 0.2;
+
+/// A trace the move loop can act on. Anything else — started inside a solid,
+/// solid the whole way, no progress on a retry, or a full-length sweep whose
+/// end point is nevertheless inside something — is "stuck", and with the ramp
+/// fix on the loop nudges out and retries instead of freezing or zeroing.
+fn trace_is_usable(
+    world: &World,
+    pm: &TraceResult,
+    velocity: Vec3,
+    hull: &Hull,
+    first_bump: bool,
+) -> bool {
+    if pm.allsolid || pm.startsolid {
+        return false;
+    }
+    if first_bump {
+        // Touching a wall at the start of the tick and clipping along it is
+        // ordinary; only a later bump making no progress means we are wedged.
+        return true;
+    }
+    if pm.fraction <= f32::EPSILON {
+        return false;
+    }
+    !hull_is_stuck(world, pm.endpos, velocity, hull.mins, hull.maxs)
+}
+
+/// Momentum's "we have no plane info": grow the hull a little in each of the
+/// 27 offset combinations, sweep, and average the normals of every clean hit.
+fn probe_valid_plane(
+    world: &World,
+    origin: Vec3,
+    end: Vec3,
+    hull: &Hull,
+    bump: usize,
+) -> Option<Vec3> {
+    let reach = (bump * 2) as f32 * RAMP_RETRACE_LENGTH;
+    let offsets = [-reach, 0.0, reach];
+    let mut sum = Vec3::ZERO;
+    let mut count = 0;
+    for &ox in &offsets {
+        for &oy in &offsets {
+            for &oz in &offsets {
+                let offset = Vec3::new(ox, oy, oz);
+                let mut grow_mins = offset * 0.5;
+                let mut grow_maxs = offset * 0.5;
+                for (o, gmin, gmax) in [
+                    (offset.x, &mut grow_mins.x, &mut grow_maxs.x),
+                    (offset.y, &mut grow_mins.y, &mut grow_maxs.y),
+                    (offset.z, &mut grow_mins.z, &mut grow_maxs.z),
+                ] {
+                    if o > 0.0 {
+                        *gmin *= 0.5;
+                    } else if o < 0.0 {
+                        *gmax *= 0.5;
+                    }
+                }
+                let tr = trace_box(
+                    world,
+                    origin + offset,
+                    end - offset,
+                    hull.mins - grow_mins,
+                    hull.maxs + grow_maxs,
+                );
+                if let Some(h) = tr.hit {
+                    if tr.fraction > 0.0 && tr.fraction < 1.0 && !tr.startsolid {
+                        sum += h.normal;
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    if count == 0 || sum.length() <= f32::EPSILON {
+        return None;
+    }
+    Some(sum.normalize())
+}
+
 fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &Hull) {
+    let ramp_fix = vars.fixes.fix_ramp && !p.grounded;
     let numbumps = if vars.fixes.fix_ramp { 8 } else { 4 };
     let mut original_velocity = p.velocity;
     let primal_velocity = p.velocity;
@@ -299,39 +381,100 @@ fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &H
     let mut planes: [Vec3; MAX_CLIP_PLANES] = [Vec3::ZERO; MAX_CLIP_PLANES];
     let mut numplanes = 0usize;
 
-    for _bump in 0..numbumps {
+    // Ramp-fix state (Momentum `sv_ramp_fix`): when a sweep comes back unusable
+    // the hull is pushed `RAMP_RETRACE_LENGTH` out along a surface normal we
+    // trust and the sweep is retried from there, instead of zeroing velocity
+    // (stock) or holding still with full speed (what we used to do).
+    let mut fixed_origin = p.origin;
+    let mut stuck = false;
+    // The normal the retrace pushes along. It persists across retries so the
+    // next retry can pick a *different* plane — a hull wedged in a concave
+    // corner (boreas: rock terrain meeting a wall) must alternate between the
+    // two, or every nudge along the wall drives it deeper into the terrain.
+    let mut valid_plane = Vec3::ZERO;
+    let mut has_valid_plane = false;
+    let mut last_normal: Option<Vec3> = None;
+
+    for bump in 0..numbumps {
         if p.velocity.length() == 0.0 {
             break;
         }
-        let end = p.origin + p.velocity * time_left;
-        let pm = trace_player(world, p.origin, end, hull);
-        all_fraction += pm.fraction;
+
+        if stuck && ramp_fix {
+            if !has_valid_plane {
+                let fresh = |n: Vec3| n.length() > f32::EPSILON && n != valid_plane;
+                if let Some(n) = last_normal.filter(|n| fresh(*n)) {
+                    valid_plane = n;
+                    has_valid_plane = true;
+                } else if let Some(n) = (0..numplanes).rev().map(|i| planes[i]).find(|n| fresh(*n)) {
+                    valid_plane = n;
+                    has_valid_plane = true;
+                } else {
+                    let end = fixed_origin + p.velocity * time_left;
+                    if let Some(n) = probe_valid_plane(world, fixed_origin, end, hull, bump) {
+                        valid_plane = n;
+                        has_valid_plane = true;
+                        continue;
+                    }
+                    // Nothing new to try. Momentum gives up here; a hull that
+                    // is straddling a surface would then never move again, so
+                    // keep pushing along the one normal we do know about.
+                    if let Some(n) = last_normal.filter(|n| n.length() > f32::EPSILON) {
+                        valid_plane = n;
+                        has_valid_plane = true;
+                    } else {
+                        stuck = false;
+                        continue;
+                    }
+                }
+            }
+            p.velocity = clip_velocity(p.velocity, valid_plane, 1.0);
+            original_velocity = p.velocity;
+            fixed_origin += valid_plane * RAMP_RETRACE_LENGTH;
+        }
+
+        let from = if stuck && ramp_fix { fixed_origin } else { p.origin };
+        let end = from + p.velocity * time_left;
+        let mut pm = trace_player(world, from, end, hull);
+        if stuck && ramp_fix && has_valid_plane {
+            if let Some(h) = pm.hit.as_mut() {
+                h.normal = valid_plane;
+            }
+        }
+
+        if ramp_fix && !trace_is_usable(world, &pm, p.velocity, hull, bump == 0) {
+            last_normal = pm.hit.map(|h| h.normal).or(pm.stuck_normal);
+            has_valid_plane = false;
+            stuck = true;
+            continue;
+        }
 
         if pm.allsolid {
-            if vars.fixes.fix_ramp && !p.grounded {
-                // Nudge along first plane normal instead of hard zero.
-                p.origin += Vec3::Z * 0.2;
-            } else {
-                p.velocity = Vec3::ZERO;
-            }
+            // Stock: trapped in a solid, dead stop.
+            p.velocity = Vec3::ZERO;
             return;
         }
 
         if pm.fraction > 0.0 {
-            if pm.fraction == 1.0 {
+            if pm.fraction == 1.0 && (bump == 0 || !ramp_fix) {
                 // Unswept re-test at endpos (terrain precision hack).
-                let stuck = trace_player(world, pm.endpos, pm.endpos, hull);
-                if stuck.startsolid || stuck.fraction != 1.0 {
-                    if vars.fixes.fix_ramp && !p.grounded {
-                        // Skip zeroing — stay put this bump.
-                        break;
+                if hull_is_stuck(world, pm.endpos, p.velocity, hull.mins, hull.maxs) {
+                    if ramp_fix {
+                        last_normal = None;
+                        has_valid_plane = false;
+                        stuck = true;
+                        continue;
                     }
                     p.velocity = Vec3::ZERO;
                     break;
                 }
             }
+            stuck = false;
+            has_valid_plane = false;
             p.origin = pm.endpos;
+            fixed_origin = p.origin;
             original_velocity = p.velocity;
+            all_fraction += pm.fraction;
             numplanes = 0;
         }
 
@@ -343,11 +486,12 @@ fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &H
             Some(h) => h.normal,
             None => break,
         };
+        last_normal = Some(normal);
 
         time_left -= time_left * pm.fraction;
 
         if numplanes >= MAX_CLIP_PLANES {
-            if !(vars.fixes.fix_ramp && !p.grounded) {
+            if !ramp_fix {
                 p.velocity = Vec3::ZERO;
             }
             break;
@@ -385,7 +529,7 @@ fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &H
             }
             if i == numplanes {
                 if numplanes != 2 {
-                    if !(vars.fixes.fix_ramp && !p.grounded) {
+                    if !ramp_fix {
                         p.velocity = Vec3::ZERO;
                     }
                     break;
@@ -396,7 +540,7 @@ fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &H
                 p.velocity = dir * d;
             }
             if p.velocity.dot(primal_velocity) <= 0.0 {
-                if !(vars.fixes.fix_ramp && !p.grounded) {
+                if !ramp_fix {
                     p.velocity = Vec3::ZERO;
                 }
                 break;
@@ -404,10 +548,15 @@ fn try_player_move(world: &World, p: &mut PlayerState, vars: &MoveVars, hull: &H
         }
     }
 
-    if all_fraction == 0.0 {
-        if !(vars.fixes.fix_ramp && !p.grounded) {
-            p.velocity = Vec3::ZERO;
-        }
+    if all_fraction == 0.0 && !ramp_fix {
+        p.velocity = Vec3::ZERO;
+    }
+    if all_fraction == 0.0 && stuck && ramp_fix && fixed_origin != p.origin {
+        // Every retry this tick was still stuck. Keep the nudges anyway: they
+        // only ever push out along a surface normal, and a hull that is inside
+        // something (a loc loaded into a wall, a plate entered through a bug)
+        // has to climb out over a few ticks rather than sit there forever.
+        p.origin = fixed_origin;
     }
 
     // Eat near-zero components.

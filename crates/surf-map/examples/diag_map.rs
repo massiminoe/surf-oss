@@ -354,9 +354,9 @@ fn main() {
             t.bounds.mins.y,
             t.bounds.maxs.x,
             t.bounds.maxs.y,
-            t.planes.len(),
-            t.planes.first().map(|p| p.normal),
-            t.planes.get(1).map(|p| p.normal),
+            t.planes().1,
+            Some(t.normal),
+            Some(-t.normal),
         );
     }
 

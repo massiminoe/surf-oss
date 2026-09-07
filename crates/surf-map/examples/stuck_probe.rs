@@ -34,7 +34,7 @@ fn main() {
         }
     }
     for (ti, tri) in w.tris.iter().enumerate() {
-        let tr = trace_planes_pub(&tri.planes, ti, at, at, hull.mins, hull.maxs);
+        let tr = trace_planes_pub(&tri.planes().0[..tri.planes().1], ti, at, at, hull.mins, hull.maxs);
         if tr.startsolid || tr.allsolid {
             n += 1;
             let src = if ti < map.prop_tri_start {

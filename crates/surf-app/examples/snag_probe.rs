@@ -78,7 +78,7 @@ fn main() {
         {
             continue;
         }
-        let r = trace_planes_pub(&tri.planes, solid, start, end, hull.mins, hull.maxs);
+        let r = trace_planes_pub(&tri.planes().0[..tri.planes().1], solid, start, end, hull.mins, hull.maxs);
         if r.fraction >= 1.0 && !r.startsolid {
             continue;
         }
