@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Test corpus of community surf maps. BSPs are NOT committed (see .gitignore);",
+    "Supported catalog: all 16 in-game community maps. BSPs are NOT committed;",
     "fetch them with `python3 tools/fetch_maps.py --all`, which verifies every",
     "download against the sha256 below.",
     "",
@@ -10,13 +10,14 @@
     "spawns and zone volumes without any other signal. Do not update a hash",
     "without re-deriving that map's zones and re-checking its tests."
   ],
-  "source": "https://main.fastdl.me/maps/<name>.bsp.bz2",
+  "source": "https://main.fastdl.me/mapsredir/<name>.bsp.bz2",
   "_required_by_tests_comment": [
     "`cargo test --workspace` loads these maps and will FAIL without them —",
     "by design, we require the corpus rather than silently skipping coverage.",
     "Fetch with `python3 tools/fetch_maps.py --batch tests`.",
     "surf-app's KSF resim/audio tests additionally need assets/replays/external/,",
-    "which is local-only and not fetchable; those tests self-skip when it's absent."
+    "which is local-only; those tests self-skip when it is absent. The game's",
+    "--setup command downloads current public KSF records and available replays."
   ],
   "required_by_tests": [
     "surf_boreas",

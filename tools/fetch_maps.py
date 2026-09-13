@@ -31,7 +31,7 @@ try:
 except ImportError:
     SSL_CONTEXT = ssl.create_default_context()
 
-BASE = "https://main.fastdl.me/maps"
+BASE = "https://main.fastdl.me/mapsredir"
 UA = "surf-oss-research/1.0 (+local-dev; FastDL map acquisition)"
 
 

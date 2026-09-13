@@ -40,16 +40,11 @@ impl StockFs {
                 roots.push(p);
             }
         }
-        // Common Steam macOS layout (optional convenience).
-        if let Some(home) = std::env::var_os("HOME") {
-            let steam = PathBuf::from(home)
-                .join("Library/Application Support/Steam/steamapps/common/Counter-Strike Source");
-            if steam.is_dir() {
-                for sub in ["cstrike", "hl2"] {
-                    let cand = steam.join(sub);
-                    if cand.is_dir() && !roots.contains(&cand) {
-                        roots.push(cand);
-                    }
+        if let Some(game) = discover_game_dir() {
+            for sub in ["cstrike", "hl2"] {
+                let root = game.join(sub);
+                if root.is_dir() && !roots.contains(&root) {
+                    roots.push(root);
                 }
             }
         }
@@ -96,7 +91,6 @@ impl StockFs {
         }
         None
     }
-
 }
 
 struct VpkEntry {
@@ -252,4 +246,111 @@ fn read_zt(buf: &[u8], i: &mut usize) -> Result<String, String> {
     let s = String::from_utf8_lossy(&buf[start..*i]).into_owned();
     *i += 1;
     Ok(s)
+}
+
+/// Steam libraries may live on external disks. An explicit override wins.
+static SELECTED_GAME: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+pub fn select_game_dir(path: PathBuf) {
+    *SELECTED_GAME.write().unwrap() = Some(path);
+}
+
+pub fn discover_game_dir() -> Option<PathBuf> {
+    if let Some(path) = SELECTED_GAME.read().unwrap().as_ref() {
+        return Some(path.clone());
+    }
+    if let Some(path) = std::env::var_os("SURF_OSS_GAME_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let steam = home.join("Library/Application Support/Steam");
+    let mut libraries = vec![steam.clone()];
+    if let Ok(vdf) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
+        libraries.extend(library_paths(&vdf));
+    }
+    libraries
+        .into_iter()
+        .map(|p| p.join("steamapps/common/Counter-Strike Source"))
+        .find(|p| p.join("cstrike").is_dir())
+}
+
+fn library_paths(vdf: &str) -> Vec<PathBuf> {
+    // Valve KeyValues quoted strings; decode escaped slashes and quotes.
+    let mut tokens = Vec::new();
+    let mut chars = vdf.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut token = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => {
+                    if let Some(c) = chars.next() {
+                        token.push(c);
+                    }
+                }
+                _ => token.push(c),
+            }
+        }
+        tokens.push(token);
+    }
+    tokens
+        .windows(2)
+        .filter(|p| p[0] == "path")
+        .map(|p| PathBuf::from(&p[1]))
+        .collect()
+}
+
+/// Validate both game asset roots and the archives they reference, without writing.
+pub fn validate_game_dir(path: &Path) -> Result<(), String> {
+    for sub in ["cstrike", "hl2"] {
+        let root = path.join(sub);
+        let entries = std::fs::read_dir(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+        let mut archives = 0;
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.to_string_lossy().ends_with("_dir.vpk") {
+                continue;
+            }
+            let archive = VpkArchive::open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let stem = p.file_stem().unwrap().to_string_lossy();
+            let stem = stem.strip_suffix("_dir").unwrap();
+            for index in archive
+                .index
+                .values()
+                .filter(|e| e.entry_length > 0)
+                .map(|e| e.archive_index)
+                .collect::<std::collections::HashSet<_>>()
+            {
+                if index != 0x7fff && !root.join(format!("{stem}_{index:03}.vpk")).is_file() {
+                    return Err(format!(
+                        "Missing {sub}/{stem}_{index:03}.vpk; verify CS:S files in Steam"
+                    ));
+                }
+            }
+            archives += 1;
+        }
+        if archives == 0 {
+            return Err(format!(
+                "No VPK archives in {}; install CS:S content through Steam",
+                root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    #[test]
+    fn external_library_paths_preserve_spaces() {
+        assert_eq!(
+            super::library_paths(
+                r#""libraryfolders" { "0" { "path" "/Volumes/Game Disk/Steam" } }"#
+            ),
+            vec![std::path::PathBuf::from("/Volumes/Game Disk/Steam")]
+        );
+    }
 }

@@ -28,3 +28,9 @@ tools/__pycache__/
 
 # Ad-hoc local screenshots / inspect dumps (keep fixtures elsewhere)
 /*.png
+
+# Locally selected CS:S installation and retained setup scratch downloads
+/assets/game-dir.txt
+/assets/**/*.part
+
+/assets/downloads/

@@ -320,6 +320,7 @@ pub enum RowAction {
     Rebind(Bind),
     MainResume,
     MainPlay,
+    SetupContent,
     MainLeaderboard,
     MainSettings,
     MainQuit,

@@ -6,7 +6,7 @@ manifest.json with provenance + SHA-256. See docs/KSF-REPLAY-HANDOFF.md.
 
 Usage:
   python3 tools/ksf_fetch.py --map surf_summit --max-rank 10
-  python3 tools/ksf_fetch.py --batch aesthetic-17 --max-rank 10
+  python3 tools/ksf_fetch.py --batch all --max-rank 10
   python3 tools/ksf_fetch.py surf_boreas surf_frost --max-rank 5
 
 Polite defaults: one in-flight request, >=1s delay, Retry-After / backoff on
@@ -38,51 +38,11 @@ UA = "surf-oss-research/1.0 (+local-dev; KSF replay acquisition; 1 req/s)"
 MIN_DELAY_S = 1.0
 MAX_RETRIES = 6
 
-# Same aesthetic wave as tools/fetch_maps.py (exact KSF names, 2026-08-02 probe).
-BATCHES = {
-    "aesthetic-17": [
-        "surf_boreas",
-        "surf_tendies",
-        "surf_lovetunnel",
-        "surf_andromeda",
-        "surf_cyberwave",
-        "surf_overgrowth",
-        "surf_cement",
-        "surf_lux",
-        "surf_fornax",
-        "surf_void",
-        "surf_frost",
-        "surf_aquaflow",
-        "surf_botanica",
-        "surf_demise",
-    ],
-    "linear-wave1": [
-        "surf_void",
-        "surf_lux",
-        "surf_boreas",
-        "surf_tendies",
-        "surf_andromeda",
-    ],
-    "linear-wave2": [
-        "surf_lovetunnel",
-        "surf_frost",
-        "surf_fornax",
-        "surf_demise",
-        "surf_cyberwave",
-        "surf_aquaflow",
-    ],
-    "linear-wave3": [
-        "surf_cannonball",
-    ],
-    "staged-later": [
-        "surf_overgrowth",
-        "surf_cement",
-        "surf_botanica",
-    ],
-    "m1-corpus": [
-        "surf_summit",
-    ],
-}
+# The game, installer, and developer fetcher share the supported catalog.
+CATALOG = json.loads((Path(__file__).resolve().parents[1] / "assets/maps/manifest.json").read_text())
+BATCHES = {"all": sorted(CATALOG["maps"])}
+for map_name, entry in CATALOG["maps"].items():
+    BATCHES.setdefault(entry["batch"], []).append(map_name)
 
 
 def repo_root() -> Path:
@@ -382,7 +342,7 @@ def main() -> int:
     ap.add_argument(
         "--batch",
         choices=sorted(BATCHES),
-        help="Named map batch (aesthetic-17, linear-wave1/2, staged-later, m1-corpus)",
+        help="Catalog batch; all includes all 16 supported maps",
     )
     ap.add_argument(
         "--max-rank",

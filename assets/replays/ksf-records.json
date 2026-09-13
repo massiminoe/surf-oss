@@ -1,0 +1,693 @@
+{
+  "source": "https://ksf.surf",
+  "game": "66t",
+  "mode": "fw",
+  "note": "Dated public record metadata for offline/empty-API fallback. No replay binaries are bundled. Missing ranks are not inferred.",
+  "maps": {
+    "surf_andromeda": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_andromeda",
+      "fetched_at": "2026-08-02T10:56:07Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 32.175655,
+          "file": "replay_css_3029_0_712551_1754853172.rec",
+          "sha256": "4d68cd0eb9d7c6aff163e9a2beb4077a9fcf01e79a14835a462aaaa19d824e69"
+        },
+        {
+          "rank": 2,
+          "name": "megacutechicken",
+          "time": 32.310039,
+          "file": "replay_css_3029_0_796085_1725014238.rec",
+          "sha256": "6242be052f343b0359b46e7c89c951d6620e11d085667316fee3f2fbe5a85d90"
+        },
+        {
+          "rank": 3,
+          "name": "levi",
+          "time": 32.33982,
+          "file": "replay_css_3029_0_540902_1724918605.rec",
+          "sha256": "cd6d397948559d648059e4264f3497b7eb4fc93163c525211962f55d30afea7c"
+        },
+        {
+          "rank": 5,
+          "name": "fishöö",
+          "time": 32.355026,
+          "file": "replay_css_3029_0_332854_1620281943.rec",
+          "sha256": "9180751169a490c9603ef00b2e747550e967120fff9b91cfbfda1df71be21d78"
+        },
+        {
+          "rank": 6,
+          "name": "src.",
+          "time": 32.384128,
+          "file": "replay_css_3029_0_512658_1669353425.rec",
+          "sha256": "785232f0b6862f10a2c2bf262c90fd18244626e393a8a553caa681aaa5ab1806"
+        },
+        {
+          "rank": 8,
+          "name": "cole*",
+          "time": 32.414695,
+          "file": "replay_css_3029_0_596965_1610186110.rec",
+          "sha256": "12dbbf4ee9b8998d00ab5b82c30fcfeee1904dbd938d6da1cd215fac5398bcda"
+        }
+      ]
+    },
+    "surf_aquaflow": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_aquaflow",
+      "fetched_at": "2026-08-02T10:57:52Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "ellyever",
+          "time": 41.579895,
+          "file": "replay_css_4078_0_748490_1762805973.rec",
+          "sha256": "b7bd1bfd00461f268cdc60c9c4689ac3346fd5ed39ecaa692f95d5c233fc3277"
+        },
+        {
+          "rank": 2,
+          "name": "Mercedes-Benz S124 om602 5-Door",
+          "time": 41.636932,
+          "file": "replay_css_4078_0_782816_1710441673.rec",
+          "sha256": "5c9afa74853be67e1f357cfd4fb81a004789eb391dcbcfc7ea1de82d44d44d87"
+        },
+        {
+          "rank": 3,
+          "name": "twitch.tv/txcks",
+          "time": 41.653919,
+          "file": "replay_css_4078_0_653341_1616119046.rec",
+          "sha256": "24109bea3454bd48f0358f9b6ee3467e528347ee1a8b6bb423264d418a74aaec"
+        },
+        {
+          "rank": 4,
+          "name": "PJ",
+          "time": 41.683864,
+          "file": "replay_css_4078_0_645664_1615693548.rec",
+          "sha256": "89e34a682934c7128d7a65b5d11f8e7fb4ebf900a6f9f8869e893a47103c3866"
+        }
+      ]
+    },
+    "surf_boreas": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_boreas",
+      "fetched_at": "2026-08-02T10:55:28Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 39.495121,
+          "file": "replay_css_4060_0_712551_1763914843.rec",
+          "sha256": "989a61f3682ccbb04026561103e951c90b267c43aa9b09eb66fc6e2c4cdb4d15"
+        },
+        {
+          "rank": 2,
+          "name": "ok",
+          "time": 39.508045,
+          "file": "replay_css_4060_0_664012_1761673442.rec",
+          "sha256": "f81c43a5580b7803706120a76c1f5de888c556438028993efce74e0d2e86b7e6"
+        },
+        {
+          "rank": 4,
+          "name": "levi",
+          "time": 39.56174,
+          "file": "replay_css_4060_0_540902_1724809227.rec",
+          "sha256": "66802f610c8268463ba04d367e07444f4bf1f15da46a0e9ea86747a63625e8f6"
+        },
+        {
+          "rank": 6,
+          "name": "kusche",
+          "time": 39.581535,
+          "file": "replay_css_4060_0_348352_1674574436.rec",
+          "sha256": "eec994b117a31191fc642b2c7dc671e894235e1c027249f2d242a5c43933fd95"
+        },
+        {
+          "rank": 7,
+          "name": "twitch.tv/txcks",
+          "time": 39.582542,
+          "file": "replay_css_4060_0_653341_1665783777.rec",
+          "sha256": "61f7eb5d4ddc0e3ae696ce662b6b1be5a396fde2991cd62588dc2fcd20c2c9cd"
+        },
+        {
+          "rank": 8,
+          "name": "yupiter",
+          "time": 39.583923,
+          "file": "replay_css_4060_0_525989_1672661933.rec",
+          "sha256": "59fdc22e6aaab763aba9d276ed2796143e8298f4b2959da209a6b82436e0b74f"
+        },
+        {
+          "rank": 10,
+          "name": "bones from q3",
+          "time": 39.609485,
+          "file": "replay_css_4060_0_78158_1664780033.rec",
+          "sha256": "3f9d40978aee150ef89562e31ce26cfd52d99b0cddf08f7c4d0a77b7c89a5d51"
+        }
+      ]
+    },
+    "surf_botanica": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_botanica",
+      "fetched_at": "2026-08-02T10:58:14Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 60.270114,
+          "file": "replay_css_4974_0_712551_1739415679.rec",
+          "sha256": "3b4c219c81e91bbc18941c4f9ea9327b2c6d68d4f4253f7e0a06919976506526"
+        },
+        {
+          "rank": 2,
+          "name": "agent liq",
+          "time": 60.559398,
+          "file": "replay_css_4974_0_556460_1685196316.rec",
+          "sha256": "590862ef28165ab80bd9b136fe2bfcfe12156441727011e8b23fe9fd4c5ff21b"
+        }
+      ]
+    },
+    "surf_cannonball": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_cannonball",
+      "fetched_at": "2026-09-06T06:43:54Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "Oscar",
+          "time": 74.429992,
+          "file": "replay_css_3939_0_824366_1765859492.rec",
+          "sha256": "61997b951873ce8211e9d7b03035d678041a504097db800333a11808ad28ae19"
+        },
+        {
+          "rank": 2,
+          "name": "Troflecopter",
+          "time": 74.594085,
+          "file": "replay_css_3939_0_10453_1741353552.rec",
+          "sha256": "e2c0156af897847ae7c1f10691d386066016a024b7e05cbd0b168c96e83faf62"
+        }
+      ]
+    },
+    "surf_cement": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_cement",
+      "fetched_at": "2026-08-02T10:56:44Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 2,
+          "name": "Paul",
+          "time": 118.9253158569336,
+          "file": "replay_css_3595_0_748103_1783195565.rec",
+          "sha256": "f48de917c827621ae2f2f8450b95ac0564cff771b6f9d39a6ae45323073b8977"
+        },
+        {
+          "rank": 3,
+          "name": "Caff",
+          "time": 118.949409,
+          "file": "replay_css_3595_0_340931_1630077583.rec",
+          "sha256": "d99e81fec19f817c729c944ce3d32ba2802502db67eedaf23034b71848fb74bc"
+        },
+        {
+          "rank": 4,
+          "name": "emil",
+          "time": 119.414779,
+          "file": "replay_css_3595_0_176203_1606569003.rec",
+          "sha256": "f01948f51a6b7e122c336ca762e14c2637b53b4dc953ddabb09cfa7ed6af661b"
+        }
+      ]
+    },
+    "surf_cyberwave": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_cyberwave",
+      "fetched_at": "2026-08-02T10:56:21Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 57.719951,
+          "file": "replay_css_3203_0_712551_1755980226.rec",
+          "sha256": "ac9ab2c39156a607bc14a500398c28ab7eb9791c47ea28852017357f40a09c69"
+        },
+        {
+          "rank": 2,
+          "name": "kusche",
+          "time": 57.720474,
+          "file": "replay_css_3203_0_348352_1674084863.rec",
+          "sha256": "0ea03c14a91b19dc98ae0eb43b7e129897fd617b7cdc9db4ffe4596ef58910e7"
+        },
+        {
+          "rank": 3,
+          "name": "yupiter",
+          "time": 57.749843,
+          "file": "replay_css_3203_0_525989_1633334836.rec",
+          "sha256": "562cb99489cdde6e1ac0bc8ac63b673f0d7146befe65fe538d4cd8b38c8e4b16"
+        },
+        {
+          "rank": 4,
+          "name": "emil",
+          "time": 57.759761,
+          "file": "replay_css_3203_0_176203_1633220251.rec",
+          "sha256": "bd3a7c4c6bd20fc02a36f02468464ed7c8d0c27a6b958937847d2e59c28b5768"
+        },
+        {
+          "rank": 5,
+          "name": "levi",
+          "time": 57.796478,
+          "file": "replay_css_3203_0_540902_1620734778.rec",
+          "sha256": "ebad0f50c23fd1e39538db0289961141c0c335ea39603f26c885b6f6051b7b7b"
+        }
+      ]
+    },
+    "surf_demise": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_demise",
+      "fetched_at": "2026-08-02T10:58:20Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 2,
+          "name": "levi",
+          "time": 37.13803482055664,
+          "file": "replay_css_5121_0_540902_1785239310.rec",
+          "sha256": "d796ba2c14f3e56ff0f64236ab01527b243b2d79be30ce5892f262f15cb74996"
+        },
+        {
+          "rank": 3,
+          "name": "ducky",
+          "time": 37.17375183105469,
+          "file": "replay_css_5121_0_767243_1785551996.rec",
+          "sha256": "7f4f11b1b226d26f7fe864b72dc4f14f3a2ef3672200296af2f0ff047b55b614"
+        },
+        {
+          "rank": 6,
+          "name": "Tripex",
+          "time": 37.19900131225586,
+          "file": "replay_css_5121_0_742390_1784661401.rec",
+          "sha256": "d475b7a8ee72c485c43583f82dee16db8d238d51f057916554adca749ee645a0"
+        },
+        {
+          "rank": 7,
+          "name": "сарман",
+          "time": 37.229644,
+          "file": "replay_css_5121_0_827844_1706317823.rec",
+          "sha256": "acaeaa37ad0d4e1a1bce7495628bcd4dfb3596c9b738ecef616b331c18a92ff4"
+        },
+        {
+          "rank": 8,
+          "name": "bulk assisstance user",
+          "time": 37.243907,
+          "file": "replay_css_5121_0_882696_1705799300.rec",
+          "sha256": "abf67e87c45843684341b057d3142e9b27969aaf65a8d495e3f462c68ed7f76d"
+        }
+      ]
+    },
+    "surf_fornax": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_fornax",
+      "fetched_at": "2026-08-02T10:57:16Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "Mercedes-Benz S124 om602 5-Door",
+          "time": 44.114711,
+          "file": "replay_css_3543_0_782816_1683027249.rec",
+          "sha256": "9987609676e9f4a419f7ae4d290c1d78a6e6a043a4ea767dfd0d93bfb2a3f078"
+        },
+        {
+          "rank": 2,
+          "name": "Makela",
+          "time": 44.17498,
+          "file": "replay_css_3543_0_5726_1610474992.rec",
+          "sha256": "c48dcc32eb93807eaef20e346fc08ebb7deaa6484ff800bd3b83b043bf9c4392"
+        },
+        {
+          "rank": 3,
+          "name": "levi",
+          "time": 44.203872,
+          "file": "replay_css_3543_0_540902_1602395763.rec",
+          "sha256": "a4625bc3f30bf6181f9060a5d3ebf98ccbd312c79dfdff8d405747829d9e391b"
+        },
+        {
+          "rank": 6,
+          "name": "emil",
+          "time": 44.369976,
+          "file": "replay_css_3543_0_176203_1598175396.rec",
+          "sha256": "1a50a22dde3b372026f69ffe3603d1b59e1308d4a74a86a453b03bf9179c6e2c"
+        },
+        {
+          "rank": 8,
+          "name": "Not Magzi",
+          "time": 44.399131,
+          "file": "replay_css_3543_0_536155_1596250069.rec",
+          "sha256": "263ac934a7c47860961c257cf80ef9e57b46cef2661f3430103232e831f79f41"
+        }
+      ]
+    },
+    "surf_frost": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_frost",
+      "fetched_at": "2026-08-02T10:57:40Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "levi",
+          "time": 25.544898,
+          "file": "replay_css_2881_0_540902_1705202608.rec",
+          "sha256": "9485e5a1cccef77d5c2eb8bda013486ee35537e4c1a1805b7d81bc3bd790b58f"
+        },
+        {
+          "rank": 2,
+          "name": "mbn",
+          "time": 25.725147,
+          "file": "replay_css_2881_0_643797_1681092450.rec",
+          "sha256": "c4ce6549b40066f16b226449a78fac1cae4c948c97409cca12a2da6ce3a06fc5"
+        },
+        {
+          "rank": 4,
+          "name": "yupiter",
+          "time": 25.949649,
+          "file": "replay_css_2881_0_525989_1633288728.rec",
+          "sha256": "e13a777694d0674e7c2e17a8e1af64234eb00b21e3010dcb51b410f21561aee9"
+        },
+        {
+          "rank": 5,
+          "name": "fishöö",
+          "time": 25.980203,
+          "file": "replay_css_2881_0_332854_1619908276.rec",
+          "sha256": "6a34bf917c4765ca87119d2ead902fdb3f875f0a002d2a32faeb17f289daab50"
+        },
+        {
+          "rank": 6,
+          "name": "manana",
+          "time": 26.085119,
+          "file": "replay_css_2881_0_187744_1601850120.rec",
+          "sha256": "96b85d592acfcc8b4ea2b0c19fe7139b6dacb9ae3c34bddc2f202c314c1b50b8"
+        }
+      ]
+    },
+    "surf_lovetunnel": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_lovetunnel",
+      "fetched_at": "2026-08-02T10:55:57Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "levi",
+          "time": 43.904323,
+          "file": "replay_css_3737_0_540902_1752122118.rec",
+          "sha256": "60acc6f06a129da132b7d57638c1c096a460572f5ac1249858c78091685d5b97"
+        },
+        {
+          "rank": 2,
+          "name": "kusche",
+          "time": 43.919029,
+          "file": "replay_css_3737_0_348352_1672401072.rec",
+          "sha256": "df03291d04346e457f1d4705aa3818c74e6562691a95c4b6a68ea6921c77c5ff"
+        },
+        {
+          "rank": 3,
+          "name": "twitch.tv/txcks",
+          "time": 43.934024,
+          "file": "replay_css_3737_0_653341_1652998826.rec",
+          "sha256": "eda010584252e77e1cf9da06ea43a385d4222b467cc3d2aa9b64d1a6f86d637b"
+        },
+        {
+          "rank": 6,
+          "name": "yupiter",
+          "time": 44.009376,
+          "file": "replay_css_3737_0_525989_1626982881.rec",
+          "sha256": "771b298bcc1ff0d8f1d02e45c90f80d78c8b88cad7c11c85a837752a08084264"
+        }
+      ]
+    },
+    "surf_lux": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_lux",
+      "fetched_at": "2026-08-02T10:57:00Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "agent nex",
+          "time": 31.267492,
+          "file": "replay_css_2985_0_877922_1768384524.rec",
+          "sha256": "b224c057ba5e527e923ecd67ef08c5322b70a60d55e4b950b329339ec7ab4696"
+        },
+        {
+          "rank": 2,
+          "name": "Caff",
+          "time": 31.271242,
+          "file": "replay_css_2985_0_340931_1707475833.rec",
+          "sha256": "6222c8b9be9311e9d85d41fd4dbf55248dd6dc20ac3f017bd2e4f18b3c60a32e"
+        },
+        {
+          "rank": 3,
+          "name": "yupiter",
+          "time": 31.424507,
+          "file": "replay_css_2985_0_525989_1620979312.rec",
+          "sha256": "a085959b1e2d676cb95c56cf59481ee9626f9207efbfcf25851fbd79da7ae7e0"
+        },
+        {
+          "rank": 4,
+          "name": "manana",
+          "time": 31.469898,
+          "file": "replay_css_2985_0_187744_1660794618.rec",
+          "sha256": "843fd8ffd2d820ae95e423fcb6e9f371c41e1fbb52a3f804e7549a8331d54c22"
+        },
+        {
+          "rank": 5,
+          "name": "twitch.tv/txcks",
+          "time": 31.530017,
+          "file": "replay_css_2985_0_653341_1611167995.rec",
+          "sha256": "ab46f8f958e386a00aac489441556ba2bce0b3fe4b730bac4f08f0eef3de1d65"
+        },
+        {
+          "rank": 6,
+          "name": "doobie",
+          "time": 31.590423,
+          "file": "replay_css_2985_0_449650_1563646309.rec",
+          "sha256": "18db25fad70c14a62fa2dd592d10c5288c55b9fdd1af7869a560d7799738fb76"
+        },
+        {
+          "rank": 9,
+          "name": "bougnoule",
+          "time": 31.67983,
+          "file": "replay_css_2985_0_516878_1541375966.rec",
+          "sha256": "412c98cd7152b105921ec7b1addc6ff2dedbe929fac564d99321123f6432273c"
+        }
+      ]
+    },
+    "surf_overgrowth": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_overgrowth",
+      "fetched_at": "2026-08-02T10:56:32Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "Caff",
+          "time": 170.33995,
+          "file": "replay_css_1254_0_340931_1698471501.rec",
+          "sha256": "252e98cfc31eaaaa93f8aa07f27d39b27b6a4486809d26aa67ae3eed5a9f7bd8"
+        },
+        {
+          "rank": 2,
+          "name": "kusche",
+          "time": 171.314163,
+          "file": "replay_css_1254_0_348352_1593783486.rec",
+          "sha256": "d8392a2ce0bc8e55d60167b9a46197978e8a692da4693b9bd29748f3191bdd6b"
+        },
+        {
+          "rank": 3,
+          "name": "t",
+          "time": 171.509582,
+          "file": "replay_css_1254_0_78083_1567329214.rec",
+          "sha256": "8e45d64a0ce9e5055eafe5f90fc491a9459b779c8aa5c351086f7facef7e1066"
+        },
+        {
+          "rank": 9,
+          "name": "MK96",
+          "time": 173.66986,
+          "file": "replay_css_1254_0_15753_1490706094.rec",
+          "sha256": "3bcc52cbf3342bd8488581792631935d3da2bf48a5d2d3efd86d74e7c75cb60f"
+        }
+      ]
+    },
+    "surf_summit": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_summit",
+      "fetched_at": "2026-08-02T09:20:47Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 41.474906,
+          "file": "replay_css_2946_0_712551_1745965307.rec",
+          "sha256": "88847fc1d3ef2e57f0777537254a37f0dad078a5e9ad8d9b7fc8f4034572976a"
+        },
+        {
+          "rank": 2,
+          "name": "agent liq",
+          "time": 41.489791,
+          "file": "replay_css_2946_0_556460_1745523148.rec",
+          "sha256": "5141e07b1c03a7204475b78b44fdebf97ba54ce9f8abdade5d4e9c7f13627bef"
+        },
+        {
+          "rank": 3,
+          "name": "levi",
+          "time": 41.529575,
+          "file": "replay_css_2946_0_540902_1704917348.rec",
+          "sha256": "5459612e4cbe11fb2504f66ff0c814c3d8200d2d0acb6a02f008104c426e7710"
+        },
+        {
+          "rank": 4,
+          "name": "Mercedes-Benz S124 om602 5-Door",
+          "time": 41.530628,
+          "file": "replay_css_2946_0_782816_1729502701.rec",
+          "sha256": "d1fe32f3c380651cd23cbc55a699b04ce32142904118e1d22642bf38515d6353"
+        },
+        {
+          "rank": 5,
+          "name": "agent lemx",
+          "time": 41.536586,
+          "file": "replay_css_2946_0_471028_1675004348.rec",
+          "sha256": "9c951e378d86c6e2967bae053df933dfedde3a9b5c85f4d11f3bddc22af6be8e"
+        },
+        {
+          "rank": 7,
+          "name": "twitch.tv/txcks",
+          "time": 41.606739,
+          "file": "replay_css_2946_0_653341_1641439003.rec",
+          "sha256": "7c164951987e184fb2f5d0f1779a5676631c812327b6334b4188a9203829b862"
+        }
+      ]
+    },
+    "surf_tendies": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_tendies",
+      "fetched_at": "2026-08-02T10:55:45Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "FinCS2",
+          "time": 41.189746,
+          "file": "replay_css_4074_0_712551_1752625913.rec",
+          "sha256": "f7401a2e5152e0185433d95a03a6f964fa3275c4aff5a86cea5f948271e5e689"
+        },
+        {
+          "rank": 3,
+          "name": "ok",
+          "time": 41.234813,
+          "file": "replay_css_4074_0_664012_1764965205.rec",
+          "sha256": "c38fccd2c647bee44e4fbc0418c93e3cf72c126d5f7e1df7c5f4c63a468eba4c"
+        },
+        {
+          "rank": 4,
+          "name": "Mercedes-Benz S124 om602 5-Door",
+          "time": 41.295314,
+          "file": "replay_css_4074_0_782816_1731057266.rec",
+          "sha256": "9e7e44703da0958c8f04cd3d08c48008acf56a298f509e1e715e26948d6e1026"
+        },
+        {
+          "rank": 5,
+          "name": "william",
+          "time": 41.324668,
+          "file": "replay_css_4074_0_703188_1722601354.rec",
+          "sha256": "eb8cb9ed8fc5585dfe4495c09f88130256ccf74ced3f9c360a62f50ee954541e"
+        },
+        {
+          "rank": 8,
+          "name": "twitch.tv/txcks",
+          "time": 41.39981,
+          "file": "replay_css_4074_0_653341_1640108831.rec",
+          "sha256": "05d15d2fdd398bc7b141e0c3eb20e2dddc2f24b89a4e615069e80099dd71af2d"
+        }
+      ]
+    },
+    "surf_void": {
+      "source": "ksf.surf",
+      "game": "66t",
+      "mode": "fw",
+      "map": "surf_void",
+      "fetched_at": "2026-08-02T10:57:28Z",
+      "snapshot": true,
+      "records": [
+        {
+          "rank": 1,
+          "name": "ok",
+          "time": 38.461547,
+          "file": "replay_css_4664_0_664012_1775413152.rec",
+          "sha256": "fb93dedcf5761bdab85c685d58783b7573e684ca11e41250406a79aaf7b5680d"
+        },
+        {
+          "rank": 2,
+          "name": "FinCS2",
+          "time": 38.464321,
+          "file": "replay_css_4664_0_712551_1748875377.rec",
+          "sha256": "d9663983c11b3ff70246f1a13dee69975c0e1945243c00c2df428c5ef1e42413"
+        },
+        {
+          "rank": 3,
+          "name": "ay.",
+          "time": 38.582176,
+          "file": "replay_css_4664_0_860567_1738121927.rec",
+          "sha256": "eadaaeca2ac34ebf2f0249263edcb91c40bd514af85e96a8fe9135a17385f593"
+        },
+        {
+          "rank": 4,
+          "name": "Mercedes-Benz S124 om602 5-Door",
+          "time": 38.585319,
+          "file": "replay_css_4664_0_782816_1729503795.rec",
+          "sha256": "0e582964ab34562ad0d930da97633236b6da95bcb04f0714c109ab9493ddef59"
+        },
+        {
+          "rank": 5,
+          "name": "twitch.tv/txcks",
+          "time": 38.599891,
+          "file": "replay_css_4664_0_653341_1665879639.rec",
+          "sha256": "72075c60138311672c2f12cc282577b3b05fee332d8e86fc0ec9dda52bcb6d18"
+        }
+      ]
+    }
+  }
+}

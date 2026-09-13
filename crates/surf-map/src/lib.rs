@@ -16,7 +16,7 @@ mod mesh;
 mod models;
 mod pak;
 mod phy;
-mod stock;
+pub mod stock;
 mod vmt;
 mod world_lights;
 

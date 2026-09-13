@@ -124,6 +124,7 @@ fn main() {
                 panel: rows(vec![
                     MenuRow::item("Resume", "summit").with_tone(RowTone::Accent),
                     MenuRow::item("Play", ""),
+                    MenuRow::item("Set up / refresh content", "").with_note("16 maps · KSF records and replays"),
                     MenuRow::item("Leaderboard", ""),
                     MenuRow::item("Settings", ""),
                     MenuRow::item("Quit", ""),

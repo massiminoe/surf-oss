@@ -1,8 +1,5 @@
-//! Times for the leaderboard pages: the KSF world records we shipped ghosts
-//! for, beside the player's own PB and finish history.
-//!
-//! The records are read from the same `manifest.json` the ghost importer wrote
-//! next to each map's replays — no network, no second source of truth.
+//! Cached KSF rankings beside the player's own PB and finish history.
+//! Replay availability never determines rank. Network work lives in content setup.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -41,9 +38,6 @@ pub fn ksf_records(map: &str) -> Vec<KsfRecord> {
         .filter_map(|rec| {
             let file = rec.get("file").and_then(|f| f.as_str()).unwrap_or_default();
             let stem = file.trim_end_matches(".rec");
-            if stem.is_empty() {
-                return None;
-            }
             Some(KsfRecord {
                 rank: rec.get("rank").and_then(|r| r.as_u64()).unwrap_or(999) as u32,
                 name: rec
@@ -60,16 +54,43 @@ pub fn ksf_records(map: &str) -> Vec<KsfRecord> {
     out
 }
 
+/// Cache age for the records page; old developer manifests retain their date.
+pub fn cache_age(map: &str) -> Option<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path(map)).ok()?).ok()?;
+    let prefix = if value["snapshot"] == true {
+        "Snapshot · "
+    } else {
+        ""
+    };
+    if let Some(seconds) = value["fetched_at_unix"].as_u64() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        let hours = now.saturating_sub(seconds) / 3600;
+        return Some(if hours == 0 {
+            format!("{prefix}Updated within the last hour")
+        } else {
+            format!("{prefix}Updated {hours} hours ago")
+        });
+    }
+    value["fetched_at"]
+        .as_str()
+        .map(|s| format!("{prefix}Updated {s}"))
+}
+
 /// Records keyed by replay file stem — what the ghost picker needs.
 pub fn ksf_records_by_stem(map: &str) -> HashMap<String, KsfRecord> {
     ksf_records(map)
         .into_iter()
+        .filter(|r| !r.file_stem.is_empty())
         .map(|r| (r.file_stem.clone(), r))
         .collect()
 }
 
 pub fn world_record(map: &str) -> Option<KsfRecord> {
-    ksf_records(map).into_iter().next()
+    ksf_records(map).into_iter().find(|r| r.rank == 1)
 }
 
 /// One line of the per-map leaderboard summary.
@@ -113,8 +134,7 @@ pub fn standings(maps: &[String], store: Option<&PbStore>) -> Vec<MapStanding> {
 mod tests {
     use super::*;
 
-    /// The manifests are shipped in the repo, so this is a real read of real
-    /// data rather than a shape assertion against a fixture we wrote.
+    /// Exercise a real local cache when available; imports are not redistributed.
     #[test]
     fn summit_has_an_imported_world_record() {
         if !manifest_path("surf_summit").is_file() {

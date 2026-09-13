@@ -317,6 +317,18 @@ struct App {
     watch: Option<ReplayWatch>,
     /// A replay to start once the map it needs has loaded.
     pending_watch: Option<ReplayPick>,
+    content_task: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    content_status: Option<String>,
+    content_worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(worker) = self.content_worker.take() {
+            surf_app::content::cancel();
+            let _ = worker.join();
+        }
+    }
 }
 
 impl App {
@@ -410,6 +422,9 @@ impl App {
             start_time: Instant::now(),
             watch: None,
             pending_watch: None,
+            content_task: None,
+            content_status: None,
+            content_worker: None,
         };
 
         // `surf-oss <map>` skips the shell, as it always has.
@@ -622,6 +637,7 @@ impl App {
                     ));
                 }
                 out.push((MenuRow::item("Play", ""), RowAction::MainPlay));
+                out.push((MenuRow::item(if self.content_task.is_some() { "Setting up content…" } else { "Set up / refresh content" }, "").with_note("16 maps · KSF records and replays"), if self.content_task.is_some() { RowAction::None } else { RowAction::SetupContent }));
                 out.push((MenuRow::item("Leaderboard", ""), RowAction::MainLeaderboard));
                 out.push((MenuRow::item("Settings", ""), RowAction::MainSettings));
                 out.push((MenuRow::item("Quit", ""), RowAction::MainQuit));
@@ -633,7 +649,7 @@ impl App {
                 .enumerate()
                 .map(|(i, m)| {
                     let row = MenuRow::item(
-                        m.label.clone(),
+                        if m.path.as_ref().is_some_and(|p| p.is_file()) { m.label.clone() } else { format!("{} · download needed", m.label) },
                         m.pb.map(format_time).unwrap_or_else(|| "—".into()),
                     )
                     .with_note(
@@ -857,10 +873,13 @@ impl App {
             None => RowAction::None,
         };
 
-        out.push((MenuRow::header("WORLD RECORDS · KSF"), RowAction::None));
+        out.push((MenuRow::header("KSF RECORDS · CS:S 66T"), RowAction::None));
+        if let Some(age) = leaderboard::cache_age(map) {
+            out.push((MenuRow::text(age, "").with_tone(RowTone::Dim), RowAction::None));
+        }
         if records.is_empty() {
             out.push((
-                MenuRow::text("no imported records", "").with_tone(RowTone::Dim),
+                MenuRow::text("Not downloaded — use Set up / refresh content", "").with_tone(RowTone::Dim),
                 RowAction::None,
             ));
         }
@@ -869,7 +888,7 @@ impl App {
             let pick = ReplayPick::ksf(map, r);
             out.push((
                 MenuRow::text(format!("#{:<2} {}", r.rank, r.name), format_time(r.time))
-                    .with_note(watch_note("", &pick))
+                    .with_note(watch_note(if pick.is_some() { "" } else if r.file_stem.is_empty() { "no replay published" } else { "replay not downloaded" }, &pick))
                     .with_tone(if beat { RowTone::Good } else { RowTone::Normal }),
                 action(pick),
             ));
@@ -1029,7 +1048,7 @@ impl App {
             buttons,
             button_selected: (self.focus == Focus::Buttons).then_some(self.button_selected),
             button_hovered: None,
-            message: self.load_error.clone(),
+            message: self.load_error.clone().or_else(|| self.content_status.clone()),
             wide,
             backdrop: !playing,
             busy: matches!(self.mode, Mode::Loading { .. }),
@@ -1137,6 +1156,7 @@ impl App {
             RowAction::Rebind(b) => self.rebinding = Some(b),
             RowAction::MainResume => self.resume_world(),
             RowAction::MainPlay => self.open_picker(),
+            RowAction::SetupContent => self.setup_content(),
             RowAction::MainLeaderboard => self.open_leaderboard(),
             RowAction::MainSettings => {
                 self.mode = Mode::Settings;
@@ -1274,6 +1294,38 @@ impl App {
         }
     }
 
+    fn setup_content(&mut self) {
+        if self.content_task.is_some() { return; }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.content_task = Some(rx);
+        self.load_error = None;
+        self.content_status = Some("Checking CS:S content…".into());
+        self.content_worker = Some(std::thread::spawn(move || {
+            let result = surf_app::content::setup_interactive(&mut |message| { let _ = tx.send(Ok(message)); });
+            if let Err(error) = result { let _ = tx.send(Err(error)); }
+        }));
+    }
+
+    fn poll_content(&mut self) {
+        let Some(rx) = self.content_task.as_ref() else { return; };
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(message)) => self.content_status = Some(message),
+                Ok(Err(error)) => { eprintln!("{error}"); self.content_status = Some(error.lines().take(2).collect::<Vec<_>>().join(" · ")); }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.content_task = None;
+                    if let Some(worker) = self.content_worker.take() { let _ = worker.join(); }
+                    self.map_list = discover_maps();
+                    self.refresh_map_pbs();
+                    let names = self.map_list.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+                    self.standings = leaderboard::standings(&names, self.pb_store.as_ref());
+                    break;
+                }
+            }
+        }
+    }
+
     fn open_picker(&mut self) {
         self.refresh_map_pbs();
         self.load_error = None;
@@ -1319,9 +1371,7 @@ impl App {
             if let Some(store) = self.pb_store.as_ref() {
                 m.pb = store.get(&m.name).ok().flatten();
             }
-            if m.wr.is_none() {
-                m.wr = leaderboard::world_record(&m.name).map(|r| r.time);
-            }
+            m.wr = leaderboard::world_record(&m.name).map(|r| r.time);
         }
     }
 
@@ -2065,7 +2115,7 @@ impl App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title(&self.session.title_base)
+                        .with_title("surf-oss")
                         .with_inner_size(PhysicalSize::new(self.window_w, self.window_h))
                         .with_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None))),
                 )
@@ -2409,6 +2459,7 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        self.poll_content();
         if self.surface.is_none() || self.renderer.is_none() || self.window.is_none() {
             return;
         }
@@ -2614,9 +2665,11 @@ impl App {
             } else {
                 ""
             };
-            window.set_title(&format!(
-                "{title_base}{pause}  |  {speed:7.1} u/s  t {t}  [{g}]  aa {aa:.0}  sens {sens:.1}",
-            ));
+            if self.entered_world {
+                window.set_title(&format!("{title_base}{pause}  |  {speed:7.1} u/s  t {t}  [{g}]  aa {aa:.0}  sens {sens:.1}"));
+            } else {
+                window.set_title("surf-oss");
+            }
         }
     }
 
@@ -3274,38 +3327,23 @@ fn fetch_hint(path: &std::path::Path) -> String {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("surf_summit");
-    format!(
-        "map file not found. BSPs are not committed — fetch it with:\n  \
-         python3 tools/fetch_maps.py {stem}\n(or `--batch tests` for the \
-         test corpus, `--all` for everything)"
-    )
+    format!("{stem} is not installed. Return to the main menu and choose Set up / refresh content, or run surf-oss --setup.")
 }
 
-/// Maps offered by the picker: every `.bsp` under `assets/maps`, alphabetical.
+/// The supported 16-map catalog, including maps not installed yet.
 ///
 /// The generated graybox arena used to be appended here so the picker was never
 /// empty. It is no longer offered (Max, 2026-09-06) — `Level::Graybox` stays as
 /// the world a `Session` holds before a map is chosen and as M0's physics
 /// fixture, but it is not a place to go and surf.
 fn discover_maps() -> Vec<MapEntry> {
-    let mut out: Vec<MapEntry> = std::fs::read_dir(surf_app::assets::maps_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("bsp"))
-        .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_string();
-            let label = stem.strip_prefix("surf_").unwrap_or(&stem).to_string();
-            Some(MapEntry {
-                label,
-                name: stem,
-                path: Some(p),
-                pb: None,
-                wr: None,
-            })
-        })
-        .collect();
+    let mut out: Vec<MapEntry> = surf_app::content::catalog().maps.keys().map(|stem| MapEntry {
+        label: stem.strip_prefix("surf_").unwrap_or(stem).to_string(),
+        name: stem.clone(),
+        path: Some(surf_app::assets::maps_dir().join(format!("{stem}.bsp"))),
+        pb: None,
+        wr: None,
+    }).collect();
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
 }
@@ -3324,6 +3362,8 @@ fn parse_args() -> LaunchOpts {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--data-dir" | "--game-dir" => { i += 2; }
+            "--setup" | "--check" | "--refresh-records" => { i += 1; }
             "--windowed" => {
                 fullscreen = false;
                 i += 1;
@@ -3407,7 +3447,29 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 }
 
 fn main() {
+    // Process profile/content options before any global path resolver or worker.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--data-dir" || arg == "--game-dir" {
+            let Some(value) = args.get(i + 1).filter(|s| !s.starts_with("--")) else {
+                eprintln!("{arg} needs a directory"); std::process::exit(2);
+            };
+            let path = std::path::absolute(value).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(2); });
+            std::env::set_var(if arg == "--data-dir" { "SURF_OSS_DATA_DIR" } else { "SURF_OSS_GAME_DIR" }, path);
+        }
+    }
+    if args.iter().any(|s| s == "--help" || s == "-h") {
+        println!("surf-oss — standalone surf for macOS\n\nInstall CS:S through Steam, then choose Set up / refresh content.\n\nUsage: surf-oss [MAP] [OPTIONS]\n  --setup             Download all 16 maps, KSF top-10 records and available replays; then exit\n  --refresh-records   Update KSF records and available replays only\n  --check             Verify CS:S, maps, zones and cached replays; then exit\n  --data-dir PATH     Isolated profile and downloaded content (no migration)\n  --game-dir PATH     CS:S folder containing cstrike/ and hl2/\n  --windowed          Open a window instead of fullscreen\n  --size WxH          Set window size\n  --vsync / --no-vsync Override display synchronization\n  --ghost FILE        Race an .osxr ghost\n  --watch FILE        Watch an .osxr replay\n  --perf-secs N       Exit after a render timing sample\n  -h, --help          Show this help");
+        return;
+    }
+    surf_app::content::configure_game_dir();
     let opts = parse_args();
+    if args.iter().any(|s| s == "--setup" || s == "--check" || s == "--refresh-records") {
+        let mut progress = |message| println!("{message}");
+        let result = if args.iter().any(|s| s == "--setup") { surf_app::content::setup(&mut progress) } else if args.iter().any(|s| s == "--refresh-records") { surf_app::content::refresh_records(&mut progress) } else { surf_app::content::check(&mut progress) };
+        if let Err(error) = result { eprintln!("{error}"); std::process::exit(1); }
+        return;
+    }
     println!("surf-oss");
     println!("Assets: {}", surf_app::assets::root().display());
     println!("Click to capture. WASD, Space, R reset, T stage, Esc menu, [ ] sens, - = airaccel.");

@@ -1,108 +1,110 @@
 # surf-oss
 
-A macOS-native, single-player recreation of Counter-Strike's **surf** gamemode:
-Source-engine-faithful movement physics (surf + bunnyhop), real community surf map
-loading (CS:S/CS:GO BSP), and speedrun timer features — built for Apple Silicon,
-with no Source engine and no networking.
+Standalone, single-player surf for Apple Silicon Macs: 16 community maps,
+practice locations, timers, personal bests, a KSF leaderboard, ghosts and replays.
 
-## Status
+**Install Counter-Strike: Source through Steam, then open surf-oss. It finds your
+CS:S content and downloads the maps, records and available replays. After setup,
+you can play offline. Neither Steam nor CS:S needs to be running.**
 
-**M0–M3 complete** — physics, real BSP map loading, timer/zones/replays, textures
-and lightmaps, procedural audio.
+## Build and play
 
-## Setup
+The source build is the tested installation path. You need:
 
-Map BSPs are **not** committed (17 MB–175 MB each, ~1.4 GB for the full corpus).
-Fetch them first — they come from the public [fastdl.me](https://main.fastdl.me)
-mirror and are community-made maps, *not* Valve content, so no game install is
-needed to obtain them:
+- An Apple Silicon Mac (tested on macOS Tahoe).
+- Apple's Command Line Tools: `xcode-select --install`.
+- [Rust and Cargo](https://rustup.rs/) (tested with Rust 1.97.1).
+- Installed CS:S content: the game folder must contain `cstrike/` and `hl2/`.
+  Ownership alone is not enough; download the files through Steam. The original
+  game does not need to run on your Mac.
 
-```bash
-python3 tools/fetch_maps.py --batch tests   # what `cargo test` needs (~700 MB)
-python3 tools/fetch_maps.py --all           # full corpus (~1.4 GB)
-python3 tools/fetch_maps.py --verify        # re-check on-disk files, no network
-```
+From this checkout:
 
-Every download is verified against the sha256 in
-[`assets/maps/manifest.json`](assets/maps/manifest.json). Those hashes pin the
-exact recompiles that `assets/zones/*.json` and the resim baselines were derived
-from — a mirror serving a different build of a map would silently move spawns and
-zone volumes.
-
-```bash
-cargo test --workspace --release              # requires --batch tests maps
-cargo run -p surf-app --release               # launch surf-oss
-cargo build -p surf-app --release --bin surf-oss
+```sh
+cargo build --locked --release -p surf-app --bin surf-oss
 ./target/release/surf-oss
 ```
 
-The map-loading tests deliberately **fail** rather than skip when a BSP is
-missing, so absent assets can't quietly hide a regression behind a green run.
+Choose **Set up / refresh content**, then **Play**. Setup downloads all 16 maps,
+KSF CS:S 66-tick top-10 records, and every available replay in those records.
+Installed maps are playable while the remaining downloads continue. Allow several
+minutes and at least 3 GB of free space; slow connections take longer. No Python
+is needed for this path.
 
-**Optional — stock CS:S/HL2 textures.** Most corpus maps embed their custom
-assets in the BSP pakfile and render standalone. Faces using Valve *stock*
-materials need a real game install: set `SURF_OSS_GAME_DIR` to it. This is the
-only part that requires owning Counter-Strike: Source.
+Steam libraries are detected automatically, including external libraries. If
+content is not found, setup opens a folder picker. Choose the installed
+**Counter-Strike Source** folder. A valid selection is remembered.
 
-### Upgrading from mx-surf
+Terminal equivalents and diagnostics:
 
-The game launches fullscreen by default. Use `surf-oss --windowed` for a window,
-or `surf-oss --size 1280x800` for a specific window size.
-
-The executable is now `surf-oss`. Rename any `MX_SURF_*` environment variables
-in your shell or launch scripts to `SURF_OSS_*` (for example,
-`SURF_OSS_GAME_DIR` and `SURF_OSS_ASSETS`). Rebuild any locally installed binary.
-The Cargo package remains `surf-app`.
-
-Quit the old app before running the new version. On first data access, it moves
-`~/Library/Application Support/mx-surf/` to
-`~/Library/Application Support/surf-oss/`, preserving settings, PBs, run history,
-savelocs, and replays. An older `osx-surf/` directory is used only if `mx-surf/`
-is absent. An existing `surf-oss/` directory is never merged or overwritten;
-migration errors stop access and report the affected paths. Replay files keep
-their `.osxr` extension and format. Stored replay paths and custom ghost selections
-using the old data directory resolve to the new location automatically. Your
-checkout folder can keep its old name.
-
-### Feel-check controls
-
-| Input | Action |
-|---|---|
-| Click | Capture mouse |
-| WASD | Move / strafe |
-| Mouse | Look (default sens 5.0 × `m_yaw`/`m_pitch` 0.022; axes equal) |
-| `[` / `]` | Lower / raise sens |
-| `-` / `=` | Lower / raise airaccelerate (A/B vs stock aa 10) |
-| Space | Jump (autobhop on) |
-| R | Reset to spawn |
-| Esc | Release mouse / quit |
-
-On-screen: **blue/green speed bar**, **gold sync bar**, corner pip (green=air, red=ground). Numbers also in the window title.
-
-Graybox course: high drop-in → long striped V → mid pad → one-sided ramp → short V → end pad.
-
-**macOS mouse:** turn off pointer acceleration (System Settings → Mouse), or
-`defaults write -g com.apple.mouse.scaling -integer -1`.
-
-## Docs
-
-- `docs/M1-HANDOFF.md` — M1 onboarding (summit, checklist, order)
-- `docs/research/00-summary.md` — synthesis, stack, roadmap
-- `docs/research/01-movement-physics.md` — physics bible
-- `docs/research/02-map-format.md` — BSP import (§8.2 MVP, §8.4 gotchas)
-- `CLAUDE.md` / `AGENTS.md` — locked decisions + conventions
-
-## Layout
-
+```sh
+./target/release/surf-oss --setup
+./target/release/surf-oss --check
+./target/release/surf-oss --setup --game-dir "/Volumes/Games/Steam/steamapps/common/Counter-Strike Source"
 ```
-crates/surf-core    pure f32 physics (zero I/O)
-crates/surf-render  wgpu flat-shaded mesh + HUD bars
-crates/surf-app     winit loop, 66.67 Hz tick + interpolation
-crates/surf-map     BSP v19/20/21 → collision brushes, mesh, materials
-crates/surf-audio   procedural f32 DSP (zero audio assets)
-assets/maps/        BSP corpus — gitignored; manifest.json + fetch_maps.py
-assets/zones/       timer zone volumes (tracked)
-docs/research/      research reports
-docs/reference/     read-only upstream (do not copy into game code)
-docs/M1-HANDOFF.md  next-milestone brief
+
+`--check` verifies CS:S archives, map hashes, zones and cached replays. Retry setup
+after a network failure; verified maps and imported replays are reused.
+Interrupted map downloads resume from the retained download cache. Existing conflicting maps
+are preserved and reported rather than overwritten.
+
+Use `--windowed`, `--size 1280x800`, or a short map name (`surf-oss summit`).
+`--help` lists all launch options.
+
+## Maps and records
+
+**andromeda · aquaflow · boreas · botanica · cannonball · cement · cyberwave ·
+demise · fornax · frost · lovetunnel · lux · overgrowth · summit · tendies · void**
+
+Maps come from [fastdl.me](https://main.fastdl.me); their exact builds are pinned
+in [the catalog](assets/maps/manifest.json) and verified with SHA-256. Zones ship
+with the app. Stock assets are read from your own CS:S installation.
+
+**Leaderboard** combines cached [KSF](https://ksf.surf) records with your local
+history. Select a row marked **replay** to watch it. Records without a replay
+still appear. **Set up / refresh content** updates the cache; an outage does not
+prevent offline play. If live records are unavailable, a dated metadata snapshot
+is used and labeled as such. Replay binaries still download directly from KSF.
+surf-oss runs are not submitted to KSF, and its movement
+defaults differ from KSF server rules.
+
+Official finishes save your time and replay automatically. Practice runs do not
+replace PBs. Choose a racing ghost in Settings → Ghost.
+
+## Controls
+
+- WASD: move; mouse: look; Space: autobhop; Ctrl: duck.
+- R: restart run; T: restart stage; Esc: pause/menu.
+- P: practice mode, off at each launch.
+- Right mouse: save a location; left mouse: load it when practice is enabled.
+- Settings → Keybinds: change movement and practice keys.
+
+Click the game to capture the mouse. Disable pointer acceleration in macOS Mouse
+settings for consistent feel. Procedural audio is adjustable in Settings.
+
+## Your data
+
+Settings, times, locations and personal replays live in
+`~/Library/Application Support/surf-oss/`. Downloads normally live in its
+`content/` folder; populated source checkouts keep their existing `assets/` tree.
+
+For a fresh setup **without touching your existing profile or checkout assets**,
+choose a new directory and use it for both setup and play:
+
+```sh
+./target/release/surf-oss --setup --data-dir /tmp/surf-oss-fresh-profile
+./target/release/surf-oss --check --data-dir /tmp/surf-oss-fresh-profile
+./target/release/surf-oss --data-dir /tmp/surf-oss-fresh-profile
 ```
+
+## Sharing and development
+
+[Development notes](DEVELOPMENT.md) cover tests, Mac app packaging and upgrades.
+A packaged app needs no Rust or Python, but Apple signing/notarization remains a
+release step. Installing CS:S through a **fresh Steam installation on current
+macOS** has not yet been verified; setup has been tested against existing CS:S
+content in a separate fresh profile.
+
+Code: [MIT](LICENSE). Bundled fonts: [SIL Open Font License](assets/fonts/licenses/).
+No Valve assets, downloaded maps, third-party replay files or personal data are
+included in the app package.

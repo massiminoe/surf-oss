@@ -10,33 +10,42 @@ use std::sync::OnceLock;
 
 /// The `assets/` directory, resolved once per process.
 ///
-/// Order:
-/// 1. `$SURF_OSS_ASSETS` — explicit override, wins over everything.
-/// 2. `./assets` — running from the repo; keeps the dev workflow identical.
-/// 3. The checkout this binary was compiled from. This is what makes
-///    `cargo install --path crates/surf-app` produce a command that works from
-///    any directory, since the source tree stays where it was built.
+/// Explicit assets override, installed content, then a populated development
+/// checkout. An isolated data directory always bypasses the development tree.
 pub fn root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
+        if std::env::var_os("SURF_OSS_DATA_DIR").is_some() {
+            return crate::data::support_dir().join("content");
+        }
         if let Some(p) = std::env::var_os("SURF_OSS_ASSETS") {
             let p = PathBuf::from(p);
             if p.is_dir() {
                 return p;
             }
-            eprintln!("SURF_OSS_ASSETS={} is not a directory; ignoring", p.display());
+            eprintln!(
+                "SURF_OSS_ASSETS={} is not a directory; ignoring",
+                p.display()
+            );
+        }
+        let installed = crate::data::support_dir().join("content");
+        let bundled = std::env::current_exe()
+            .ok()
+            .is_some_and(|p| p.parent().is_some_and(|p| p.ends_with("Contents/MacOS")));
+        if bundled || installed.join("maps").is_dir() {
+            return installed;
         }
         let cwd = PathBuf::from("assets");
-        if cwd.is_dir() {
+        if cwd.join("maps/surf_summit.bsp").is_file() {
             return cwd;
         }
         // `CARGO_MANIFEST_DIR` is baked in at compile time: crates/surf-app.
         let built_from = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
-        if built_from.is_dir() {
+        if built_from.join("maps/surf_summit.bsp").is_file() {
             // Tidy the `../..` away so log lines and errors stay readable.
             return built_from.canonicalize().unwrap_or(built_from);
         }
-        cwd
+        installed
     })
 }
 
@@ -94,7 +103,10 @@ mod tests {
             eprintln!("summit absent; skipping");
             return;
         }
-        assert_eq!(resolve_map_arg("summit"), maps_dir().join("surf_summit.bsp"));
+        assert_eq!(
+            resolve_map_arg("summit"),
+            maps_dir().join("surf_summit.bsp")
+        );
         assert_eq!(
             resolve_map_arg("surf_summit"),
             maps_dir().join("surf_summit.bsp")

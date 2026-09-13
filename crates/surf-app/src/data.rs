@@ -5,9 +5,12 @@ use std::{
     sync::OnceLock,
 };
 
-pub(crate) fn support_dir() -> &'static Path {
+pub fn support_dir() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
+        if let Some(path) = std::env::var_os("SURF_OSS_DATA_DIR") {
+            return PathBuf::from(path);
+        }
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
