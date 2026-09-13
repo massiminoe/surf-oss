@@ -32,7 +32,7 @@ except ImportError:
     SSL_CONTEXT = ssl.create_default_context()
 
 BASE = "https://main.fastdl.me/maps"
-UA = "mx-surf-research/1.0 (+local-dev; FastDL map acquisition)"
+UA = "surf-oss-research/1.0 (+local-dev; FastDL map acquisition)"
 
 
 def repo_root() -> Path:

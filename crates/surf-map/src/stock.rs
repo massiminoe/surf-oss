@@ -4,8 +4,8 @@
 //! 1. Loose files under each root (`materials/...`)
 //! 2. `*_dir.vpk` archives beside those roots (VPK v2)
 //!
-//! Configure via env `MX_SURF_GAME_DIR` (folder containing `cstrike/` and/or `hl2/`),
-//! or `MX_SURF_MATERIALS` (parent of a `materials/` tree). See `docs/M3-HANDOFF.md`.
+//! Configure via env `SURF_OSS_GAME_DIR` (folder containing `cstrike/` and/or `hl2/`),
+//! or `SURF_OSS_MATERIALS` (parent of a `materials/` tree). See `docs/M3-HANDOFF.md`.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -22,7 +22,7 @@ pub struct StockFs {
 impl StockFs {
     pub fn from_env() -> Self {
         let mut roots = Vec::new();
-        if let Ok(dir) = std::env::var("MX_SURF_GAME_DIR") {
+        if let Ok(dir) = std::env::var("SURF_OSS_GAME_DIR") {
             let p = PathBuf::from(dir);
             for sub in ["cstrike", "hl2"] {
                 let cand = p.join(sub);
@@ -34,7 +34,7 @@ impl StockFs {
                 roots.push(p);
             }
         }
-        if let Ok(dir) = std::env::var("MX_SURF_MATERIALS") {
+        if let Ok(dir) = std::env::var("SURF_OSS_MATERIALS") {
             let p = PathBuf::from(dir);
             if p.is_dir() {
                 roots.push(p);

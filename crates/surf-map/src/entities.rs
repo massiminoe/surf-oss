@@ -118,9 +118,9 @@ pub struct ParsedEntities {
 /// A separate pass because the window and the brush it names appear in either
 /// order in the entity lump — aquaflow has one of each.
 ///
-/// `MX_SURF_DRAW_AREAPORTAL_WINDOWS=1` restores the old behaviour for A/B.
+/// `SURF_OSS_DRAW_AREAPORTAL_WINDOWS=1` restores the old behaviour for A/B.
 fn areaportal_window_targets(bsp: &Bsp) -> HashSet<String> {
-    if std::env::var_os("MX_SURF_DRAW_AREAPORTAL_WINDOWS").is_some() {
+    if std::env::var_os("SURF_OSS_DRAW_AREAPORTAL_WINDOWS").is_some() {
         return HashSet::new();
     }
     bsp.entities
@@ -432,9 +432,9 @@ pub fn parse_entities(
         });
     }
 
-    // `MX_SURF_NO_FUNC_BRUSH_SOLID=1` restores the old behaviour (every
+    // `SURF_OSS_NO_FUNC_BRUSH_SOLID=1` restores the old behaviour (every
     // func_brush render-only) for A/B and for the guard test.
-    if std::env::var_os("MX_SURF_NO_FUNC_BRUSH_SOLID").is_some() {
+    if std::env::var_os("SURF_OSS_NO_FUNC_BRUSH_SOLID").is_some() {
         solid_models.clear();
     }
     let mut solid_brushes = Vec::new();
@@ -587,7 +587,7 @@ fn harvest_trigger_brushes(
     Some((brushes, bounds.unwrap_or(world_bounds)))
 }
 
-/// `MX_SURF_SPAWN_DEBUG=1` names the entity the picker chose, and every start
+/// `SURF_OSS_SPAWN_DEBUG=1` names the entity the picker chose, and every start
 /// volume it recognised — the fastest way to explain a wrong spawn.
 fn pick_gameplay_spawn_debug(
     named: &HashMap<String, NamedEntity>,
@@ -596,7 +596,7 @@ fn pick_gameplay_spawn_debug(
     start_volumes: &[Aabb],
 ) -> Option<NamedPoint> {
     let pick = pick_gameplay_spawn(named, teleport_target_counts, player_spawns, start_volumes);
-    if std::env::var_os("MX_SURF_SPAWN_DEBUG").is_some() {
+    if std::env::var_os("SURF_OSS_SPAWN_DEBUG").is_some() {
         for v in start_volumes {
             println!("SPAWN startvolume {:?}..{:?}", v.mins, v.maxs);
         }

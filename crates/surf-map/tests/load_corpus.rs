@@ -460,7 +460,7 @@ fn overgrowth_start_disabled_jail_teleports_are_not_live() {
 ///
 /// Those 7 faces are the *only* users of `oceanwall_portal`, so the material
 /// never reaching the atlas is exactly the property under test. Verified to
-/// fail with `MX_SURF_DRAW_AREAPORTAL_WINDOWS=1`.
+/// fail with `SURF_OSS_DRAW_AREAPORTAL_WINDOWS=1`.
 #[test]
 fn aquaflow_areaportal_window_covers_are_not_drawn() {
     let path =

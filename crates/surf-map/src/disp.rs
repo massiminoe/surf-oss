@@ -162,18 +162,18 @@ pub fn extract_displacements(
     }
 }
 
-/// A/B lever: `MX_SURF_DISP_IGNORE_NOHULL=1` collides with displacements the
+/// A/B lever: `SURF_OSS_DISP_IGNORE_NOHULL=1` collides with displacements the
 /// mapper flagged "No Hull Collision", as the loader did before 2026-09-02.
 fn ignore_nohull() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("MX_SURF_DISP_IGNORE_NOHULL").is_some())
+    *FLAG.get_or_init(|| std::env::var_os("SURF_OSS_DISP_IGNORE_NOHULL").is_some())
 }
 
-/// A/B lever: `MX_SURF_DISP_SINGLE_DIAGONAL=1` restores the pre-2026-09-02
+/// A/B lever: `SURF_OSS_DISP_SINGLE_DIAGONAL=1` restores the pre-2026-09-02
 /// triangulation (every quad split on the same diagonal).
 fn single_diagonal() -> bool {
     static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FLAG.get_or_init(|| std::env::var_os("MX_SURF_DISP_SINGLE_DIAGONAL").is_some())
+    *FLAG.get_or_init(|| std::env::var_os("SURF_OSS_DISP_SINGLE_DIAGONAL").is_some())
 }
 
 /// Match vbsp's subdivided_face + displacement offset (see Handle displacement).

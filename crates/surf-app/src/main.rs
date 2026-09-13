@@ -1,4 +1,4 @@
-//! mx-surf app: graybox (M0), real BSP (M1), timer/zones (M2), menus.
+//! surf-oss app: graybox (M0), real BSP (M1), timer/zones (M2), menus.
 //!
 //! Usage:
 //!   cargo run -p surf-app --release
@@ -74,7 +74,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// Source `m_yaw` / `m_pitch` defaults. Together with `settings.mouse_sens`
 /// this reproduces CS:S exactly — `degrees = counts * sensitivity * m_yaw` —
@@ -195,6 +195,7 @@ struct LaunchOpts {
     map_path: Option<PathBuf>,
     window_w: u32,
     window_h: u32,
+    fullscreen: bool,
     /// Exit after this many seconds of rendering (agent / CI sampling).
     perf_secs: Option<f32>,
     /// CLI override for settings.vsync (`None` = keep settings.json).
@@ -300,6 +301,7 @@ struct App {
     frame_stats: FrameStats,
     window_w: u32,
     window_h: u32,
+    fullscreen: bool,
     perf_secs: Option<f32>,
     /// Set when the first frame renders (for `--perf-secs`).
     perf_started: Option<Instant>,
@@ -323,6 +325,7 @@ impl App {
             map_path,
             window_w,
             window_h,
+            fullscreen,
             perf_secs,
             vsync,
             ghost_path,
@@ -398,6 +401,7 @@ impl App {
             frame_stats: FrameStats::new(),
             window_w,
             window_h,
+            fullscreen,
             perf_secs,
             perf_started: None,
             immediate_ok: false,
@@ -408,7 +412,7 @@ impl App {
             pending_watch: None,
         };
 
-        // `mx-surf <map>` skips the shell, as it always has.
+        // `surf-oss <map>` skips the shell, as it always has.
         if let Some(path) = map_path {
             app.begin_load(path);
         }
@@ -926,7 +930,7 @@ impl App {
     /// 2026-09-03): how to drive a list is implicit in the design.
     fn page_title(&self) -> (String, String) {
         match &self.mode {
-            Mode::MainMenu => ("MX-SURF".into(), String::new()),
+            Mode::MainMenu => ("SURF-OSS".into(), String::new()),
             Mode::MapPicker => ("SELECT MAP".into(), String::new()),
             Mode::Settings => (
                 match self.settings_section {
@@ -2062,7 +2066,8 @@ impl App {
                 .create_window(
                     Window::default_attributes()
                         .with_title(&self.session.title_base)
-                        .with_inner_size(PhysicalSize::new(self.window_w, self.window_h)),
+                        .with_inner_size(PhysicalSize::new(self.window_w, self.window_h))
+                        .with_fullscreen(self.fullscreen.then_some(Fullscreen::Borderless(None))),
                 )
                 .expect("window"),
         );
@@ -2086,7 +2091,7 @@ impl App {
         // this adapter actually supports; on Apple Silicon that is far higher.
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("mx-surf"),
+                label: Some("surf-oss"),
                 required_features: wgpu::Features::empty(),
                 required_limits: adapter.limits(),
                 memory_hints: Default::default(),
@@ -3309,6 +3314,7 @@ fn parse_args() -> LaunchOpts {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut window_w = 1280u32;
     let mut window_h = 800u32;
+    let mut fullscreen = true;
     let mut perf_secs: Option<f32> = None;
     let mut vsync: Option<bool> = None;
     let mut map_path: Option<PathBuf> = None;
@@ -3318,6 +3324,10 @@ fn parse_args() -> LaunchOpts {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--windowed" => {
+                fullscreen = false;
+                i += 1;
+            }
             "--vsync" => {
                 vsync = Some(true);
                 i += 1;
@@ -3364,6 +3374,7 @@ fn parse_args() -> LaunchOpts {
                 });
                 window_w = w;
                 window_h = h;
+                fullscreen = false;
                 i += 2;
             }
             s if s.starts_with('-') => {
@@ -3382,6 +3393,7 @@ fn parse_args() -> LaunchOpts {
         map_path,
         window_w,
         window_h,
+        fullscreen,
         perf_secs,
         vsync,
         ghost_path,
@@ -3396,7 +3408,7 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 
 fn main() {
     let opts = parse_args();
-    println!("mx-surf");
+    println!("surf-oss");
     println!("Assets: {}", surf_app::assets::root().display());
     println!("Click to capture. WASD, Space, R reset, T stage, Esc menu, [ ] sens, - = airaccel.");
     println!(
@@ -3412,9 +3424,12 @@ fn main() {
          (System Settings → Mouse → Pointer acceleration)."
     );
     println!(
-        "Window {}x{}{}",
-        opts.window_w,
-        opts.window_h,
+        "{}{}",
+        if opts.fullscreen {
+            "Fullscreen".to_string()
+        } else {
+            format!("Window {}x{}", opts.window_w, opts.window_h)
+        },
         opts.perf_secs
             .map(|s| format!("  perf-sample {s}s then exit"))
             .unwrap_or_default()

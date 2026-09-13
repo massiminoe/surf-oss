@@ -2,7 +2,7 @@
 //!
 //! Everything used to be looked up relative to the current directory, which is
 //! fine while you only ever launch with `cargo run` from the repo root and
-//! quietly broken the moment `mx-surf` is on your PATH: `read_dir("assets/maps")`
+//! quietly broken the moment `surf-oss` is on your PATH: `read_dir("assets/maps")`
 //! fails from any other directory and the map picker comes up empty.
 
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 /// The `assets/` directory, resolved once per process.
 ///
 /// Order:
-/// 1. `$MX_SURF_ASSETS` — explicit override, wins over everything.
+/// 1. `$SURF_OSS_ASSETS` — explicit override, wins over everything.
 /// 2. `./assets` — running from the repo; keeps the dev workflow identical.
 /// 3. The checkout this binary was compiled from. This is what makes
 ///    `cargo install --path crates/surf-app` produce a command that works from
@@ -19,12 +19,12 @@ use std::sync::OnceLock;
 pub fn root() -> &'static Path {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {
-        if let Some(p) = std::env::var_os("MX_SURF_ASSETS") {
+        if let Some(p) = std::env::var_os("SURF_OSS_ASSETS") {
             let p = PathBuf::from(p);
             if p.is_dir() {
                 return p;
             }
-            eprintln!("MX_SURF_ASSETS={} is not a directory; ignoring", p.display());
+            eprintln!("SURF_OSS_ASSETS={} is not a directory; ignoring", p.display());
         }
         let cwd = PathBuf::from("assets");
         if cwd.is_dir() {

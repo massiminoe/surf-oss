@@ -6,7 +6,7 @@
 //!
 //! Source only ever collides a static prop against its `.phy`, so the `render`
 //! column should read 0 everywhere. It is kept as a tool because the column is
-//! the fastest way to see what `MX_SURF_PROP_RENDER_COLLISION=1` puts back, and
+//! the fastest way to see what `SURF_OSS_PROP_RENDER_COLLISION=1` puts back, and
 //! what a newly imported map would have been colliding under the old rule.
 use std::collections::BTreeMap;
 use surf_map::LoadedMap;

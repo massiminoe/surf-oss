@@ -135,9 +135,9 @@ struct DecodedModel {
 /// it touches is in that area, so anything straddling the boundary is kept.
 pub fn skybox_prop_mask(bsp: &Bsp, leaf_areas: &[u16], sky_area: Option<u16>) -> Vec<bool> {
     let props = &bsp.static_props.props.props;
-    // A/B escape hatch, matching MX_SURF_NO_PHY: proves a change in the world
+    // A/B escape hatch, matching SURF_OSS_NO_PHY: proves a change in the world
     // came from this and not from something else that moved at the same time.
-    if std::env::var_os("MX_SURF_NO_SKYBOX_CULL").is_some() {
+    if std::env::var_os("SURF_OSS_NO_SKYBOX_CULL").is_some() {
         return vec![false; props.len()];
     }
     let Some(sky_area) = sky_area else {
@@ -158,7 +158,7 @@ pub fn skybox_prop_mask(bsp: &Bsp, leaf_areas: &[u16], sky_area: Option<u16>) ->
                     .all(|&leaf| leaf_areas.get(leaf as usize).copied() == Some(sky_area))
         })
         .collect();
-    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
+    if std::env::var_os("SURF_OSS_PROP_DEBUG").is_some() {
         let mut solid = 0;
         let (mut lo, mut hi) = (f32::MAX, f32::MIN);
         for (i, prop) in props.iter().enumerate() {
@@ -209,13 +209,13 @@ pub fn append_static_props(
         );
         bsp.static_props.props.props.len()
     ];
-    let ambient = if std::env::var_os("MX_SURF_NO_PROP_LIGHT").is_some() {
+    let ambient = if std::env::var_os("SURF_OSS_NO_PROP_LIGHT").is_some() {
         None
     } else {
         crate::ambient::AmbientCubes::parse(bsp_bytes)
     };
-    let baked_allowed = std::env::var_os("MX_SURF_NO_PROP_LIGHT").is_none()
-        && std::env::var_os("MX_SURF_NO_VHV").is_none();
+    let baked_allowed = std::env::var_os("SURF_OSS_NO_PROP_LIGHT").is_none()
+        && std::env::var_os("SURF_OSS_NO_VHV").is_none();
     let world_lights = if ambient.is_some() {
         crate::world_lights::WorldLights::parse(bsp_bytes)
     } else {
@@ -343,7 +343,7 @@ pub fn append_static_props(
             added += 1;
         }
         render_bounds[prop_index] = (draw_start..mesh.tris.len(), bounds.finish(origin), lighting);
-        if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() && prop_index % 25 == 0 {
+        if std::env::var_os("SURF_OSS_PROP_DEBUG").is_some() && prop_index % 25 == 0 {
             let n = (mesh.tris.len() - draw_start).max(1) as f32 * 3.0;
             let mean = mesh.tris[draw_start..]
                 .iter()
@@ -414,7 +414,7 @@ fn decode_vhv(bytes: &[u8], expected_vertices: usize) -> Option<Vec<[f32; 3]>> {
     }
     // An empty file (header count 0) is vrad saying "no vertex lighting for
     // this one"; the ambient path covers it silently.
-    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() && out.len() < vertex_count && mesh_count > 0 {
+    if std::env::var_os("SURF_OSS_PROP_DEBUG").is_some() && out.len() < vertex_count && mesh_count > 0 {
         eprintln!(
             "  VHV lod0 colours {} < needed {} (header count {}, meshes {})",
             out.len(),
@@ -439,10 +439,10 @@ pub fn extract_prop_collision(
     let mut cache: HashMap<u16, Option<PropCollision>> = HashMap::new();
     let mut out = Vec::new();
     let mut census: Vec<PropInstance> = Vec::new();
-    // MX_SURF_PROP_DEBUG=1 reports, per model, how much of its render mesh
+    // SURF_OSS_PROP_DEBUG=1 reports, per model, how much of its render mesh
     // survives the upward-facing filter — the filter that decides whether an
     // MDL ramp is a surface or a set of holes.
-    let debug = std::env::var_os("MX_SURF_PROP_DEBUG").is_some();
+    let debug = std::env::var_os("SURF_OSS_PROP_DEBUG").is_some();
     let mut stats: HashMap<String, (usize, usize, usize, f32, bool)> = HashMap::new();
 
     for (prop_index, prop) in bsp.static_props.props.props.iter().enumerate() {
@@ -534,7 +534,7 @@ pub fn extract_prop_collision(
         let local_tris = &collision.tris;
         let from_phy = collision.from_phy;
         // A/B lever shared with `phy::decode_collision`: the old behaviour.
-        let phy_raw = std::env::var_os("MX_SURF_PHY_RAW").is_some();
+        let phy_raw = std::env::var_os("SURF_OSS_PHY_RAW").is_some();
 
         let inst_start = out.len();
         let entry = stats
@@ -646,12 +646,12 @@ fn collide_prop(name: &str) -> bool {
 /// Render every prop we can decode. Skipping non-ramps left maps looking like
 /// bare terrain (boreas: 1587 props, all invisible).
 ///
-/// `MX_SURF_HIDE_PROPS` takes a comma-separated list of path substrings and
+/// `SURF_OSS_HIDE_PROPS` takes a comma-separated list of path substrings and
 /// drops those from the draw mesh only — collision is untouched. It exists so a
 /// "is that thing supposed to be there?" question can be answered by rendering
 /// the same view twice, which is cheaper than arguing about a screenshot.
 fn render_prop(name: &str) -> bool {
-    let Some(hide) = std::env::var_os("MX_SURF_HIDE_PROPS") else {
+    let Some(hide) = std::env::var_os("SURF_OSS_HIDE_PROPS") else {
         return true;
     };
     let hide = hide.to_string_lossy().to_ascii_lowercase();
@@ -666,7 +666,7 @@ fn render_prop(name: &str) -> bool {
 /// props that ship no `.phy` against their render mesh. Source never does this;
 /// the switch exists so a corpus A/B can be run against the old geometry.
 fn render_mesh_collision() -> bool {
-    std::env::var_os("MX_SURF_PROP_RENDER_COLLISION").is_some()
+    std::env::var_os("SURF_OSS_PROP_RENDER_COLLISION").is_some()
 }
 
 /// Collision triangles for one prop model, in model space.
@@ -681,11 +681,11 @@ struct PropCollision {
 fn decode_prop_collision(materials: &mut MaterialBank, model_path: &str) -> Option<PropCollision> {
     let normalized = normalize_path(model_path);
     // A/B escape hatch while the .phy path is being evaluated.
-    let allow_phy = std::env::var_os("MX_SURF_NO_PHY").is_none();
+    let allow_phy = std::env::var_os("SURF_OSS_NO_PHY").is_none();
     if let Some(stem) = normalized.strip_suffix(".mdl").filter(|_| allow_phy) {
         if let Some(bytes) = materials.get_bytes(&format!("{stem}.phy")) {
             if let Some(tris) = crate::phy::decode_collision(&bytes) {
-                if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
+                if std::env::var_os("SURF_OSS_PROP_DEBUG").is_some() {
                     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
                     for t in &tris {
                         for p in t {
@@ -808,7 +808,7 @@ fn decode_model(materials: &mut MaterialBank, model_path: &str) -> Option<Decode
         }
     }
     let vertex_count = hw_base as usize;
-    if std::env::var_os("MX_SURF_PROP_DEBUG").is_some() {
+    if std::env::var_os("SURF_OSS_PROP_DEBUG").is_some() {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for t in &out {
             for p in &t.positions {

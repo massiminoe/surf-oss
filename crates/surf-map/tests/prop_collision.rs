@@ -10,7 +10,7 @@
 //! render-mesh fallback turned them into 1.44M triangles of invisible fence, and
 //! the worst of it sat across the stage-end portals, which had to be threaded.
 //!
-//! Lever for the old behaviour: `MX_SURF_PROP_RENDER_COLLISION=1`.
+//! Lever for the old behaviour: `SURF_OSS_PROP_RENDER_COLLISION=1`.
 
 use surf_core::math::Vec3;
 use surf_core::trace::trace_box;

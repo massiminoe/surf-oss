@@ -172,10 +172,7 @@ impl Settings {
 }
 
 pub fn default_settings_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/mx-surf/settings.json")
+    crate::data::support_dir().join("settings.json")
 }
 
 #[cfg(test)]
@@ -189,7 +186,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-settings-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("surf-oss-settings-{stamp}.json"));
         let s = Settings {
             mouse_sens: 7.5,
             show_keys: true,
@@ -235,7 +232,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-settings-binds-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("surf-oss-settings-binds-{stamp}.json"));
         fs::write(
             &path,
             r#"{"binds":{"turn_left":"KeyZ","bogus":"KeyX","jump":"Escape"},"turn_speed":1e40}"#,
@@ -285,7 +282,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-settings-old-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("surf-oss-settings-old-{stamp}.json"));
         fs::write(&path, r#"{"mouse_sens":5.0}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
         let d = Settings::default();
@@ -308,7 +305,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-settings-bad-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("surf-oss-settings-bad-{stamp}.json"));
         fs::write(
             &path,
             r#"{"audio_volume":9.0,"audio_core":-3.0,"audio_air":99.0,"audio_sub":2.5}"#,
@@ -330,7 +327,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-settings-inf-{stamp}.json"));
+        let path = std::env::temp_dir().join(format!("surf-oss-settings-inf-{stamp}.json"));
         fs::write(&path, r#"{"audio_volume":1e40,"audio_core":1e40,"mouse_sens":1e40}"#).unwrap();
         let loaded = Settings::load_path(&path).unwrap();
         assert!((loaded.audio_volume - Settings::default().audio_volume).abs() < 1e-5);

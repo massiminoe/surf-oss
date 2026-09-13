@@ -120,7 +120,7 @@ fn main() {
         (
             "main_menu",
             MenuPage {
-                title: "MX-SURF".into(),
+                title: "SURF-OSS".into(),
                 panel: rows(vec![
                     MenuRow::item("Resume", "summit").with_tone(RowTone::Accent),
                     MenuRow::item("Play", ""),

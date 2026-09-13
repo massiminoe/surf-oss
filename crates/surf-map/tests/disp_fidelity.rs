@@ -1,8 +1,8 @@
 //! Displacement collision must be the surface Source builds, not merely a
 //! surface through the same vertices. Both tests are on boreas, whose ramps
 //! sit against lumpy rock displacements, and both were verified to fail with
-//! their A/B lever set (`MX_SURF_DISP_SINGLE_DIAGONAL=1` /
-//! `MX_SURF_DISP_IGNORE_NOHULL=1`).
+//! their A/B lever set (`SURF_OSS_DISP_SINGLE_DIAGONAL=1` /
+//! `SURF_OSS_DISP_IGNORE_NOHULL=1`).
 
 use std::path::PathBuf;
 

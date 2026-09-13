@@ -7,7 +7,7 @@
 //! Max: "it renders as a solid colour… they shouldn't be blocking our vision.
 //! I feel they were probably meant to be some kind of glow."
 //!
-//! Verified to fail with `MX_SURF_NO_VMT_SHADING=translucent` (which draws
+//! Verified to fail with `SURF_OSS_NO_VMT_SHADING=translucent` (which draws
 //! translucent materials through the opaque cutout again): the card's edge
 //! becomes a 4.1-luma step between neighbouring columns instead of a 1.3 ramp.
 

@@ -2,6 +2,7 @@
 
 pub mod assets;
 pub mod binds;
+mod data;
 pub mod ksf_replay;
 pub mod leaderboard;
 pub mod locs;

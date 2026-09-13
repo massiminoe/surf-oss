@@ -5,7 +5,7 @@
 //! face +z), so the seam caps stood across the ramp as walls facing the
 //! player. On the KSF WR line ramp 1 hit one at tick 51 (878 → 290 u/s) and
 //! the run had 93 prop snags in total; Max saw "weird artifacts being
-//! registered as ramps". Verified to fail with `MX_SURF_PHY_RAW=1`
+//! registered as ramps". Verified to fail with `SURF_OSS_PHY_RAW=1`
 //! (the pre-fix decode): "tick 51 kept 33% of its speed".
 
 use std::path::PathBuf;

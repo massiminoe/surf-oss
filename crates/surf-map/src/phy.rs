@@ -139,11 +139,11 @@ pub fn decode_ledges(data: &[u8]) -> Option<Vec<Ledge>> {
 /// half-pipe of 16 such pieces, and the WR line hit a seam cap at tick 51
 /// (878 → 290 u/s) — the "artifacts registered as ramps" Max reported.
 ///
-/// `MX_SURF_PHY_RAW=1` returns the ledges as stored (winding untouched, seams
+/// `SURF_OSS_PHY_RAW=1` returns the ledges as stored (winding untouched, seams
 /// kept) for A/B.
 pub fn decode_collision(data: &[u8]) -> Option<Vec<[Vec3; 3]>> {
     let ledges = decode_ledges(data)?;
-    if std::env::var_os("MX_SURF_PHY_RAW").is_some() {
+    if std::env::var_os("SURF_OSS_PHY_RAW").is_some() {
         return Some(ledges.into_iter().flatten().collect());
     }
     Some(surface_of(&ledges))

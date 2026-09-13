@@ -1,4 +1,4 @@
-# mx-surf
+# surf-oss
 
 A macOS-native, single-player recreation of Counter-Strike's **surf** gamemode:
 Source-engine-faithful movement physics (surf + bunnyhop), real community surf map
@@ -30,9 +30,10 @@ from — a mirror serving a different build of a map would silently move spawns 
 zone volumes.
 
 ```bash
-cargo test --workspace                        # requires --batch tests maps
-cargo run -p surf-app --release               # surf_summit
-cargo run -p surf-app --release -- --graybox  # no map needed (M0 arena)
+cargo test --workspace --release              # requires --batch tests maps
+cargo run -p surf-app --release               # launch surf-oss
+cargo build -p surf-app --release --bin surf-oss
+./target/release/surf-oss
 ```
 
 The map-loading tests deliberately **fail** rather than skip when a BSP is
@@ -40,8 +41,28 @@ missing, so absent assets can't quietly hide a regression behind a green run.
 
 **Optional — stock CS:S/HL2 textures.** Most corpus maps embed their custom
 assets in the BSP pakfile and render standalone. Faces using Valve *stock*
-materials need a real game install: set `MX_SURF_GAME_DIR` to it. This is the
+materials need a real game install: set `SURF_OSS_GAME_DIR` to it. This is the
 only part that requires owning Counter-Strike: Source.
+
+### Upgrading from mx-surf
+
+The game launches fullscreen by default. Use `surf-oss --windowed` for a window,
+or `surf-oss --size 1280x800` for a specific window size.
+
+The executable is now `surf-oss`. Rename any `MX_SURF_*` environment variables
+in your shell or launch scripts to `SURF_OSS_*` (for example,
+`SURF_OSS_GAME_DIR` and `SURF_OSS_ASSETS`). Rebuild any locally installed binary.
+The Cargo package remains `surf-app`.
+
+Quit the old app before running the new version. On first data access, it moves
+`~/Library/Application Support/mx-surf/` to
+`~/Library/Application Support/surf-oss/`, preserving settings, PBs, run history,
+savelocs, and replays. An older `osx-surf/` directory is used only if `mx-surf/`
+is absent. An existing `surf-oss/` directory is never merged or overwritten;
+migration errors stop access and report the affected paths. Replay files keep
+their `.osxr` extension and format. Stored replay paths and custom ghost selections
+using the old data directory resolve to the new location automatically. Your
+checkout folder can keep its old name.
 
 ### Feel-check controls
 

@@ -114,7 +114,7 @@ def convert(map_name: str, raw: list[dict]) -> dict:
 def fetch_raw(map_name: str) -> list[dict]:
     url = RAW_URL.format(map=map_name)
     print(f"GET {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "mx-surf-research/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "surf-oss-research/1.0"})
     with urllib.request.urlopen(req, timeout=60, context=SSL_CONTEXT) as resp:
         return json.load(resp)
 

@@ -156,7 +156,9 @@ impl PbStore {
             .map_err(|e| format!("pb query: {e}"))?;
         if let Some(row) = rows.next().map_err(|e| format!("pb row: {e}"))? {
             let path: Option<String> = row.get(0).map_err(|e| format!("pb get: {e}"))?;
-            Ok(path.filter(|p| !p.is_empty()))
+            Ok(path
+                .filter(|p| !p.is_empty())
+                .map(|p| crate::data::saved_path(&p).to_string_lossy().into_owned()))
         } else {
             Ok(None)
         }
@@ -180,7 +182,9 @@ impl PbStore {
                         time_secs: row.get::<_, f64>(0)? as f32,
                         is_pb: row.get::<_, i32>(1)? != 0,
                         finished_at: row.get(2)?,
-                        replay_path: row.get(3)?,
+                        replay_path: row.get::<_, Option<String>>(3)?.map(|p| {
+                            crate::data::saved_path(&p).to_string_lossy().into_owned()
+                        }),
                     })
                 },
             )
@@ -214,10 +218,7 @@ fn unix_now() -> i64 {
 }
 
 fn default_db_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/mx-surf/pbs.sqlite")
+    crate::data::support_dir().join("pbs.sqlite")
 }
 
 #[cfg(test)]
@@ -230,7 +231,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-pb-{stamp}.sqlite"));
+        let path = std::env::temp_dir().join(format!("surf-oss-pb-{stamp}.sqlite"));
         let store = PbStore::open_path(&path).expect("open");
         (store, path)
     }

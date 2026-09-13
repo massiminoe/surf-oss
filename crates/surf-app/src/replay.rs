@@ -1,4 +1,4 @@
-//! Native mx-surf replay format (`.osxr`).
+//! Native surf-oss replay format (`.osxr`).
 //!
 //! Binary layout (little-endian):
 //! ```text
@@ -639,7 +639,7 @@ pub fn ghost_catalog(map: &str, current_id: &str) -> Vec<GhostOption> {
     }
 
     if current_id != GHOST_OFF && current_id != GHOST_PB && current_id != GHOST_AUTO {
-        let cur = PathBuf::from(current_id);
+        let cur = crate::data::saved_path(current_id);
         let already =
             listed_paths.iter().any(|p| p == &cur) || out.iter().any(|o| o.id == current_id);
         if !already && cur.is_file() {
@@ -665,7 +665,7 @@ pub fn resolve_ghost_path(map: &str, ghost_id: &str) -> Option<PathBuf> {
         GHOST_OFF => None,
         GHOST_AUTO => resolve_auto_ghost_path(map),
         GHOST_PB => Some(pb_replay_path(map)),
-        other => Some(PathBuf::from(other)),
+        other => Some(crate::data::saved_path(other)),
     }
 }
 
@@ -788,7 +788,7 @@ fn format_secs(secs: f32) -> String {
     }
 }
 
-/// `~/Library/Application Support/mx-surf/replays/<map>/<track>/<style>/`
+/// `~/Library/Application Support/surf-oss/replays/<map>/<track>/<style>/`
 pub fn replay_dir(map: &str) -> PathBuf {
     app_support_dir()
         .join("replays")
@@ -808,10 +808,7 @@ pub fn new_run_replay_path(map: &str, time_secs: f32) -> PathBuf {
 }
 
 fn app_support_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("Library/Application Support/mx-surf")
+    crate::data::support_dir().to_path_buf()
 }
 
 fn unix_now() -> i64 {
@@ -912,7 +909,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("mx-surf-replay-{stamp}.osxr"));
+        let path = std::env::temp_dir().join(format!("surf-oss-replay-{stamp}.osxr"));
         let replay = Replay {
             header: ReplayHeader {
                 format_version: REPLAY_FORMAT_VERSION,

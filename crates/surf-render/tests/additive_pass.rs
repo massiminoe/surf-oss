@@ -4,7 +4,7 @@
 //! glow along the foot of every ramp. Drawn opaque (the only pass we had) it
 //! was a pinkish slab standing at the bottom of each ramp; Max: "they look
 //! kinda like bumper bars". With the blended pass the skirt only brightens
-//! what is behind it. Verified to fail with `MX_SURF_NO_VMT_SHADING=additive`
+//! what is behind it. Verified to fail with `SURF_OSS_NO_VMT_SHADING=additive`
 //! (which draws additive materials opaque again): the glow region comes out
 //! darker than the sand around it.
 

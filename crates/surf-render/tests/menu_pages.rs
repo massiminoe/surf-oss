@@ -25,7 +25,7 @@ fn map_path(name: &str) -> std::path::PathBuf {
 
 fn page(backdrop: bool) -> MenuPage {
     MenuPage {
-        title: "MX-SURF".into(),
+        title: "SURF-OSS".into(),
         subtitle: "test".into(),
         panel: MenuPanel {
             rows: vec![MenuRow::item("Play", ""), MenuRow::item("Quit", "")],

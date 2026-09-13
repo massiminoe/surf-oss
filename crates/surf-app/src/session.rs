@@ -98,8 +98,8 @@ impl Level {
 
     pub fn title(&self) -> String {
         match self {
-            Level::Graybox(_) => "mx-surf — graybox".into(),
-            Level::Map(m) => format!("mx-surf — {}", m.name),
+            Level::Graybox(_) => "surf-oss — graybox".into(),
+            Level::Map(m) => format!("surf-oss — {}", m.name),
         }
     }
 

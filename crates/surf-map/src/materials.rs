@@ -386,8 +386,8 @@ fn flat_color_layer(linear: [f32; 3]) -> RgbaImage {
     RgbaImage::from_pixel(4, 4, image::Rgba([px[0], px[1], px[2], 255]))
 }
 
-/// A/B lever, same convention as `MX_SURF_NO_PHY` / `MX_SURF_NO_FIELDS`:
-/// `MX_SURF_NO_VMT_SHADING=tint|additive|all`. Kept separable because the two
+/// A/B lever, same convention as `SURF_OSS_NO_PHY` / `SURF_OSS_NO_FIELDS`:
+/// `SURF_OSS_NO_VMT_SHADING=tint|additive|all`. Kept separable because the two
 /// land on overlapping maps and a corpus diff that cannot tell them apart says
 /// nothing useful — nyx's cave darkens under `tint` (the mapper's own
 /// `$color [0.2 0.2 0.2]` on the rock) and its glow rails change under
@@ -401,7 +401,7 @@ struct Disabled {
 }
 
 fn disabled() -> Disabled {
-    let Some(v) = std::env::var_os("MX_SURF_NO_VMT_SHADING") else {
+    let Some(v) = std::env::var_os("SURF_OSS_NO_VMT_SHADING") else {
         return Disabled::default();
     };
     let v = v.to_string_lossy().to_ascii_lowercase();
@@ -479,9 +479,9 @@ fn cap_layer(img: DynamicImage) -> RgbaImage {
 
 /// Every layer of the array shares one size. 1024² RGBA with mips is 5.6 MB a
 /// layer, so a map with many materials steps down to 512 rather than hold a
-/// gigabyte of texture; `MX_SURF_TEX_SIZE` overrides.
+/// gigabyte of texture; `SURF_OSS_TEX_SIZE` overrides.
 fn choose_layer_size(layers: &[RgbaImage]) -> u32 {
-    if let Some(v) = std::env::var("MX_SURF_TEX_SIZE")
+    if let Some(v) = std::env::var("SURF_OSS_TEX_SIZE")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
     {
