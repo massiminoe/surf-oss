@@ -29,10 +29,10 @@ pub fn root() -> &'static Path {
             );
         }
         let installed = crate::data::support_dir().join("content");
-        let bundled = std::env::current_exe()
-            .ok()
-            .is_some_and(|p| p.parent().is_some_and(|p| p.ends_with("Contents/MacOS")));
-        if bundled || installed.join("maps").is_dir() {
+        // Packaging changes the executable's location, not the user's content.
+        // A locally built app must retain the same checkout fallback as the CLI.
+        // On another machine that checkout is absent, so installed content wins.
+        if installed.join("maps").is_dir() {
             return installed;
         }
         let cwd = PathBuf::from("assets");

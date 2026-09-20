@@ -39,16 +39,22 @@ been tested on macOS Tahoe.
    ```sh
    git clone https://github.com/massiminoe/surf-oss.git
    cd surf-oss
-   cargo build --locked --release -p surf-app --bin surf-oss
+   ./tools/package_macos.sh
    ```
 
-   If you already have this checkout, run just the build command from its root.
+   If you already have this checkout, run just the packaging command from its root.
+   For subsequent builds, pass a new output directory, such as
+   `./tools/package_macos.sh target/dist-next`.
 
 3. **Launch the app.**
 
    ```sh
-   ./target/release/surf-oss
+   open target/dist/surf-oss.app
    ```
+
+   You can also move `surf-oss.app` to Applications and launch it from Finder.
+   The app bundle includes the icon used by the Dock and app switcher. Launching
+   the bare executable directly is still supported for terminal diagnostics.
 
 4. **Complete the setup window, then choose “Play”.**
 
