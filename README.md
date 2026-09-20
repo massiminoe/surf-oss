@@ -50,12 +50,27 @@ been tested on macOS Tahoe.
    ./target/release/surf-oss
    ```
 
-4. **Choose “Set up / refresh content”, then “Play”.**
+4. **Complete the setup window, then choose “Play”.**
 
-   Setup finds your CS:S installation and downloads the maps, leaderboard
-   records and available replays. External Steam libraries are detected too.
-   If it can't find the content, choose your installed **Counter-Strike Source**
-   folder in the folder picker; the app remembers your selection.
+   A separate setup window opens automatically when CS:S isn't detected or no
+   maps are installed. You can also open it from **Set up / refresh content**
+   on the main menu. Choose **Set up / refresh** in that window to begin.
+
+   The window tracks three numbered steps, keeping completed checks visible:
+
+   - **Counter-Strike: Source** — shows a checkmark and the detected folder.
+     External Steam libraries are detected too. If CS:S can't be found, starting
+     setup opens a folder picker; choose your installed **Counter-Strike Source**
+     folder. The app remembers your selection.
+   - **Maps and timing zones** — installs the 16 community maps and their zones,
+     showing which map is being downloaded, unpacked or verified.
+   - **Leaderboards and replays** — fetches KSF rankings and available top-10
+     ghost replays.
+
+   Scroll the activity history to review progress and errors. **Hide window**,
+   Esc, or closing the setup window leaves downloads running while the app stays
+   open; reopen it from the main menu to check progress. When setup reports
+   **Ready to surf**, choose **Done**, then **Play** on the main menu.
 
    Allow several minutes and at least **3 GB of free space** for surf-oss content,
    in addition to the CS:S installation. You can play installed maps while the
@@ -72,9 +87,11 @@ been tested on macOS Tahoe.
 
 ### If setup is interrupted
 
-Run **Set up / refresh content** again. Partial map downloads resume, and verified
-maps and imported replays are reused. Existing conflicting maps are preserved
-and reported rather than overwritten.
+Use **Cancel setup** to stop downloads. After cancellation or a failure, choose
+**Retry setup** in the setup window. If you quit the app, reopen it and choose
+**Set up / refresh content**, then **Set up / refresh**. Partial map downloads
+resume, and verified maps and imported replays are reused. Existing conflicting
+maps are preserved and reported rather than overwritten.
 
 <details>
 <summary>Terminal setup and diagnostics</summary>
@@ -135,7 +152,13 @@ Settings, times, practice locations and personal replays live in
 <summary>Use a separate profile</summary>
 
 To try a fresh setup without touching your existing profile or checkout assets,
-choose a new directory and use it for both setup and play:
+launch with a new profile directory. This opens the in-app setup window:
+
+```sh
+./target/release/surf-oss --windowed --data-dir /tmp/surf-oss-fresh-profile
+```
+
+To set up and verify that profile from the terminal instead:
 
 ```sh
 ./target/release/surf-oss --setup --data-dir /tmp/surf-oss-fresh-profile
