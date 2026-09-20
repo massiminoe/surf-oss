@@ -10,6 +10,18 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Clone, Debug)]
+pub enum SetupEvent {
+    Step { index: usize, complete: bool, detail: String },
+    Activity(String),
+    Finished(Result<(), String>),
+}
+
+/// Reset only when the previous setup worker has joined.
+pub fn reset_cancel() {
+    CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 static CANCELLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub fn cancel() {
     CANCELLED.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -139,6 +151,7 @@ fn download(
     if resume && dest.metadata().is_ok_and(|m| m.len() > 0) {
         command.args(["--continue-at", "-"]);
     }
+    progress(format!("Downloading {label}…"));
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     let mut last_update = std::time::Instant::now();
     loop {
@@ -191,20 +204,19 @@ pub fn configure_game_dir() {
     }
 }
 /// The GUI can recover from a missing/nonstandard Steam install without a shell.
-pub fn setup_interactive(progress: &mut impl FnMut(String)) -> Result<(), String> {
+pub fn setup_interactive(report: &mut impl FnMut(SetupEvent)) -> Result<(), String> {
+    report(SetupEvent::Step { index: 0, complete: false, detail: "Looking for an installed copy of CS:S…".into() });
     if surf_map::stock::discover_game_dir()
         .is_none_or(|p| surf_map::stock::validate_game_dir(&p).is_err())
     {
-        progress(
-            "Locate the installed Counter-Strike Source folder (contains cstrike and hl2).".into(),
-        );
+        report(SetupEvent::Step { index: 0, complete: false, detail: "CS:S not found. Choose its folder in the folder picker.".into() });
         let output = run(Command::new("/usr/bin/osascript").args(["-e", "POSIX path of (choose folder with prompt \"Choose your installed Counter-Strike Source folder (contains cstrike and hl2)\")"]))
-            .map_err(|_| "Setup cancelled. Install CS:S through Steam, then choose Set up / refresh content again.".to_string())?;
+            .map_err(|_| "CS:S was not selected. Install it through Steam, then retry setup.".to_string())?;
         let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
         surf_map::stock::validate_game_dir(&path)?;
         surf_map::stock::select_game_dir(path);
     }
-    setup(progress)
+    setup_report(report)
 }
 pub fn check(progress: &mut impl FnMut(String)) -> Result<(), String> {
     let game = surf_map::stock::discover_game_dir()
@@ -253,8 +265,16 @@ pub fn check(progress: &mut impl FnMut(String)) -> Result<(), String> {
 }
 /// Idempotent setup: valid maps are reused; conflicting existing BSPs are never replaced.
 pub fn setup(progress: &mut impl FnMut(String)) -> Result<(), String> {
+    setup_report(&mut |event| match event {
+        SetupEvent::Step { detail, .. } | SetupEvent::Activity(detail) => progress(detail),
+        SetupEvent::Finished(_) => {},
+    })
+}
+
+fn setup_report(report: &mut impl FnMut(SetupEvent)) -> Result<(), String> {
     let game = surf_map::stock::discover_game_dir().ok_or("CS:S not found. Install through Steam, or launch with --game-dir PATH (folder containing cstrike and hl2).")?;
     surf_map::stock::validate_game_dir(&game)?;
+    report(SetupEvent::Step { index: 0, complete: true, detail: game.display().to_string() });
     let root = crate::assets::root();
     write_atomic(
         &root.join("game-dir.txt"),
@@ -267,17 +287,21 @@ pub fn setup(progress: &mut impl FnMut(String)) -> Result<(), String> {
     names.sort_by_key(|m| (m.as_str() != "surf_summit", m.as_str()));
     for (i, map) in names.iter().enumerate() {
         check_cancelled()?;
-        progress(format!("Map {}/{}: {map}", i + 1, names.len()));
-        if let Err(e) = install_map(root, map, &maps[*map], progress) {
-            progress(format!("Could not install {map}: {e}"));
+        report(SetupEvent::Step { index: 1, complete: false, detail: format!("Map {}/{}: {map}", i + 1, names.len()) });
+        if let Err(e) = install_map(root, map, &maps[*map], &mut |m| report(SetupEvent::Activity(m))) {
+            report(SetupEvent::Activity(format!("Could not install {map}: {e}")));
             failures.push(format!("{map}: {e}"));
         }
     }
-    if let Err(error) = refresh_records(progress) {
+    report(SetupEvent::Step { index: 1, complete: failures.is_empty(), detail: format!("{} of {} maps installed with zones", names.len() - failures.len(), names.len()) });
+    report(SetupEvent::Step { index: 2, complete: false, detail: "Fetching KSF rankings and available top-10 replays…".into() });
+    if let Err(error) = refresh_records(&mut |m| report(SetupEvent::Activity(m))) {
         failures.push(error);
+    } else {
+        report(SetupEvent::Step { index: 2, complete: true, detail: "Rankings and available replays saved".into() });
     }
     if failures.is_empty() {
-        progress("Ready: all 16 maps, leaderboards and available top-10 replays.".into());
+        report(SetupEvent::Activity("Ready to surf.".into()));
         Ok(())
     } else {
         Err(format!(
@@ -320,6 +344,7 @@ fn install_map(
     let path = root.join("maps").join(format!("{map}.bsp"));
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     if path.exists() {
+        progress(format!("Checking existing {map} (SHA-256)…"));
         verify(&path, asset).map_err(|e| {
             format!(
                 "{}: {e}. Existing file preserved; use a separate --data-dir for a fresh install.",
@@ -336,6 +361,7 @@ fn install_map(
             true,
         );
         check_cancelled()?;
+        progress(format!("Unpacking {map}…"));
         let unpacked = temporary(&path);
         let output = fs::File::create(&unpacked).map_err(|e| e.to_string())?;
         let result = Command::new("/usr/bin/bzip2")
@@ -349,6 +375,7 @@ fn install_map(
                 .err()
                 .unwrap_or_else(|| "map decompression failed; cached download preserved".into()));
         }
+        progress(format!("Verifying {map} (SHA-256)…"));
         verify(&unpacked, asset)?;
         fs::rename(&unpacked, &path).map_err(|e| e.to_string())?;
         // Download scratch files are left intact; setup never deletes local files.

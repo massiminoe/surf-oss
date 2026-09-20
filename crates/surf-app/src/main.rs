@@ -40,6 +40,8 @@
 //! pointer acceleration (System Settings → Mouse → Pointer acceleration off),
 //! or: `defaults write -g com.apple.mouse.scaling -integer -1`
 
+mod setup_window;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -317,8 +319,10 @@ struct App {
     watch: Option<ReplayWatch>,
     /// A replay to start once the map it needs has loaded.
     pending_watch: Option<ReplayPick>,
-    content_task: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    content_task: Option<std::sync::mpsc::Receiver<surf_app::content::SetupEvent>>,
     content_status: Option<String>,
+    setup_window: Option<setup_window::SetupWindow>,
+    setup_requested: bool,
     content_worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -424,6 +428,8 @@ impl App {
             pending_watch: None,
             content_task: None,
             content_status: None,
+            setup_window: None,
+            setup_requested: false,
             content_worker: None,
         };
 
@@ -637,7 +643,7 @@ impl App {
                     ));
                 }
                 out.push((MenuRow::item("Play", ""), RowAction::MainPlay));
-                out.push((MenuRow::item(if self.content_task.is_some() { "Setting up content…" } else { "Set up / refresh content" }, "").with_note("16 maps · KSF records and replays"), if self.content_task.is_some() { RowAction::None } else { RowAction::SetupContent }));
+                out.push((MenuRow::item(if self.content_task.is_some() { "Setting up content…" } else { "Set up / refresh content" }, "").with_note("16 maps · KSF records and replays"), RowAction::SetupContent));
                 out.push((MenuRow::item("Leaderboard", ""), RowAction::MainLeaderboard));
                 out.push((MenuRow::item("Settings", ""), RowAction::MainSettings));
                 out.push((MenuRow::item("Quit", ""), RowAction::MainQuit));
@@ -1156,7 +1162,7 @@ impl App {
             RowAction::Rebind(b) => self.rebinding = Some(b),
             RowAction::MainResume => self.resume_world(),
             RowAction::MainPlay => self.open_picker(),
-            RowAction::SetupContent => self.setup_content(),
+            RowAction::SetupContent => self.setup_requested = true,
             RowAction::MainLeaderboard => self.open_leaderboard(),
             RowAction::MainSettings => {
                 self.mode = Mode::Settings;
@@ -1296,13 +1302,15 @@ impl App {
 
     fn setup_content(&mut self) {
         if self.content_task.is_some() { return; }
+        surf_app::content::reset_cancel();
+        if let Some(window) = self.setup_window.as_mut() { window.begin(); }
         let (tx, rx) = std::sync::mpsc::channel();
         self.content_task = Some(rx);
         self.load_error = None;
         self.content_status = Some("Checking CS:S content…".into());
         self.content_worker = Some(std::thread::spawn(move || {
-            let result = surf_app::content::setup_interactive(&mut |message| { let _ = tx.send(Ok(message)); });
-            if let Err(error) = result { let _ = tx.send(Err(error)); }
+            let result = surf_app::content::setup_interactive(&mut |message| { let _ = tx.send(message); });
+            let _ = tx.send(surf_app::content::SetupEvent::Finished(result));
         }));
     }
 
@@ -1310,8 +1318,12 @@ impl App {
         let Some(rx) = self.content_task.as_ref() else { return; };
         loop {
             match rx.try_recv() {
-                Ok(Ok(message)) => self.content_status = Some(message),
-                Ok(Err(error)) => { eprintln!("{error}"); self.content_status = Some(error.lines().take(2).collect::<Vec<_>>().join(" · ")); }
+                Ok(event) => {
+                    if let surf_app::content::SetupEvent::Finished(ref result) = event {
+                        self.content_status = Some(if result.is_ok() { "Content ready" } else { "Setup needs attention — open setup for details" }.into());
+                    }
+                    if let Some(window) = self.setup_window.as_mut() { window.update(event); }
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.content_task = None;
@@ -3036,11 +3048,60 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             self.init_gpu(event_loop);
+            if matches!(self.mode, Mode::MainMenu) && (self.map_list.iter().all(|m| !m.path.as_ref().is_some_and(|p| p.is_file()))
+                || surf_map::stock::discover_game_dir().is_none_or(|p| surf_map::stock::validate_game_dir(&p).is_err())) {
+                self.setup_requested = true;
+            }
         }
         event_loop.set_control_flow(ControlFlow::Poll);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.setup_window.as_ref().is_some_and(|w| w.window.id() == id) {
+            let window = self.setup_window.as_mut().unwrap();
+            let mut action = None;
+            match event {
+                WindowEvent::CloseRequested => window.window.set_visible(false),
+                WindowEvent::Resized(size) => window.resize(size.width, size.height),
+                WindowEvent::CursorMoved { position, .. } => window.cursor = (position.x as f32, position.y as f32),
+                WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => action = window.button(),
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let dy = match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 };
+                    window.scroll_by(dy < 0.);
+                }
+                WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(key), state: ElementState::Pressed, repeat: false, .. }, .. } => {
+                    match key {
+                        KeyCode::Enter => action = Some(window.selected_button),
+                        KeyCode::Escape => action = Some(1),
+                        KeyCode::Tab | KeyCode::ArrowLeft | KeyCode::ArrowRight => window.selected_button = 1 - window.selected_button,
+                        KeyCode::ArrowDown => window.scroll_by(true),
+                        KeyCode::ArrowUp => window.scroll_by(false),
+                        _ => {}
+                    }
+                }
+                WindowEvent::RedrawRequested => { window.draw(); return; },
+                _ => {}
+            }
+            if action == Some(1) { window.window.set_visible(false); }
+            if action == Some(0) {
+                if window.running { surf_app::content::cancel(); }
+                else { self.setup_content(); }
+            }
+            if let Some(w) = self.setup_window.as_ref() { w.window.request_redraw(); }
+            return;
+        }
+        if self.setup_requested {
+            self.setup_requested = false;
+            if let Some(window) = self.setup_window.as_ref() {
+                window.window.set_visible(true);
+                window.window.focus_window();
+            } else {
+                match setup_window::SetupWindow::new(event_loop) {
+                    Ok(window) => self.setup_window = Some(window),
+                    Err(error) => self.load_error = Some(format!("Could not open setup: {error}")),
+                }
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
