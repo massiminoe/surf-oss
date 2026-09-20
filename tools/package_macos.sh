@@ -12,7 +12,7 @@ fi
 cargo build --locked --release -p surf-app --bin surf-oss
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/assets/fonts/licenses" "$app/Contents/Resources/assets/maps"
 cp target/release/surf-oss "$app/Contents/MacOS/surf-oss"
-cp LICENSE README.md DEVELOPMENT.md SETUP-VALIDATION.md "$app/Contents/Resources/"
+cp LICENSE README.md "$app/Contents/Resources/"
 cp assets/maps/manifest.json "$app/Contents/Resources/assets/maps/"
 cp assets/fonts/licenses/*.txt "$app/Contents/Resources/assets/fonts/licenses/"
 cat > "$app/Contents/Info.plist" <<'PLIST'

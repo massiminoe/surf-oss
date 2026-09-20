@@ -1,45 +1,83 @@
 # surf-oss
 
-Standalone, single-player surf for Apple Silicon Macs: 16 community maps,
-practice locations, timers, personal bests, a KSF leaderboard, ghosts and replays.
+This is a standalone, single-player implementation I've been using to surf on my Mac.
+I've spent a lot of time in-game getting the surf to feel like CS: Source.
+It supports a selection of real surf maps, with practice tools, timers, PBs,
+replays and ghosts.
 
-[![Watch surf-oss on YouTube](https://img.youtube.com/vi/ypqafhi-wXk/hqdefault.jpg)](https://www.youtube.com/watch?v=ypqafhi-wXk)
+## [Gameplay Video (YouTube)](https://www.youtube.com/watch?v=ypqafhi-wXk)
 
-**[Watch surf-oss in action →](https://www.youtube.com/watch?v=ypqafhi-wXk)**
+<a href="https://www.youtube.com/watch?v=ypqafhi-wXk">
+  <img src="https://img.youtube.com/vi/ypqafhi-wXk/maxresdefault.jpg" alt="Watch surf-oss gameplay on YouTube — Cyberwave's neon skyline and surf ramps" width="960">
+</a>
 
-**Install Counter-Strike: Source through Steam, then open surf-oss. It finds your
-CS:S content and downloads the maps, records and available replays. After setup,
-you can play offline. Neither Steam nor CS:S needs to be running.**
+---
 
-## Build and play
+## Setup
 
-The source build is the tested installation path. You need:
+**You need to own Counter-Strike: Source and download its files through Steam on
+your Mac.** surf-oss uses textures, models and other stock assets from that
+installation to load the maps. You don't need to launch CS:S; once setup is done,
+neither CS:S nor Steam needs to be running, and you can play offline.
 
-- An Apple Silicon Mac (tested on macOS Tahoe).
-- Apple's Command Line Tools: `xcode-select --install`.
-- [Rust and Cargo](https://rustup.rs/) (tested with Rust 1.97.1).
-- Installed CS:S content: the game folder must contain `cstrike/` and `hl2/`.
-  Ownership alone is not enough; download the files through Steam. The original
-  game does not need to run on your Mac.
+The steps below build surf-oss from source on an **Apple Silicon Mac**. It has
+been tested on macOS Tahoe.
 
-From this checkout:
+1. **Install Counter-Strike: Source.**
 
-```sh
-cargo build --locked --release -p surf-app --bin surf-oss
-./target/release/surf-oss
-```
+   Download [Counter-Strike: Source](https://store.steampowered.com/app/240/CounterStrike_Source/)
+   from your Steam library. The warning that the game cannot run on current
+   macOS concerns the original game; surf-oss only needs its downloaded content.
+   Let the download finish before continuing. The installed game folder should
+   contain both `cstrike/` and `hl2/`.
 
-Choose **Set up / refresh content**, then **Play**. Setup downloads all 16 maps,
-KSF CS:S 66-tick top-10 records, and every available replay in those records.
-Installed maps are playable while the remaining downloads continue. Allow several
-minutes and at least 3 GB of free space; slow connections take longer. No Python
-is needed for this path.
+2. **Build surf-oss.**
 
-Steam libraries are detected automatically, including external libraries. If
-content is not found, setup opens a folder picker. Choose the installed
-**Counter-Strike Source** folder. A valid selection is remembered.
+   Install Apple's Command Line Tools with `xcode-select --install`, and
+   [Rust and Cargo](https://rustup.rs/). Then, from a terminal:
 
-Terminal equivalents and diagnostics:
+   ```sh
+   git clone https://github.com/massiminoe/surf-oss.git
+   cd surf-oss
+   cargo build --locked --release -p surf-app --bin surf-oss
+   ```
+
+   If you already have this checkout, run just the build command from its root.
+
+3. **Launch the app.**
+
+   ```sh
+   ./target/release/surf-oss
+   ```
+
+4. **Choose “Set up / refresh content”, then “Play”.**
+
+   Setup finds your CS:S installation and downloads the maps, leaderboard
+   records and available replays. External Steam libraries are detected too.
+   If it can't find the content, choose your installed **Counter-Strike Source**
+   folder in the folder picker; the app remembers your selection.
+
+   Allow several minutes and at least **3 GB of free space** for surf-oss content,
+   in addition to the CS:S installation. You can play installed maps while the
+   remaining downloads continue. No Python is needed.
+
+### Before you surf: turn off pointer acceleration
+
+> [!IMPORTANT]
+> **Turn off pointer acceleration for consistent mouse feel.** In macOS, open
+> **System Settings → Mouse → Advanced**, then turn **Pointer acceleration** off.
+> With it enabled, the same mouse distance can turn you by different amounts
+> depending on how quickly you move it, making strafing harder to control.
+> This setting affects your mouse across macOS. [Apple's instructions](https://support.apple.com/guide/mac-help/mchlp1138/mac).
+
+### If setup is interrupted
+
+Run **Set up / refresh content** again. Partial map downloads resume, and verified
+maps and imported replays are reused. Existing conflicting maps are preserved
+and reported rather than overwritten.
+
+<details>
+<summary>Terminal setup and diagnostics</summary>
 
 ```sh
 ./target/release/surf-oss --setup
@@ -47,52 +85,56 @@ Terminal equivalents and diagnostics:
 ./target/release/surf-oss --setup --game-dir "/Volumes/Games/Steam/steamapps/common/Counter-Strike Source"
 ```
 
-`--check` verifies CS:S archives, map hashes, zones and cached replays. Retry setup
-after a network failure; verified maps and imported replays are reused.
-Interrupted map downloads resume from the retained download cache. Existing conflicting maps
-are preserved and reported rather than overwritten.
-
+`--check` verifies CS:S archives, map hashes, zones and cached replays.
 Use `--windowed`, `--size 1280x800`, or a short map name (`surf-oss summit`).
 `--help` lists all launch options.
 
-## Maps and records
+</details>
 
-**andromeda · aquaflow · boreas · botanica · cannonball · cement · cyberwave ·
-demise · fornax · frost · lovetunnel · lux · overgrowth · summit · tendies · void**
+## Maps, leaderboards and replays
 
-Maps come from [fastdl.me](https://main.fastdl.me); their exact builds are pinned
-in [the catalog](assets/maps/manifest.json) and verified with SHA-256. Zones ship
-with the app. Stock assets are read from your own CS:S installation.
+### Maps
 
-**Leaderboard** combines cached [KSF](https://ksf.surf) records with your local
-history. Select a row marked **replay** to watch it. Records without a replay
-still appear. **Set up / refresh content** updates the cache; an outage does not
-prevent offline play. If live records are unavailable, a dated metadata snapshot
-is used and labeled as such. Replay binaries still download directly from KSF.
-surf-oss runs are not submitted to KSF, and its movement
-defaults differ from KSF server rules.
+Setup downloads these **16 community maps**:
 
-Official finishes save your time and replay automatically. Practice runs do not
-replace PBs. Choose a racing ghost in Settings → Ghost.
+- andromeda · aquaflow · boreas · botanica
+- cannonball · cement · cyberwave · demise
+- fornax · frost · lovetunnel · lux
+- overgrowth · summit · tendies · void
 
-## Controls
+Maps come from [fastdl.me](https://main.fastdl.me). Exact builds are pinned in
+[the map catalog](assets/maps/manifest.json) and verified with SHA-256. Timer zones
+ship with surf-oss; stock assets come from your own CS:S installation.
 
-- WASD: move; mouse: look; Space: autobhop; Ctrl: duck.
-- R: restart run; T: restart stage; Esc: pause/menu.
-- P: practice mode, off at each launch.
-- Right mouse: save a location; left mouse: load it when practice is enabled.
-- Settings → Keybinds: change movement and practice keys.
+### Leaderboards
 
-Click the game to capture the mouse. Disable pointer acceleration in macOS Mouse
-settings for consistent feel. Procedural audio is adjustable in Settings.
+Setup downloads **KSF CS:S 66-tick top-10 records** for each supported map.
+The in-app **Leaderboard** shows these alongside your local run history.
+Choose **Set up / refresh content** whenever you want to update them.
+
+Records are cached for offline use. If live records aren't available, setup can
+use a dated snapshot, labeled in the leaderboard. surf-oss runs aren't submitted
+to [KSF](https://ksf.surf), and its movement defaults differ from KSF server rules.
+
+### Replays and ghosts
+
+Setup also downloads **available replays from those KSF records**. Not every
+record has one; select a leaderboard row marked **replay** to watch it.
+Replay files download directly from KSF and remain available offline.
+
+Your own official finishes save a time and replay automatically. Practice runs
+don't replace your PBs. To race against a ghost, choose one in **Settings → Ghost**.
 
 ## Your data
 
-Settings, times, locations and personal replays live in
+Settings, times, practice locations and personal replays live in
 `~/Library/Application Support/surf-oss/`. Downloads normally live in its
 `content/` folder; populated source checkouts keep their existing `assets/` tree.
 
-For a fresh setup **without touching your existing profile or checkout assets**,
+<details>
+<summary>Use a separate profile</summary>
+
+To try a fresh setup without touching your existing profile or checkout assets,
 choose a new directory and use it for both setup and play:
 
 ```sh
@@ -101,13 +143,12 @@ choose a new directory and use it for both setup and play:
 ./target/release/surf-oss --data-dir /tmp/surf-oss-fresh-profile
 ```
 
-## Sharing and development
+This example uses a temporary directory; choose a permanent location for a
+profile you want to keep.
 
-[Development notes](DEVELOPMENT.md) cover tests, Mac app packaging and upgrades.
-A packaged app needs no Rust or Python, but Apple signing/notarization remains a
-release step. Installing CS:S through a **fresh Steam installation on current
-macOS** has not yet been verified; setup has been tested against existing CS:S
-content in a separate fresh profile.
+</details>
+
+## License
 
 Code: [MIT](LICENSE). Bundled fonts: [SIL Open Font License](assets/fonts/licenses/).
 No Valve assets, downloaded maps, third-party replay files or personal data are
