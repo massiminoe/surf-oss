@@ -3,6 +3,10 @@
 Standalone, single-player surf for Apple Silicon Macs: 16 community maps,
 practice locations, timers, personal bests, a KSF leaderboard, ghosts and replays.
 
+[![Watch surf-oss on YouTube](https://img.youtube.com/vi/ypqafhi-wXk/hqdefault.jpg)](https://www.youtube.com/watch?v=ypqafhi-wXk)
+
+**[Watch surf-oss in action →](https://www.youtube.com/watch?v=ypqafhi-wXk)**
+
 **Install Counter-Strike: Source through Steam, then open surf-oss. It finds your
 CS:S content and downloads the maps, records and available replays. After setup,
 you can play offline. Neither Steam nor CS:S needs to be running.**
