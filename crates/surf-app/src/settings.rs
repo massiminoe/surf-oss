@@ -67,16 +67,13 @@ impl Default for Settings {
             mouse_sens: DEFAULT_SENS,
             show_keys: false,
             vsync: false,
-            // Neutral: the world shader now reproduces Source's own
-            // `albedo * L`, so 1.0 / 0.0 *is* CS:S. (2026-09-06 — Max's 0.97 /
-            // 0.5 were tuned against the old 4×-overbright, lift-to-white
-            // pipeline and mean something else here.)
+            // Neutral exposure with Max's preferred shadow boost (2026-09-20).
             brightness: 1.0,
-            shadow_lift: 0.0,
+            shadow_lift: 0.4,
             ghost: GHOST_PB.into(),
             ghost_trail: true,
             audio: true,
-            audio_volume: 0.72,
+            audio_volume: 0.36,
             audio_core: 0.43,
             audio_air: 0.53,
             audio_sub: 0.58,
@@ -256,12 +253,12 @@ mod tests {
         assert!((d.mouse_sens - 2.57).abs() < 1e-5);
         assert!(!d.vsync);
         assert!((d.brightness - 1.0).abs() < 1e-5);
-        assert!((d.shadow_lift - 0.0).abs() < 1e-5);
+        assert!((d.shadow_lift - 0.4).abs() < 1e-5);
         assert_eq!(d.ghost, GHOST_PB);
         assert!(d.ghost_trail);
         assert!(!d.show_keys);
         assert!(d.audio);
-        assert!((d.audio_volume - 0.72).abs() < 1e-5);
+        assert!((d.audio_volume - 0.36).abs() < 1e-5);
         assert!((d.audio_core - 0.43).abs() < 1e-5);
         assert!((d.audio_air - 0.53).abs() < 1e-5);
         assert!((d.audio_sub - 0.58).abs() < 1e-5);
